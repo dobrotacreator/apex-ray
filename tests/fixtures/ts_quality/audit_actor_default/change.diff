@@ -1,0 +1,16 @@
+diff --git a/packages/audit-core/src/audit-event.ts b/packages/audit-core/src/audit-event.ts
+index 1111111..2222222 100644
+--- a/packages/audit-core/src/audit-event.ts
++++ b/packages/audit-core/src/audit-event.ts
+@@ -121,10 +121,10 @@ export function buildAuditEvent<
+   return {
+     entityType: parsed.entityType,
+     entityId: parsed.entityId,
+     action: parsed.action,
+     actorId: parsed.actorId ?? null,
+-    actorType: parsed.actorType ?? ActorType.SYSTEM,
++    actorType: parsed.actorType ?? ActorType.OPERATOR,
+     previousState: parsed.previousState ?? null,
+     newState: parsed.newState ?? null,
+     metadata: parsed.metadata ?? {},
+     idempotencyKey: parsed.idempotencyKey,

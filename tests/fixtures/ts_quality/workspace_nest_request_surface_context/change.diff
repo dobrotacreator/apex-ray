@@ -1,0 +1,11 @@
+diff --git a/src/admin-webhook.controller.ts b/src/admin-webhook.controller.ts
+index 1111111..2222222 100644
+--- a/src/admin-webhook.controller.ts
++++ b/src/admin-webhook.controller.ts
+@@ -19,6 +19,6 @@ export class AdminWebhookController {
+     @Body(new ValidationPipe()) body: RetriggerBodyDto,
+   ): string {
+-    return `${body.actorId}:${id}:${body.reason}`;
++    return id;
+   }
+ }

@@ -1,0 +1,9 @@
+{
+  "name": "@acme/audit",
+  "exports": {
+    "./audit-event": {
+      "types": "./src/events/audit-event.ts",
+      "default": "./dist/events/audit-event.js"
+    }
+  }
+}

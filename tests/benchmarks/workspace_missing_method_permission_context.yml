@@ -1,0 +1,23 @@
+name: workspace missing method permission context
+repo: ../fixtures/ts_quality/workspace_missing_method_permission/repo
+diff: ../fixtures/ts_quality/workspace_missing_method_permission/change.diff
+llm: false
+expected: []
+expected_context:
+  - pack_file: src/admin-finance.controller.ts
+    pack_id_contains: exportCsv
+    metadata_file: src/admin-finance.controller.ts
+    metadata_kind: metadata
+    metadata_text_contains: "@UseGuards(PermissionGuard)"
+  - pack_file: src/admin-finance.controller.ts
+    pack_id_contains: exportCsv
+    contract_file: src/permission.guard.ts
+    contract_kind: contract
+    contract_text_contains: PermissionGuard
+    contract_snippet_contains: "if (!requiredPermissions) return true"
+  - pack_file: src/admin-finance.controller.ts
+    pack_id_contains: exportCsv
+    contract_file: src/permissions.ts
+    contract_kind: contract
+    contract_text_contains: Permission
+    contract_snippet_contains: FINANCE_REPORT_EXPORT

@@ -1,0 +1,20 @@
+name: workspace class level permission inheritance context
+repo: ../fixtures/ts_quality/workspace_class_level_permission_inheritance/repo
+diff: ../fixtures/ts_quality/workspace_class_level_permission_inheritance/change.diff
+llm: false
+expected: []
+expected_context:
+  - pack_file: src/admin-quote-reconcile.controller.ts
+    pack_id_contains: AdminQuoteReconcileController
+    metadata_file: src/admin-quote-reconcile.controller.ts
+    metadata_kind: metadata
+    metadata_text_contains: "@Post(':id/retry')"
+  - pack_file: src/admin-quote-reconcile.controller.ts
+    pack_id_contains: AdminQuoteReconcileController
+    contract_file: src/permission.guard.ts
+    contract_kind: contract
+    contract_snippet_contains: "if (!requiredPermissions) return true"
+  - pack_file: src/admin-quote-reconcile.controller.ts
+    pack_id_contains: AdminQuoteReconcileController
+    related_test: src/admin-quote-reconcile.controller.test.ts
+    related_test_snippet_contains: "keeps the reconcile manage permission inherited by every admin route"

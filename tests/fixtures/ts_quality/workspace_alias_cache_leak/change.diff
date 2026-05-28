@@ -1,0 +1,9 @@
+diff --git a/apps/api/src/settings.ts b/apps/api/src/settings.ts
+index 1111111..2222222 100644
+--- a/apps/api/src/settings.ts
++++ b/apps/api/src/settings.ts
+@@ -11,3 +11,3 @@ const settingsCache = new Map<string, Promise<Settings>>();
+ export function workspaceSettingsCacheKey(tenantId: string, userId: string): string {
+-  return `${tenantId}:${userId}`;
++  return userId;
+ }

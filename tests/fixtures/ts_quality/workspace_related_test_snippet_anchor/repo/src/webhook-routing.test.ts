@@ -1,0 +1,36 @@
+import { expect, it } from 'vitest';
+import { targetsFor } from './webhook-routing.js';
+const fixture0 = 'event-0';
+const fixture1 = 'event-1';
+const fixture2 = 'event-2';
+const fixture3 = 'event-3';
+const fixture4 = 'event-4';
+const fixture5 = 'event-5';
+const fixture6 = 'event-6';
+const fixture7 = 'event-7';
+const fixture8 = 'event-8';
+const fixture9 = 'event-9';
+const fixture10 = 'event-10';
+const fixture11 = 'event-11';
+const fixture12 = 'event-12';
+const fixture13 = 'event-13';
+const fixture14 = 'event-14';
+const fixture15 = 'event-15';
+const fixture16 = 'event-16';
+const fixture17 = 'event-17';
+const fixture18 = 'event-18';
+const fixture19 = 'event-19';
+const fixture20 = 'event-20';
+const fixture21 = 'event-21';
+const fixture22 = 'event-22';
+const fixture23 = 'event-23';
+const fixture24 = 'event-24';
+const fixture25 = 'event-25';
+const fixture26 = 'event-26';
+const fixture27 = 'event-27';
+const fixture28 = 'event-28';
+const fixture29 = 'event-29';
+
+it('fans out applicantReviewed to KYC and PEP', () => {
+  expect(targetsFor('applicantReviewed')).toEqual(['identity-kyc', 'identity-pep']);
+});

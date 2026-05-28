@@ -1,0 +1,33 @@
+diff --git a/src/auth.py b/src/auth.py
+index 1111111..2222222 100644
+--- a/src/auth.py
++++ b/src/auth.py
+@@ -1,5 +1,8 @@
+ def can_access(user, resource):
+-    return user.id == resource.owner_id
++    if user.role == "admin":
++        return True
++    return user.id == resource.owner_id
+ 
+ def load_resource(path):
+-    return open(path).read()
++    return open(path).read()
+diff --git a/docs/usage.md b/docs/usage.md
+new file mode 100644
+index 0000000..3333333
+--- /dev/null
++++ b/docs/usage.md
+@@ -0,0 +1,2 @@
++# Usage
++Run the tool locally.
+diff --git a/src/old_name.py b/src/new_name.py
+similarity index 91%
+rename from src/old_name.py
+rename to src/new_name.py
+index 4444444..5555555 100644
+--- a/src/old_name.py
++++ b/src/new_name.py
+@@ -1,2 +1,2 @@
+ def unchanged():
+-    return "old"
++    return "new"

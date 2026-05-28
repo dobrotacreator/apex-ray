@@ -1,0 +1,20 @@
+name: workspace flow handler metadata mismatch regression codex
+repo: ../../fixtures/ts_quality/workspace_flow_handler_metadata_mismatch/repo
+diff: ../../fixtures/ts_quality/workspace_flow_handler_metadata_mismatch/change.diff
+llm: true
+provider: codex_cli
+verify: true
+expected:
+  - file: src/handlers/va-to-va-agent.handler.ts
+    title_contains: flow type
+expected_context:
+  - pack_file: src/handlers/va-to-va-agent.handler.ts
+    pack_id_contains: VaToVaAgentHandler
+    reference_file: src/flow-handler.providers.ts
+    reference_kind: read
+    reference_text_contains: VaToVaAgentHandler
+  - pack_file: src/handlers/va-to-va-agent.handler.ts
+    pack_id_contains: VaToVaAgentHandler
+    reference_file: src/flow-handler.registry.ts
+    reference_kind: read
+    reference_text_contains: "@Inject(FLOW_HANDLER_PORT)"

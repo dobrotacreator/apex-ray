@@ -1,0 +1,10 @@
+diff --git a/packages/settings/src/internal.ts b/packages/settings/src/internal.ts
+index 1111111..2222222 100644
+--- a/packages/settings/src/internal.ts
++++ b/packages/settings/src/internal.ts
+@@ -9,4 +9,4 @@
+ const settingsCache = new Map<string, Promise<Settings>>();
+ export function buildTenantSettingsKey(tenantId: string, userId: string): string {
+-  return `${tenantId}:${userId}`;
++  return userId;
+ }

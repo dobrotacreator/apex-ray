@@ -1,0 +1,102 @@
+[project]
+name = "apex-ray"
+version = "0.1.0"
+description = "Local CLI-first AI code review for TypeScript and JavaScript projects."
+readme = "README.md"
+requires-python = ">=3.14"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [
+    { name = "Apex Ray contributors" },
+]
+keywords = ["ai", "code-review", "typescript", "javascript", "llm", "cli"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development :: Quality Assurance",
+    "Topic :: Software Development :: Testing",
+]
+dependencies = [
+    "pydantic>=2.12",
+    "pyyaml>=6.0",
+    "typer>=0.16",
+]
+
+[project.urls]
+Homepage = "https://github.com/dobrotacreator/apex-ray"
+Repository = "https://github.com/dobrotacreator/apex-ray"
+Issues = "https://github.com/dobrotacreator/apex-ray/issues"
+Changelog = "https://github.com/dobrotacreator/apex-ray/blob/main/CHANGELOG.md"
+
+[project.scripts]
+apex-ray = "apex_ray.cli:app"
+
+[dependency-groups]
+dev = [
+    "pyright>=1.1",
+    "pytest>=8.4",
+    "ruff>=0.14",
+    "twine>=6.2",
+]
+
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel.force-include]
+"analyzers/typescript/dist/analyze.js" = "apex_ray/_bundled/typescript/analyze.js"
+"analyzers/typescript/package.json" = "apex_ray/_bundled/typescript/package.json"
+"analyzers/typescript/package-lock.json" = "apex_ray/_bundled/typescript/package-lock.json"
+"analyzers/typescript/node_modules/typescript" = "apex_ray/_bundled/typescript/node_modules/typescript"
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/src",
+    "/tests",
+    "/docs",
+    "/analyzers/typescript/src",
+    "/analyzers/typescript/tsconfig.json",
+    "/analyzers/typescript/package.json",
+    "/analyzers/typescript/package-lock.json",
+    "/README.md",
+    "/CHANGELOG.md",
+    "/CONTRIBUTING.md",
+    "/LICENSE",
+    "/pyproject.toml",
+]
+artifacts = [
+    "/analyzers/typescript/dist/analyze.js",
+    "/analyzers/typescript/node_modules/typescript",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py314"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",
+    "F",
+    "I",
+    "UP",
+    "B",
+    "RUF",
+]
+ignore = [
+    "E501",
+]
+
+[tool.pyright]
+include = ["src"]
+pythonVersion = "3.14"
+typeCheckingMode = "standard"
+reportMissingTypeStubs = false

@@ -1,0 +1,12 @@
+name: workspace callee contract context
+repo: ../fixtures/ts_quality/workspace_callee_contract/repo
+diff: ../fixtures/ts_quality/workspace_callee_contract/change.diff
+llm: false
+expected: []
+expected_context:
+  - pack_file: src/controller.ts
+    pack_id_contains: handleWebhook
+    callee_file: src/signature.ts
+    callee_kind: callee
+    callee_text_contains: verifyWebhookSignature
+    callee_snippet_contains: "verifyWebhookSignature(rawBody: string, signature: string)"

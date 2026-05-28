@@ -1,0 +1,16 @@
+name: workspace transfer step screen gate context
+repo: ../fixtures/ts_quality/workspace_transfer_step_screen_gate/repo
+diff: ../fixtures/ts_quality/workspace_transfer_step_screen_gate/change.diff
+llm: false
+expected: []
+expected_context:
+  - pack_file: src/step-type.ts
+    pack_id_contains: INTERNAL_BANK_TRANSFER
+    reference_file: src/plan-invariants.ts
+    reference_kind: read
+    reference_text_contains: "TRANSFER_STEP_TYPES"
+    reference_snippet_contains: "SCREEN_GATE_STEP_TYPES"
+  - pack_file: src/step-type.ts
+    pack_id_contains: INTERNAL_BANK_TRANSFER
+    related_test: src/plan-invariants.test.ts
+    related_test_snippet_contains: "applies the rule to INTERNAL_BANK_TRANSFER credits too"

@@ -1,0 +1,18 @@
+name: workspace step executor duplicate overwrite context
+repo: ../fixtures/ts_quality/workspace_step_executor_duplicate_overwrite/repo
+diff: ../fixtures/ts_quality/workspace_step_executor_duplicate_overwrite/change.diff
+llm: false
+expected: []
+expected_context:
+  - pack_file: src/step-executor.registry.ts
+    reference_file: src/settlement.module.ts
+    reference_kind: read
+    reference_text_contains: "@Module({"
+    reference_snippet_contains: "provide: STEP_EXECUTOR_PORT"
+  - pack_file: src/step-executor.registry.ts
+    reference_file: src/settlement.module.ts
+    reference_kind: read
+    reference_text_contains: "StepExecutorRegistry"
+  - pack_file: src/step-executor.registry.ts
+    related_test: src/step-executor.registry.test.ts
+    related_test_snippet_contains: "rejects duplicate registration for same step type"

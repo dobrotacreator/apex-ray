@@ -1,0 +1,23 @@
+name: workspace probe reverse noop contract regression codex
+repo: ../../fixtures/ts_quality/workspace_probe_reverse_noop_contract/repo
+diff: ../../fixtures/ts_quality/workspace_probe_reverse_noop_contract/change.diff
+llm: true
+provider: codex_cli
+verify: true
+expected:
+  - file: src/layer-2-screening.executor.ts
+    title_contains: screening probe
+expected_context:
+  - pack_file: src/layer-2-screening.executor.ts
+    pack_id_contains: probeReverse
+    contract_file: src/step-executor.port.ts
+    contract_kind: contract
+    contract_text_contains: "probeReverse(args"
+  - pack_file: src/layer-2-screening.executor.ts
+    pack_id_contains: probeReverse
+    reference_file: src/plan-driven-settlement-orchestrator.ts
+    reference_kind: call
+    reference_text_contains: "executor.probeReverse(args)"
+  - pack_file: src/layer-2-screening.executor.ts
+    pack_id_contains: probeReverse
+    related_test: src/layer-2-screening.executor.test.ts

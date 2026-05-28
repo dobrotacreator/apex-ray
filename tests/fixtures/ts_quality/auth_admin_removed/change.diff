@@ -1,0 +1,16 @@
+diff --git a/src/auth.ts b/src/auth.ts
+index 1111111..2222222 100644
+--- a/src/auth.ts
++++ b/src/auth.ts
+@@ -14,11 +14,7 @@ export interface Project {
+ export function canDeleteProject(user: User, project: Project): boolean {
+   if (user.disabled) {
+     return false;
+   }
+-
+-  if (user.role === "admin") {
+-    return true;
+-  }
+ 
+   return project.ownerId === user.id;
+ }

@@ -1,0 +1,11 @@
+diff --git a/src/quote-controller.ts b/src/quote-controller.ts
+index 1111111..2222222 100644
+--- a/src/quote-controller.ts
++++ b/src/quote-controller.ts
+@@ -1,5 +1,5 @@
+ import { AddQuoteSchema } from './quote-schemas.js';
+ export function addQuote(body: unknown): { reason: unknown; fileCount: number } {
+   const parsed = AddQuoteSchema.parse(body);
+-  return { reason: parsed.reason, fileCount: parsed.fileIds.length };
++  return { reason: parsed.reason, fileCount: 0 };
+ }

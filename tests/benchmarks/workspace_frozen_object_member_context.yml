@@ -1,0 +1,12 @@
+name: workspace frozen object member context
+repo: ../fixtures/ts_quality/workspace_frozen_object_member_context/repo
+diff: ../fixtures/ts_quality/workspace_frozen_object_member_context/change.diff
+llm: false
+expected: []
+expected_context:
+  - pack_file: src/webhook-routing.ts
+    pack_id_contains: "identity-kyc"
+    reference_file: src/webhook-routing.service.ts
+    reference_kind: read
+    reference_text_contains: "PROXY_TARGET_ENV['identity-kyc']"
+    reference_snippet_contains: "PROXY_TARGET_ENV['identity-kyc']"

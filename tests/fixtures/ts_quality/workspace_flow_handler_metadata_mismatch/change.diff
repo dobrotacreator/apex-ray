@@ -1,0 +1,10 @@
+diff --git a/src/handlers/va-to-va-agent.handler.ts b/src/handlers/va-to-va-agent.handler.ts
+index 1111111..2222222 100644
+--- a/src/handlers/va-to-va-agent.handler.ts
++++ b/src/handlers/va-to-va-agent.handler.ts
+@@ -4,5 +4,5 @@ import type { FlowHandler } from '../flow-handler.port.js';
+ export class VaToVaAgentHandler implements FlowHandler {
+-  readonly flowType = FlowType.VA_TO_VA;
++  readonly flowType = FlowType.VA_TO_FIAT;
+   readonly executionMode = ExecutionMode.AGENT;
+   readonly version: HandlerVersion = handlerVersion('1.0.0');

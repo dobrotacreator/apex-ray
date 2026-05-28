@@ -1,0 +1,4 @@
+{
+  "name": "@acme/settlement",
+  "types": "./src/index.ts"
+}

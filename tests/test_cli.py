@@ -1,0 +1,269 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from typer.testing import CliRunner
+
+from apex_ray.cli import app
+from apex_ray.llm_cache import REVIEW_PROMPT_VERSION
+from apex_ray.models import (
+    DiffStats,
+    DiffSummary,
+    Finding,
+    FindingConfidence,
+    FindingSeverity,
+    ProjectProfile,
+    ReviewConfig,
+    TargetMode,
+)
+from apex_ray.report import build_report
+
+runner = CliRunner()
+FIXTURE_DIR = Path(__file__).parent / "fixtures"
+
+
+def test_version_option() -> None:
+    result = runner.invoke(app, ["--version"], catch_exceptions=False)
+
+    assert result.exit_code == 0
+    assert "0.1.0" in result.stdout
+
+
+def test_init_creates_config(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["init"], catch_exceptions=False)
+
+    assert result.exit_code == 0
+    assert (tmp_path / ".apex-ray" / "config.yml").exists()
+    assert (tmp_path / ".apex-ray" / ".gitignore").exists()
+    assert (tmp_path / "lefthook.yml").exists()
+    assert (tmp_path / "AGENTS.md").exists()
+    assert (tmp_path / ".claude" / "CLAUDE.md").exists()
+    assert "apex-ray-review" in (tmp_path / "lefthook.yml").read_text(encoding="utf-8")
+
+
+def test_init_can_skip_hooks_and_agent_files(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["init", "--hooks", "none", "--agent-files", "none"], catch_exceptions=False)
+
+    assert result.exit_code == 0
+    assert (tmp_path / ".apex-ray" / "config.yml").exists()
+    assert not (tmp_path / "lefthook.yml").exists()
+    assert not (tmp_path / "AGENTS.md").exists()
+
+
+def test_doctor_reports_local_config(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".apex-ray").mkdir()
+    (tmp_path / ".apex-ray" / "config.yml").write_text("review:\n", encoding="utf-8")
+    (tmp_path / ".apex-ray" / "config.local.yml").write_text("review:\n  llm:\n    jobs: 2\n", encoding="utf-8")
+
+    result = runner.invoke(app, ["doctor"], catch_exceptions=False)
+
+    assert result.exit_code == 0
+    assert f"- Local config: {tmp_path / '.apex-ray' / 'config.local.yml'}" in result.stdout
+
+
+def test_memory_lint_loads_repo_memory(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    memory_dir = tmp_path / ".apex-ray" / "memory"
+    memory_dir.mkdir(parents=True)
+    (memory_dir / "cart-total.md").write_text(
+        "---\nid: cart-total\nkind: invariant\n---\nCart totals must include quantity.\n",
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(app, ["memory", "lint"], catch_exceptions=False)
+
+    assert result.exit_code == 0
+    assert "- Loaded cards: 1" in result.stdout
+    assert "cart-total" in result.stdout
+
+
+def test_memory_suggest_writes_cards_from_report(tmp_path: Path) -> None:
+    report = build_report(
+        ProjectProfile(root="/repo", is_git_repo=True),
+        ReviewConfig(),
+        DiffSummary(target_mode=TargetMode.PATCH, stats=DiffStats(files_changed=1)),
+        findings=[
+            Finding(
+                title="Cart total ignores quantity",
+                severity=FindingSeverity.HIGH,
+                confidence=FindingConfidence.HIGH,
+                file="src/cart.ts",
+                line=6,
+                failure_mode="The cart total undercharges multi-quantity items.",
+                evidence="The diff returns item.price without item.quantity.",
+                suggested_fix="Restore price * quantity.",
+                suggested_test="Add a multi-quantity cart total case.",
+            )
+        ],
+    )
+    report_path = tmp_path / "review.json"
+    output = tmp_path / "memory-suggestions.md"
+    report_path.write_text(report.model_dump_json(indent=2), encoding="utf-8")
+
+    result = runner.invoke(
+        app,
+        ["memory", "suggest", "--from-report", str(report_path), "--output", str(output)],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert "Wrote" in result.stdout
+    text = output.read_text(encoding="utf-8")
+    assert "id: cart-total-ignores-quantity" in text
+    assert "The cart total undercharges" in text
+
+
+def test_review_patch_writes_markdown_and_json(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    patch = tmp_path / "sample.diff"
+    patch.write_text((FIXTURE_DIR / "sample.diff").read_text(encoding="utf-8"), encoding="utf-8")
+    output = tmp_path / "review.md"
+    json_output = tmp_path / "review.json"
+    html_output = tmp_path / "review.html"
+
+    result = runner.invoke(
+        app,
+        [
+            "review",
+            "--diff",
+            str(patch),
+            "--output",
+            str(output),
+            "--json",
+            str(json_output),
+            "--html",
+            str(html_output),
+        ],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert "Wrote" in result.stdout
+    assert "# Apex Ray Review" in output.read_text(encoding="utf-8")
+    assert '"files_changed": 3' in json_output.read_text(encoding="utf-8")
+    assert "<h1>Apex Ray Review</h1>" in html_output.read_text(encoding="utf-8")
+
+
+def test_review_patch_reports_explicit_config_path(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    patch = tmp_path / "sample.diff"
+    patch.write_text((FIXTURE_DIR / "sample.diff").read_text(encoding="utf-8"), encoding="utf-8")
+    config = tmp_path / "replay-config.yml"
+    config.write_text("review:\n  ignore: []\n", encoding="utf-8")
+    output = tmp_path / "review.md"
+    json_output = tmp_path / "review.json"
+
+    result = runner.invoke(
+        app,
+        [
+            "review",
+            "--diff",
+            str(patch),
+            "--config",
+            str(config),
+            "--output",
+            str(output),
+            "--json",
+            str(json_output),
+        ],
+        catch_exceptions=False,
+    )
+
+    data = json.loads(json_output.read_text(encoding="utf-8"))
+    assert result.exit_code == 0
+    assert data["project"]["config_path"] == str(config)
+    assert f"- Config: `{config}`" in output.read_text(encoding="utf-8")
+
+
+def test_review_rejects_base_with_diff(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    patch = tmp_path / "sample.diff"
+    patch.write_text((FIXTURE_DIR / "sample.diff").read_text(encoding="utf-8"), encoding="utf-8")
+
+    result = runner.invoke(app, ["review", "--base", "main", "--diff", str(patch)])
+
+    assert result.exit_code != 0
+    assert "Use only one review target" in result.output
+
+
+def test_review_rejects_same_markdown_and_json_output(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    patch = tmp_path / "sample.diff"
+    patch.write_text((FIXTURE_DIR / "sample.diff").read_text(encoding="utf-8"), encoding="utf-8")
+    output = tmp_path / "review.out"
+
+    result = runner.invoke(app, ["review", "--diff", str(patch), "--output", str(output), "--json", str(output)])
+
+    assert result.exit_code != 0
+    assert "output paths must be different" in result.output
+
+
+def test_review_rejects_same_markdown_and_html_output(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    patch = tmp_path / "sample.diff"
+    patch.write_text((FIXTURE_DIR / "sample.diff").read_text(encoding="utf-8"), encoding="utf-8")
+    output = tmp_path / "review.out"
+
+    result = runner.invoke(
+        app,
+        [
+            "review",
+            "--diff",
+            str(patch),
+            "--output",
+            str(output),
+            "--json",
+            str(tmp_path / "review.json"),
+            "--html",
+            str(output),
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "Markdown and HTML output paths must be different" in result.output
+
+
+def test_review_patch_can_run_fake_llm(tmp_path: Path, monkeypatch, built_ts_analyzer: None) -> None:
+    monkeypatch.chdir(tmp_path)
+    fixture = FIXTURE_DIR / "ts_project"
+    for source in fixture.rglob("*"):
+        if source.is_file():
+            relative_source = source.relative_to(fixture)
+            if ".apex-ray" in relative_source.parts:
+                continue
+            target = tmp_path / relative_source
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+
+    config = tmp_path / ".apex-ray" / "config.yml"
+    config.parent.mkdir()
+    config.write_text(
+        """
+review:
+  llm:
+    enabled: true
+    provider: fake
+""",
+        encoding="utf-8",
+    )
+    output = tmp_path / "review.md"
+    json_output = tmp_path / "review.json"
+
+    result = runner.invoke(
+        app,
+        ["review", "--diff", str(tmp_path / "cart.diff"), "--output", str(output), "--json", str(json_output)],
+        catch_exceptions=False,
+    )
+
+    data = json.loads(json_output.read_text(encoding="utf-8"))
+    assert result.exit_code == 0
+    assert data["context_packs"]
+    assert data["llm_runs"][0]["provider"] == "fake"
+    assert data["llm_runs"][0]["prompt_version"] == REVIEW_PROMPT_VERSION
+    assert "No LLM findings reported." in output.read_text(encoding="utf-8")

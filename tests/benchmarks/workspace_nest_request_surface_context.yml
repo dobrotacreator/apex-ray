@@ -1,0 +1,24 @@
+name: workspace nest request surface context
+repo: ../fixtures/ts_quality/workspace_nest_request_surface_context/repo
+diff: ../fixtures/ts_quality/workspace_nest_request_surface_context/change.diff
+llm: false
+expected: []
+expected_context:
+  - pack_file: src/admin-webhook.controller.ts
+    pack_id_contains: retrigger
+    metadata_file: src/admin-webhook.controller.ts
+    metadata_kind: metadata
+    metadata_text_contains: "@Param('id') id: string,"
+    metadata_snippet_contains: "@Param('id') id: string,"
+  - pack_file: src/admin-webhook.controller.ts
+    pack_id_contains: retrigger
+    metadata_file: src/admin-webhook.controller.ts
+    metadata_kind: metadata
+    metadata_text_contains: "@Body(new ValidationPipe()) body: RetriggerBodyDto,"
+    metadata_snippet_contains: "@Body(new ValidationPipe()) body: RetriggerBodyDto,"
+  - pack_file: src/admin-webhook.controller.ts
+    pack_id_contains: retrigger
+    contract_file: src/dto.ts
+    contract_kind: contract
+    contract_text_contains: RetriggerBodyDto
+    contract_snippet_contains: "actorId!: string"

@@ -1,0 +1,23 @@
+name: workspace decorator metadata key consumer context
+repo: ../fixtures/ts_quality/workspace_decorator_metadata_key_consumer_context/repo
+diff: ../fixtures/ts_quality/workspace_decorator_metadata_key_consumer_context/change.diff
+llm: false
+expected: []
+expected_context:
+  - pack_file: src/admin-webhook.controller.ts
+    pack_id_contains: retrigger
+    metadata_file: src/admin-webhook.controller.ts
+    metadata_kind: metadata
+    metadata_text_contains: "@RequirePermission(Permission.WEBHOOK_RETRIGGER)"
+  - pack_file: src/admin-webhook.controller.ts
+    pack_id_contains: retrigger
+    contract_file: src/require-permission.decorator.ts
+    contract_kind: contract
+    contract_text_contains: RequirePermission
+    contract_snippet_contains: REQUIRED_PERMISSION_KEY
+  - pack_file: src/admin-webhook.controller.ts
+    pack_id_contains: retrigger
+    contract_file: src/permission.guard.ts
+    contract_kind: contract
+    contract_text_contains: PermissionGuard
+    contract_snippet_contains: "getAllAndOverride<Permission>(REQUIRED_PERMISSION_KEY"

@@ -1,0 +1,13 @@
+diff --git a/src/operator-management.service.ts b/src/operator-management.service.ts
+index 1111111..2222222 100644
+--- a/src/operator-management.service.ts
++++ b/src/operator-management.service.ts
+@@ -14,7 +14,7 @@ export interface OperatorRepositoryPort {
+ 
+ @Injectable()
+ export class OperatorManagementService {
+-  constructor(@Inject(OPERATOR_REPOSITORY_PORT) private readonly operators: OperatorRepositoryPort) {}
++  constructor(@Inject(AUDIT_REPOSITORY_PORT) private readonly operators: OperatorRepositoryPort) {}
+ 
+   async findOperator(id: string): Promise<string | null> {
+     return this.operators.findById(id);

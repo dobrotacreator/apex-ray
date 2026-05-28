@@ -1,0 +1,18 @@
+name: workspace transaction post commit context
+repo: ../fixtures/ts_quality/workspace_transaction_post_commit_context/repo
+diff: ../fixtures/ts_quality/workspace_transaction_post_commit_context/change.diff
+llm: false
+expected: []
+expected_context:
+  - pack_file: src/reconcile.service.ts
+    pack_id_contains: ReconcileService
+    callee_file: src/unit-of-work.port.ts
+    callee_kind: callee
+    callee_text_contains: transaction
+    callee_snippet_contains: "side effects inside the callback can survive rollback"
+  - pack_file: src/reconcile.service.ts
+    pack_id_contains: ReconcileService
+    callee_file: src/queue.port.ts
+    callee_kind: callee
+    callee_text_contains: publish
+    callee_snippet_contains: "phantom side effect"

@@ -1,0 +1,9 @@
+name: routes payment webhook cors codex
+repo: ../../fixtures/ts_project
+diff: ../../fixtures/ts_project/routes.diff
+llm: true
+provider: codex_cli
+verify: true
+expected:
+  - file: src/routes.ts
+    title_contains: webhook

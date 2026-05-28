@@ -1,0 +1,24 @@
+name: workspace decorator argument contract context
+repo: ../fixtures/ts_quality/workspace_decorator_argument_contract_context/repo
+diff: ../fixtures/ts_quality/workspace_decorator_argument_contract_context/change.diff
+llm: false
+expected: []
+expected_context:
+  - pack_file: src/admin-webhook.controller.ts
+    pack_id_contains: retrigger
+    metadata_file: src/admin-webhook.controller.ts
+    metadata_kind: metadata
+    metadata_text_contains: "@RequirePermission(Permission.WEBHOOK_RETRIGGER)"
+    metadata_snippet_contains: "@RequirePermission(Permission.WEBHOOK_RETRIGGER)"
+  - pack_file: src/admin-webhook.controller.ts
+    pack_id_contains: retrigger
+    contract_file: src/permissions.ts
+    contract_kind: contract
+    contract_text_contains: Permission
+    contract_snippet_contains: "WEBHOOK_RETRIGGER = 'WEBHOOK_RETRIGGER'"
+  - pack_file: src/admin-webhook.controller.ts
+    pack_id_contains: retrigger
+    contract_file: src/guards.ts
+    contract_kind: contract
+    contract_text_contains: PermissionGuard
+    contract_snippet_contains: Requires a Permission metadata value

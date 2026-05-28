@@ -1,0 +1,7 @@
+name: checkout total local variable refactor codex
+repo: ../../fixtures/ts_project
+diff: ../../fixtures/ts_project/checkout_shape_refactor.diff
+llm: true
+provider: codex_cli
+verify: true
+expected: []

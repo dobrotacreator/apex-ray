@@ -1,0 +1,4 @@
+export const Permission = {
+  WEBHOOK_INBOX_VIEW: "WEBHOOK_INBOX_VIEW",
+  WEBHOOK_RETRIGGER: "WEBHOOK_RETRIGGER_DISABLED",
+} as const;

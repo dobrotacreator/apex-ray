@@ -1,0 +1,13 @@
+name: workspace commonjs export cache key regression codex
+repo: ../../fixtures/ts_quality/workspace_commonjs_export_cache_leak/repo
+diff: ../../fixtures/ts_quality/workspace_commonjs_export_cache_leak/change.diff
+llm: true
+provider: codex_cli
+verify: true
+expected:
+  - file: packages/settings/src/index.js
+    title_contains: tenant
+expected_context:
+  - pack_file: packages/settings/src/index.js
+    reference_file: apps/api/src/settings-service.js
+    reference_text_contains: tenantScopedSettingsKey

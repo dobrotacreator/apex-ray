@@ -1,0 +1,25 @@
+name: cart quantity regression fake
+repo: ../fixtures/ts_project
+diff: ../fixtures/ts_project/cart_bug.diff
+llm: true
+provider: fake
+verify: true
+fake_findings:
+  - title: Cart totals ignore item quantity
+    severity: high
+    confidence: high
+    file: src/cart.ts
+    line: 7
+    failure_mode: Carts with quantity greater than 1 are undercounted.
+    evidence: The diff removes multiplication by item.quantity.
+    suggested_fix: Restore multiplication by quantity.
+    suggested_test: Keep the existing quantity > 1 test.
+expected:
+  - file: src/cart.ts
+    title_contains: quantity
+    severity: high
+expected_context:
+  - pack_file: src/cart.ts
+    related_test: tests/cart.test.ts
+    reference_file: src/checkout.ts
+    reference_text_contains: calculateTotal

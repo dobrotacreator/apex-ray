@@ -1,0 +1,12 @@
+name: workspace repository port contract context
+repo: ../fixtures/ts_quality/workspace_repository_port_contract_context/repo
+diff: ../fixtures/ts_quality/workspace_repository_port_contract_context/change.diff
+llm: false
+expected: []
+expected_context:
+  - pack_file: src/reconcile.service.ts
+    pack_id_contains: ReconcileService
+    callee_file: src/settlement-step-repository.port.ts
+    callee_kind: callee
+    callee_text_contains: findAmbiguousReverseSteps
+    callee_snippet_contains: "Must return all ambiguous reverse steps"

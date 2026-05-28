@@ -1,0 +1,13 @@
+name: workspace removed enum member permission context
+repo: ../fixtures/ts_quality/workspace_removed_enum_member_permission/repo
+diff: ../fixtures/ts_quality/workspace_removed_enum_member_permission/change.diff
+llm: false
+expected: []
+expected_context:
+  - pack_file: packages/types/src/permission.ts
+    pack_id_contains: WEBHOOK_RETRIGGER
+    reference_file: apps/api/src/admin-webhook.controller.ts
+    reference_kind: read
+    reference_text_contains: Permission.WEBHOOK_RETRIGGER
+    related_test: apps/api/src/admin-webhook.controller.test.ts
+    related_test_snippet_contains: Permission.WEBHOOK_RETRIGGER

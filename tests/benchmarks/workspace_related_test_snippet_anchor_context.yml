@@ -1,0 +1,11 @@
+name: workspace related test snippet anchor context
+repo: ../fixtures/ts_quality/workspace_related_test_snippet_anchor/repo
+diff: ../fixtures/ts_quality/workspace_related_test_snippet_anchor/change.diff
+llm: false
+expected: []
+expected_context:
+  - pack_file: src/webhook-routing.ts
+    pack_id_contains: "IDENTITY_FANOUT_TARGETS:applicantReviewedd"
+    related_test: src/webhook-routing.test.ts
+    related_test_snippet_contains: "targetsFor('applicantReviewed')"
+    related_test_snippet_start_min: 20

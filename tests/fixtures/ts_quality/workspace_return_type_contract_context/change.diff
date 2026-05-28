@@ -1,0 +1,11 @@
+diff --git a/src/controller.ts b/src/controller.ts
+index 1111111..2222222 100644
+--- a/src/controller.ts
++++ b/src/controller.ts
+@@ -1,5 +1,5 @@
+ import type { ApiResponse, WebhookInboxDetail } from './response.js';
+
+ export function detail(id: string): ApiResponse<WebhookInboxDetail> {
+-  return { data: { id, providerHeaders: {} } };
++  return { data: { id, providerHeaders: null } };
+ }

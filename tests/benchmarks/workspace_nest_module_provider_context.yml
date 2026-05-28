@@ -1,0 +1,23 @@
+name: workspace nest module provider context
+repo: ../fixtures/ts_quality/workspace_nest_module_provider_context/repo
+diff: ../fixtures/ts_quality/workspace_nest_module_provider_context/change.diff
+llm: false
+expected: []
+expected_context:
+  - pack_file: src/handlers/va-to-va-agent.handler.ts
+    pack_id_contains: supports
+    reference_file: src/quote.module.ts
+    reference_kind: read
+    reference_text_contains: "@Module({"
+    reference_snippet_contains: "exports: [FlowHandlerRegistry]"
+  - pack_file: src/handlers/va-to-va-agent.handler.ts
+    pack_id_contains: supports
+    reference_file: src/flow-handler.registry.ts
+    reference_kind: read
+    reference_text_contains: "@Inject(FLOW_HANDLER_PORT)"
+  - pack_file: src/handlers/va-to-va-agent.handler.ts
+    pack_id_contains: supports
+    contract_file: src/flow-handler.port.ts
+    contract_kind: contract
+    contract_text_contains: "supports(route: string): boolean;"
+    contract_snippet_contains: "Must return true only for routes this handler exclusively owns"

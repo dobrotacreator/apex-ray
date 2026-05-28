@@ -1,0 +1,4 @@
+export interface Env {
+  COREBANK_IDENTITY_KYC_WEBHOOK_URL: string;
+  COREBANK_IDENTITY_TRAVEL_RULE_WEBHOOK_URL: string;
+}

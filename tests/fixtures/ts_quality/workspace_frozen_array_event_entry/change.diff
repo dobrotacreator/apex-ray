@@ -1,0 +1,10 @@
+diff --git a/src/webhook-routing.ts b/src/webhook-routing.ts
+index 1111111..2222222 100644
+--- a/src/webhook-routing.ts
++++ b/src/webhook-routing.ts
+@@ -1,4 +1,4 @@
+ const IDENTITY_TRAVEL_RULE_EVENTS = Object.freeze([
+   'applicantKytTxnApproved',
+-  'applicantKytTxnReviewed',
++  'applicantKytTxnReviewedd',
+ ] as const);

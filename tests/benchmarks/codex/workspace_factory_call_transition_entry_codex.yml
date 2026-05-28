@@ -1,0 +1,15 @@
+name: workspace factory call transition entry regression codex
+repo: ../../fixtures/ts_quality/workspace_factory_call_transition_entry_context/repo
+diff: ../../fixtures/ts_quality/workspace_factory_call_transition_entry_context/change.diff
+llm: true
+provider: codex_cli
+verify: true
+expected:
+  - file: src/order-status.ts
+    title_contains: cancel
+expected_context:
+  - pack_file: src/order-status.ts
+    pack_id_contains: "transitionOrder:OrderStatus.AWAITING_RECONCILIATION OrderEvent.OPS_RECONCILED_LANDED_CANCEL"
+    reference_file: src/reconcile.service.ts
+    reference_kind: call
+    reference_text_contains: "const result = transitionOrder("

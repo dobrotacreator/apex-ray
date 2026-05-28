@@ -1,0 +1,12 @@
+name: workspace type query schema contract context
+repo: ../fixtures/ts_quality/workspace_type_query_schema_contract_context/repo
+diff: ../fixtures/ts_quality/workspace_type_query_schema_contract_context/change.diff
+llm: false
+expected: []
+expected_context:
+  - pack_file: src/mapper.ts
+    pack_id_contains: extractPrimaryEmail
+    contract_file: src/schemas.ts
+    contract_kind: contract
+    contract_text_contains: CoreBankEmailSchema
+    contract_snippet_contains: "primary: 'boolean?'"

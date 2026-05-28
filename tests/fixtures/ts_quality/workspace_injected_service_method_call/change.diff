@@ -1,0 +1,11 @@
+diff --git a/packages/webhooks/src/index.ts b/packages/webhooks/src/index.ts
+index 1111111..2222222 100644
+--- a/packages/webhooks/src/index.ts
++++ b/packages/webhooks/src/index.ts
+@@ -1,5 +1,5 @@
+ export class AdminWebhookOpsService {
+   retrigger(id: string, actorId: string): string {
+-    return `${actorId}:${id}`;
++    return id;
+   }
+ }

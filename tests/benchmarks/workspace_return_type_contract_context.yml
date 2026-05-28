@@ -1,0 +1,12 @@
+name: workspace return type contract context
+repo: ../fixtures/ts_quality/workspace_return_type_contract_context/repo
+diff: ../fixtures/ts_quality/workspace_return_type_contract_context/change.diff
+llm: false
+expected: []
+expected_context:
+  - pack_file: src/controller.ts
+    pack_id_contains: detail
+    contract_file: src/response.ts
+    contract_kind: contract
+    contract_text_contains: WebhookInboxDetail
+    contract_snippet_contains: "providerHeaders: Record<string, string> | null"

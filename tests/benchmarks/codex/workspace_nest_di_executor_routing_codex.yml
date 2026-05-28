@@ -1,0 +1,22 @@
+name: workspace nest di executor routing regression codex
+repo: ../../fixtures/ts_quality/workspace_nest_di_executor_routing/repo
+diff: ../../fixtures/ts_quality/workspace_nest_di_executor_routing/change.diff
+llm: true
+provider: codex_cli
+verify: true
+expected:
+  - file: packages/settlement/src/index.ts
+    title_contains: executor
+    severity: high
+    confidence: high
+expected_context:
+  - pack_file: packages/settlement/src/index.ts
+    reference_file: apps/api/src/settlement.module.ts
+    reference_kind: read
+    reference_text_contains: "inject: [InternalBankTransferExecutor"
+  - pack_file: packages/settlement/src/index.ts
+    reference_file: apps/api/src/step-executor.registry.ts
+    reference_kind: read
+    reference_text_contains: "@Inject(STEP_EXECUTOR_PORT)"
+  - pack_file: packages/settlement/src/index.ts
+    related_test: apps/api/src/step-executor.registry.test.ts

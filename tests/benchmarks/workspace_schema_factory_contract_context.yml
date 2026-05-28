@@ -1,0 +1,12 @@
+name: workspace schema factory contract context
+repo: ../fixtures/ts_quality/audit_actor_default/repo
+diff: ../fixtures/ts_quality/audit_actor_default/change.diff
+llm: false
+expected: []
+expected_context:
+  - pack_file: packages/audit-core/src/audit-event.ts
+    pack_id_contains: buildAuditEvent
+    contract_file: packages/audit-core/src/audit-event.ts
+    contract_kind: contract
+    contract_text_contains: typedAuditEntrySchema
+    contract_snippet_contains: "actorType: auditActorTypeSchema.optional()"

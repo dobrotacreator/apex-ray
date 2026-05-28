@@ -1,0 +1,9 @@
+diff --git a/src/settlement-step-status.ts b/src/settlement-step-status.ts
+index 1111111..2222222 100644
+--- a/src/settlement-step-status.ts
++++ b/src/settlement-step-status.ts
+@@ -34,3 +34,3 @@ export const transitionSettlementStep = createStateMachine<StepStatus, StepEvent
+   [StepStatus.COMPLETED, StepEvent.COMPENSATE, StepStatus.REVERSING],
+-  [StepStatus.REVERSING, StepEvent.COMPENSATE_OK, StepStatus.REVERSED],
++  [StepStatus.COMPLETED, StepEvent.COMPENSATE_OK, StepStatus.REVERSED],
+   [StepStatus.REVERSING, StepEvent.COMPENSATE_FAILED, StepStatus.REVERSE_FAILED],

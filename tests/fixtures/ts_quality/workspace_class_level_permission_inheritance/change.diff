@@ -1,0 +1,14 @@
+diff --git a/src/admin-quote-reconcile.controller.ts b/src/admin-quote-reconcile.controller.ts
+index 1111111..2222222 100644
+--- a/src/admin-quote-reconcile.controller.ts
++++ b/src/admin-quote-reconcile.controller.ts
+@@ -23,9 +23,9 @@ function Post(_path: string): MethodDecorator {
+ @Controller('admin/quote/reconcile')
+ @UseGuards(PermissionGuard)
+-@RequirePermission(Permission.QUOTE_RECONCILE_MANAGE)
+ export class AdminQuoteReconcileController {
+   @Get()
++  @RequirePermission(Permission.QUOTE_RECONCILE_MANAGE)
+   listCandidates(): string {
+     return 'candidates';
+   }

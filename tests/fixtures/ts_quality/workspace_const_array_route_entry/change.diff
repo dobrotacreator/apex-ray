@@ -1,0 +1,13 @@
+diff --git a/src/bank-routes.ts b/src/bank-routes.ts
+index 1111111..2222222 100644
+--- a/src/bank-routes.ts
++++ b/src/bank-routes.ts
+@@ -10,7 +10,7 @@ const BANK_ROUTES: BankRouteDefinition[] = [
+   {
+     method: 'GET',
+     template: '/v2/accounts/{accountIdentifier}',
+-    signed: false,
++    signed: true,
+     pattern: /^\/v2\/accounts\/[^/]+$/u,
+   },
+ ];

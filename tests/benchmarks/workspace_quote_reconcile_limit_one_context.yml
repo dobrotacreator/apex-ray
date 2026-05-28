@@ -1,0 +1,22 @@
+name: workspace quote reconcile limit one context
+repo: ../fixtures/ts_quality/workspace_quote_reconcile_limit_one/repo
+diff: ../fixtures/ts_quality/workspace_quote_reconcile_limit_one/change.diff
+llm: false
+expected: []
+expected_context:
+  - pack_file: src/quote-reconcile.service.ts
+    pack_id_contains: reconcile
+    callee_file: src/settlement-step-repository.port.ts
+    callee_kind: callee
+    callee_text_contains: findAmbiguousReverseStepsForUpdate
+    callee_snippet_contains: "Returns ALL ambiguous-reverse steps"
+  - pack_file: src/quote-reconcile.service.ts
+    pack_id_contains: reconcile
+    callee_file: src/quote-reconcile.service.ts
+    callee_kind: callee
+    callee_text_contains: applyLandedSteps
+    callee_snippet_contains: "for (const step of args.steps)"
+  - pack_file: src/quote-reconcile.service.ts
+    pack_id_contains: reconcile
+    related_test: src/quote-reconcile.service.test.ts
+    related_test_snippet_contains: "drains ALL ambiguous reverse steps when there are >1"

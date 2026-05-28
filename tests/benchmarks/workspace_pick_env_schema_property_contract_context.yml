@@ -1,0 +1,22 @@
+name: workspace pick env schema property contract context
+repo: ../fixtures/ts_quality/workspace_pick_env_schema_property_contract/repo
+diff: ../fixtures/ts_quality/workspace_pick_env_schema_property_contract/change.diff
+llm: false
+expected: []
+expected_context:
+  - pack_file: src/client-options.ts
+    pack_id_contains: buildCoreBankHttpClientOptions
+    contract_file: src/env.ts
+    contract_kind: contract
+    contract_text_contains: COREBANK_TIMEOUT_MS
+    contract_snippet_contains: "COREBANK_TIMEOUT_MS: 'number?'"
+  - pack_file: src/client-options.ts
+    pack_id_contains: buildCoreBankHttpClientOptions
+    contract_file: src/env.ts
+    contract_kind: contract
+    contract_text_contains: COREBANK_RESPONSE_BODY_LOG_CHARS
+    contract_snippet_contains: "COREBANK_RESPONSE_BODY_LOG_CHARS: 'number default 4096'"
+  - pack_file: src/client-options.ts
+    pack_id_contains: buildCoreBankHttpClientOptions
+    related_test: src/client-options.test.ts
+    related_test_snippet_contains: "preserves env defaults when CoreBank URL is omitted"

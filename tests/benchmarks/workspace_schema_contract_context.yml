@@ -1,0 +1,12 @@
+name: workspace schema contract context
+repo: ../fixtures/ts_quality/workspace_schema_contract_context/repo
+diff: ../fixtures/ts_quality/workspace_schema_contract_context/change.diff
+llm: false
+expected: []
+expected_context:
+  - pack_file: src/quote-controller.ts
+    pack_id_contains: addQuote
+    contract_file: src/quote-schemas.ts
+    contract_kind: contract
+    contract_text_contains: AddQuoteSchema
+    contract_snippet_contains: "fileIds: z.array(z.string()).min(1).max(10)"

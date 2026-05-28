@@ -1,0 +1,13 @@
+name: workspace removed map tuple entry context
+repo: ../fixtures/ts_quality/workspace_removed_map_tuple_entry/repo
+diff: ../fixtures/ts_quality/workspace_removed_map_tuple_entry/change.diff
+llm: false
+expected: []
+expected_context:
+  - pack_file: src/webhook-routing.ts
+    pack_id_contains: "IDENTITY_FANOUT_TARGETS:applicantReviewed"
+    reference_file: src/webhook-routing.ts
+    reference_kind: read
+    reference_text_contains: IDENTITY_FANOUT_TARGETS.get
+    related_test: src/webhook-routing.test.ts
+    related_test_snippet_contains: "targetsFor('applicantReviewed')"

@@ -1,0 +1,20 @@
+name: workspace constructor injection token regression codex
+repo: ../../fixtures/ts_quality/workspace_constructor_injection_context/repo
+diff: ../../fixtures/ts_quality/workspace_constructor_injection_context/change.diff
+llm: true
+provider: codex_cli
+verify: true
+expected:
+  - file: src/operator-management.service.ts
+    title_contains: token
+expected_context:
+  - pack_file: src/operator-management.service.ts
+    pack_id_contains: OperatorManagementService
+    metadata_file: src/operator-management.service.ts
+    metadata_kind: metadata
+    metadata_text_contains: "@Inject(AUDIT_REPOSITORY_PORT)"
+  - pack_file: src/operator-management.service.ts
+    pack_id_contains: OperatorManagementService
+    contract_file: src/operator-management.service.ts
+    contract_kind: contract
+    contract_text_contains: "OperatorRepositoryPort"

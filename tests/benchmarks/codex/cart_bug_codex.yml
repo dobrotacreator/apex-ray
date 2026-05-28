@@ -1,0 +1,11 @@
+name: cart quantity regression codex
+repo: ../../fixtures/ts_project
+diff: ../../fixtures/ts_project/cart_bug.diff
+llm: true
+provider: codex_cli
+verify: true
+expected:
+  - file: src/cart.ts
+    title_contains: quantity
+    severity: high
+    confidence: high

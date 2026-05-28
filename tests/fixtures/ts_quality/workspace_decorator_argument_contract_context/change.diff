@@ -1,0 +1,12 @@
+diff --git a/src/admin-webhook.controller.ts b/src/admin-webhook.controller.ts
+index 1111111..2222222 100644
+--- a/src/admin-webhook.controller.ts
++++ b/src/admin-webhook.controller.ts
+@@ -18,6 +18,6 @@ export class AdminWebhookController {
+   @Post(':id/retrigger')
+   @RequirePermission(Permission.WEBHOOK_RETRIGGER)
+   retrigger(id: string, actorId: string): string {
+-    return `${actorId}:${id}`;
++    return id;
+   }
+ }

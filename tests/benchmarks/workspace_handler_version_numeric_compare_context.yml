@@ -1,0 +1,15 @@
+name: workspace handler version numeric compare context
+repo: ../fixtures/ts_quality/workspace_handler_version_numeric_compare/repo
+diff: ../fixtures/ts_quality/workspace_handler_version_numeric_compare/change.diff
+llm: false
+expected: []
+expected_context:
+  - pack_file: src/handler-version.ts
+    pack_id_contains: compareHandlerVersions
+    reference_file: src/flow-handler.registry.ts
+    reference_kind: call
+    reference_text_contains: compareHandlerVersions
+  - pack_file: src/handler-version.ts
+    pack_id_contains: compareHandlerVersions
+    related_test: src/flow-handler.registry.test.ts
+    related_test_snippet_contains: "handlerVersion('10.0.0')"

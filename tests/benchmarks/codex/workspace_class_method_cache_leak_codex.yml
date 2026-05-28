@@ -1,0 +1,13 @@
+name: workspace exported class method cache key regression codex
+repo: ../../fixtures/ts_quality/workspace_class_method_cache_leak/repo
+diff: ../../fixtures/ts_quality/workspace_class_method_cache_leak/change.diff
+llm: true
+provider: codex_cli
+verify: true
+expected:
+  - file: packages/settings/src/index.ts
+    title_contains: tenant
+expected_context:
+  - pack_file: packages/settings/src/index.ts
+    reference_file: apps/api/src/settings-service.ts
+    reference_text_contains: client.buildTenantSettingsKey

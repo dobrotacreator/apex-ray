@@ -1,0 +1,9 @@
+export enum Permission {
+  WEBHOOK_INBOX_VIEW = 'WEBHOOK_INBOX_VIEW',
+  WEBHOOK_RETRIGGER = 'WEBHOOK_RETRIGGER_DISABLED',
+}
+
+export const ROLE_PERMISSIONS = {
+  ADMIN: [Permission.WEBHOOK_INBOX_VIEW, Permission.WEBHOOK_RETRIGGER],
+  AUDITOR: [Permission.WEBHOOK_INBOX_VIEW],
+} as const;

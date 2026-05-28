@@ -1,0 +1,10 @@
+diff --git a/src/layer-2-screening.executor.ts b/src/layer-2-screening.executor.ts
+index 1111111..2222222 100644
+--- a/src/layer-2-screening.executor.ts
++++ b/src/layer-2-screening.executor.ts
+@@ -11,3 +11,3 @@ export class Layer2ScreeningExecutor implements StepExecutorPort {
+   probeReverse(_args: { step: SettlementStep; order: Order }): ProbeReverseOutcome {
+-    return { status: 'NOT_FOUND' };
++    return { status: 'COMPLETED', externalId: 'screening-noop' };
+   }
+ }

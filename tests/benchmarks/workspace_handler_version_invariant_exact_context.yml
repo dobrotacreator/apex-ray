@@ -1,0 +1,22 @@
+name: workspace handler version invariant exact context
+repo: ../fixtures/ts_quality/workspace_handler_version_invariant_exact/repo
+diff: ../fixtures/ts_quality/workspace_handler_version_invariant_exact/change.diff
+llm: false
+expected: []
+expected_context:
+  - pack_file: src/handler-version-invariant.service.ts
+    pack_id_contains: findOrphans
+    callee_file: src/flow-handler.registry.ts
+    callee_kind: callee
+    callee_text_contains: resolveLatest
+    callee_snippet_contains: "resolveLatest(key"
+  - pack_file: src/handler-version-invariant.service.ts
+    pack_id_contains: findOrphans
+    contract_file: src/settlement-plan-repository.port.ts
+    contract_kind: contract
+    contract_text_contains: PlanHandlerBinding
+    contract_snippet_contains: "resolve exactly"
+  - pack_file: src/handler-version-invariant.service.ts
+    pack_id_contains: findOrphans
+    related_test: src/handler-version-invariant.service.test.ts
+    related_test_snippet_contains: "makeBinding('1.0.0')"

@@ -1,0 +1,16 @@
+name: workspace step executor duplicate overwrite regression codex
+repo: ../../fixtures/ts_quality/workspace_step_executor_duplicate_overwrite/repo
+diff: ../../fixtures/ts_quality/workspace_step_executor_duplicate_overwrite/change.diff
+llm: true
+provider: codex_cli
+verify: true
+expected:
+  - file: src/step-executor.registry.ts
+    title_contains: duplicate
+expected_context:
+  - pack_file: src/step-executor.registry.ts
+    reference_file: src/settlement.module.ts
+    reference_kind: read
+    reference_text_contains: "@Module({"
+  - pack_file: src/step-executor.registry.ts
+    related_test: src/step-executor.registry.test.ts

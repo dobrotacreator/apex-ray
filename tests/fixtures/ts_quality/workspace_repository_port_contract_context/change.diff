@@ -1,0 +1,12 @@
+diff --git a/src/reconcile.service.ts b/src/reconcile.service.ts
+index 1111111..2222222 100644
+--- a/src/reconcile.service.ts
++++ b/src/reconcile.service.ts
+@@ -3,6 +3,6 @@ import type { SettlementStep, SettlementStepRepository, TransactionHandle } from
+ export class ReconcileService {
+   constructor(private readonly stepRepo: SettlementStepRepository) {}
+   async findSteps(orderId: string, trx: TransactionHandle): Promise<ReadonlyArray<SettlementStep>> {
+-    return this.stepRepo.findAmbiguousReverseSteps(orderId, trx);
++    return this.stepRepo.findAmbiguousReverseSteps(orderId, undefined);
+   }
+ }

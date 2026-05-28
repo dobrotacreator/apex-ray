@@ -1,0 +1,13 @@
+name: workspace related test ranking context
+repo: ../fixtures/ts_quality/workspace_related_test_ranking/repo
+diff: ../fixtures/ts_quality/workspace_related_test_ranking/change.diff
+llm: false
+expected: []
+expected_context:
+  - pack_file: apps/api/src/modules/webhook-ingestion/webhook-routing.service.ts
+    pack_id_contains: "IDENTITY_FANOUT_TARGETS:applicantReviewedd"
+    related_test: apps/api/src/modules/webhook-ingestion/webhook-routing.service.test.ts
+    related_test_index: 0
+  - pack_file: apps/api/src/modules/webhook-ingestion/webhook-routing.service.ts
+    related_test: apps/api/src/modules/webhook-ingestion/internal-webhook.controller.test.ts
+    related_test_index: 1

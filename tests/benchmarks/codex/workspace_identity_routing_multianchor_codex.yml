@@ -1,0 +1,18 @@
+name: workspace identity routing multianchor regression codex
+repo: ../../fixtures/ts_quality/workspace_identity_routing_multianchor/repo
+diff: ../../fixtures/ts_quality/workspace_identity_routing_multianchor/change.diff
+llm: true
+provider: codex_cli
+verify: true
+expected:
+  - file: src/webhook-routing.service.ts
+    title_contains: travel
+expected_context:
+  - pack_file: src/webhook-routing.service.ts
+    pack_id_contains: "IDENTITY_TRAVEL_RULE_EVENTS:applicantKytTxnReviewedd"
+    reference_file: src/admin-webhook-ops.service.ts
+    reference_kind: call
+    reference_text_contains: "this.routing.buildJobs(eventType)"
+  - pack_file: src/webhook-routing.service.ts
+    pack_id_contains: "IDENTITY_TRAVEL_RULE_EVENTS:applicantKytTxnReviewedd"
+    related_test: src/webhook-routing.service.test.ts

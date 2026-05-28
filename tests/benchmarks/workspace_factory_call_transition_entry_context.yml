@@ -1,0 +1,12 @@
+name: workspace factory call transition entry context
+repo: ../fixtures/ts_quality/workspace_factory_call_transition_entry_context/repo
+diff: ../fixtures/ts_quality/workspace_factory_call_transition_entry_context/change.diff
+llm: false
+expected: []
+expected_context:
+  - pack_file: src/order-status.ts
+    pack_id_contains: "transitionOrder:OrderStatus.AWAITING_RECONCILIATION OrderEvent.OPS_RECONCILED_LANDED_CANCEL"
+    reference_file: src/reconcile.service.ts
+    reference_kind: call
+    reference_text_contains: "const result = transitionOrder("
+    reference_snippet_contains: "OrderEvent.OPS_RECONCILED_LANDED_CANCEL"

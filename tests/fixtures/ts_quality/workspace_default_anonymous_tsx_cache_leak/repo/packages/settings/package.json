@@ -1,0 +1,4 @@
+{
+  "name": "@acme/settings",
+  "types": "./src/index.tsx"
+}

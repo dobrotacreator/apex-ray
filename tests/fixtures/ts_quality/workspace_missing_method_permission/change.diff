@@ -1,0 +1,14 @@
+diff --git a/src/admin-finance.controller.ts b/src/admin-finance.controller.ts
+index 1111111..2222222 100644
+--- a/src/admin-finance.controller.ts
++++ b/src/admin-finance.controller.ts
+@@ -22,4 +22,9 @@ export class AdminFinanceReportsController {
+   detail(reportId: string): string {
+     return reportId;
+   }
++
++  @Get(':id/export')
++  exportCsv(reportId: string): string {
++    return `csv:${reportId}`;
++  }
+ }

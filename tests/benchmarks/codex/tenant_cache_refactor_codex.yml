@@ -1,0 +1,7 @@
+name: tenant settings cache key refactor codex
+repo: ../../fixtures/ts_quality/tenant_cache_refactor/repo
+diff: ../../fixtures/ts_quality/tenant_cache_refactor/change.diff
+llm: true
+provider: codex_cli
+verify: true
+expected: []

@@ -1,0 +1,7 @@
+name: cart total local variable refactor codex
+repo: ../../fixtures/ts_project
+diff: ../../fixtures/ts_project/cart_refactor.diff
+llm: true
+provider: codex_cli
+verify: true
+expected: []

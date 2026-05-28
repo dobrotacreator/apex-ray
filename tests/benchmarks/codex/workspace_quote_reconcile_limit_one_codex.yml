@@ -1,0 +1,20 @@
+name: workspace quote reconcile limit one regression codex
+repo: ../../fixtures/ts_quality/workspace_quote_reconcile_limit_one/repo
+diff: ../../fixtures/ts_quality/workspace_quote_reconcile_limit_one/change.diff
+llm: true
+provider: codex_cli
+verify: true
+expected:
+  - file: src/quote-reconcile.service.ts
+    title_contains: ambiguous
+  - file: src/quote-reconcile.service.ts
+    title_contains: LOST reconciliation
+expected_context:
+  - pack_file: src/quote-reconcile.service.ts
+    pack_id_contains: reconcile
+    callee_file: src/settlement-step-repository.port.ts
+    callee_kind: callee
+    callee_text_contains: findAmbiguousReverseStepsForUpdate
+  - pack_file: src/quote-reconcile.service.ts
+    pack_id_contains: reconcile
+    related_test: src/quote-reconcile.service.test.ts

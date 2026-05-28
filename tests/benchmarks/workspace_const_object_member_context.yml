@@ -1,0 +1,11 @@
+name: workspace const object member context
+repo: ../fixtures/ts_quality/workspace_const_object_member_permission/repo
+diff: ../fixtures/ts_quality/workspace_const_object_member_permission/change.diff
+llm: false
+expected: []
+expected_context:
+  - pack_file: packages/types/src/permission.ts
+    pack_id_contains: WEBHOOK_RETRIGGER
+    reference_file: apps/api/src/admin-webhook.controller.ts
+    reference_kind: read
+    reference_text_contains: Permission.WEBHOOK_RETRIGGER

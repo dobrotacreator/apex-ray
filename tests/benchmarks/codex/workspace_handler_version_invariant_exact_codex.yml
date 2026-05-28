@@ -1,0 +1,18 @@
+name: workspace handler version invariant exact regression codex
+repo: ../../fixtures/ts_quality/workspace_handler_version_invariant_exact/repo
+diff: ../../fixtures/ts_quality/workspace_handler_version_invariant_exact/change.diff
+llm: true
+provider: codex_cli
+verify: true
+expected:
+  - file: src/handler-version-invariant.service.ts
+    title_contains: version
+expected_context:
+  - pack_file: src/handler-version-invariant.service.ts
+    pack_id_contains: findOrphans
+    callee_file: src/flow-handler.registry.ts
+    callee_kind: callee
+    callee_text_contains: resolveLatest
+  - pack_file: src/handler-version-invariant.service.ts
+    pack_id_contains: findOrphans
+    related_test: src/handler-version-invariant.service.test.ts

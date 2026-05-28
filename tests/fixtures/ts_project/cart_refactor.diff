@@ -1,0 +1,13 @@
+diff --git a/src/cart.ts b/src/cart.ts
+index 1111111..2222222 100644
+--- a/src/cart.ts
++++ b/src/cart.ts
+@@ -3,6 +3,7 @@ export interface CartItem {
+   quantity: number;
+ }
+ 
+ export function calculateTotal(items: CartItem[]): number {
+-  return items.reduce((sum, item) => sum + item.price * item.quantity, 0);
++  const total = items.reduce((sum, item) => sum + item.price * item.quantity, 0);
++  return total;
+ }

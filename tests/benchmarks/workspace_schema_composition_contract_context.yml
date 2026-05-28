@@ -1,0 +1,30 @@
+name: workspace schema composition contract context
+repo: ../fixtures/ts_quality/workspace_schema_composition_contract_context/repo
+diff: ../fixtures/ts_quality/workspace_schema_composition_contract_context/change.diff
+llm: false
+expected: []
+expected_context:
+  - pack_file: src/mapper.ts
+    pack_id_contains: mapQuotePayload
+    contract_file: src/step-payloads.ts
+    contract_kind: contract
+    contract_text_contains: QuoteStepPayloadSchema
+    contract_snippet_contains: QuoteStepPayloadSchema
+  - pack_file: src/mapper.ts
+    pack_id_contains: mapQuotePayload
+    contract_file: src/step-payloads.ts
+    contract_kind: contract
+    contract_text_contains: BaseStepPayloadSchema
+    contract_snippet_contains: "settlementId: string"
+  - pack_file: src/mapper.ts
+    pack_id_contains: mapQuotePayload
+    contract_file: src/step-payloads.ts
+    contract_kind: contract
+    contract_text_contains: STEP_TYPES
+    contract_snippet_contains: "'QUOTE_PRICED'"
+  - pack_file: src/mapper.ts
+    pack_id_contains: mapQuotePayload
+    contract_file: src/step-payloads.ts
+    contract_kind: contract
+    contract_text_contains: MoneySchema
+    contract_snippet_contains: "currency: 'USD' | 'EUR'"

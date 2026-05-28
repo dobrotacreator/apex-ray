@@ -1,0 +1,11 @@
+diff --git a/src/handler-version.ts b/src/handler-version.ts
+index 1111111..2222222 100644
+--- a/src/handler-version.ts
++++ b/src/handler-version.ts
+@@ -11,6 +11,3 @@ export function handlerVersion(value: string): HandlerVersion {
+ export function compareHandlerVersions(a: HandlerVersion, b: HandlerVersion): number {
+-  const [am = 0, ai = 0, ap = 0] = a.split('.').map(Number);
+-  const [bm = 0, bi = 0, bp = 0] = b.split('.').map(Number);
+-  return am - bm || ai - bi || ap - bp;
++  return a.localeCompare(b);
+ }

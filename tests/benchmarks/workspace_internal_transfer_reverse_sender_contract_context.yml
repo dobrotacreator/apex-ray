@@ -1,0 +1,26 @@
+name: workspace internal transfer reverse sender contract context
+repo: ../fixtures/ts_quality/workspace_internal_transfer_reverse_sender_contract/repo
+diff: ../fixtures/ts_quality/workspace_internal_transfer_reverse_sender_contract/change.diff
+llm: false
+expected: []
+expected_context:
+  - pack_file: src/internal-transfer-shared.ts
+    pack_id_contains: reverseSenderOwnerRef
+    reference_file: src/internal-transfer-shared.ts
+    reference_kind: call
+    reference_text_contains: "reverseSenderOwnerRef(payload)"
+    reference_snippet_contains: "reverseIdempotencyKey"
+  - pack_file: src/internal-transfer-shared.ts
+    pack_id_contains: reverseSenderOwnerRef
+    contract_file: src/step-payloads.ts
+    contract_kind: contract
+    contract_snippet_contains: "providerAccountOwnerRef: string"
+  - pack_file: src/internal-transfer-shared.ts
+    pack_id_contains: reverseSenderOwnerRef
+    contract_file: src/public-quote.ts
+    contract_kind: contract
+    contract_snippet_contains: "providerAccountOwnerRef?: string"
+  - pack_file: src/internal-transfer-shared.ts
+    pack_id_contains: reverseSenderOwnerRef
+    related_test: src/internal-transfer-shared.test.ts
+    related_test_snippet_contains: "uses the client sender owner when reversing"

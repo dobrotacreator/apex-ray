@@ -1,0 +1,17 @@
+name: workspace const array route entry regression codex
+repo: ../../fixtures/ts_quality/workspace_const_array_route_entry/repo
+diff: ../../fixtures/ts_quality/workspace_const_array_route_entry/change.diff
+llm: true
+provider: codex_cli
+verify: true
+expected:
+  - file: src/bank-routes.ts
+    title_contains: signed
+expected_context:
+  - pack_file: src/bank-routes.ts
+    pack_id_contains: "BANK_ROUTES:GET /v2/accounts/{accountIdentifier}"
+    reference_file: src/bank-routes.ts
+    reference_kind: read
+    reference_text_contains: BANK_ROUTES.find
+  - pack_file: src/bank-routes.ts
+    related_test: src/bank-routes.test.ts

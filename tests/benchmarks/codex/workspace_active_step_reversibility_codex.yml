@@ -1,0 +1,23 @@
+name: workspace active step reversibility regression codex
+repo: ../../fixtures/ts_quality/workspace_active_step_reversibility/repo
+diff: ../../fixtures/ts_quality/workspace_active_step_reversibility/change.diff
+llm: true
+provider: codex_cli
+verify: true
+expected:
+  - file: src/step-type.ts
+    title_contains: crypto sends
+expected_context:
+  - pack_file: src/step-type.ts
+    pack_id_contains: EXTERNAL_CRYPTO_SEND
+    reference_file: src/step-type.ts
+    reference_kind: read
+    reference_text_contains: "for (const stepType of ACTIVE_STEP_TYPES)"
+  - pack_file: src/step-type.ts
+    pack_id_contains: EXTERNAL_CRYPTO_SEND
+    reference_file: src/plan-invariants.ts
+    reference_kind: read
+    reference_text_contains: "new Set(ACTIVE_STEP_TYPES)"
+  - pack_file: src/step-type.ts
+    pack_id_contains: EXTERNAL_CRYPTO_SEND
+    related_test: src/step-type.test.ts

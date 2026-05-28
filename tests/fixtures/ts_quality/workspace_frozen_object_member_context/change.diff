@@ -1,0 +1,10 @@
+diff --git a/src/webhook-routing.ts b/src/webhook-routing.ts
+index 1111111..2222222 100644
+--- a/src/webhook-routing.ts
++++ b/src/webhook-routing.ts
+@@ -1,4 +1,4 @@
+ export const PROXY_TARGET_ENV = Object.freeze({
+-  'identity-kyc': 'IDENTITY_KYC_URL',
++  'identity-kyc': 'IDENTITY_TRAVEL_RULE_URL',
+   vault: 'VAULT_URL',
+ } as const);

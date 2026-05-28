@@ -1,0 +1,20 @@
+name: workspace schema composition step type regression codex
+repo: ../../fixtures/ts_quality/workspace_schema_composition_step_type_regression/repo
+diff: ../../fixtures/ts_quality/workspace_schema_composition_step_type_regression/change.diff
+llm: true
+provider: codex_cli
+verify: true
+expected:
+  - file: src/mapper.ts
+    title_contains: step
+expected_context:
+  - pack_file: src/mapper.ts
+    pack_id_contains: extractQuoteStepType
+    contract_file: src/step-payloads.ts
+    contract_kind: contract
+    contract_text_contains: QuoteStepPayloadSchema
+  - pack_file: src/mapper.ts
+    pack_id_contains: extractQuoteStepType
+    contract_file: src/step-payloads.ts
+    contract_kind: contract
+    contract_text_contains: STEP_TYPES

@@ -1,0 +1,9 @@
+diff --git a/packages/settings/src/index.js b/packages/settings/src/index.js
+index 1111111..2222222 100644
+--- a/packages/settings/src/index.js
++++ b/packages/settings/src/index.js
+@@ -3,3 +3,3 @@ const settingsCache = new Map();
+ function tenantScopedSettingsKey(tenantId, userId) {
+-  return `${tenantId}:${userId}`;
++  return userId;
+ }

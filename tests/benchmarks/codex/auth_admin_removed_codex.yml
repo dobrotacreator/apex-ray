@@ -1,0 +1,13 @@
+name: auth admin delete permission regression codex
+repo: ../../fixtures/ts_quality/auth_admin_removed/repo
+diff: ../../fixtures/ts_quality/auth_admin_removed/change.diff
+llm: true
+provider: codex_cli
+verify: true
+expected:
+  - file: src/auth.ts
+    title_contains: admin
+expected_context:
+  - pack_file: src/auth.ts
+    reference_file: src/projects.ts
+    reference_text_contains: canDeleteProject

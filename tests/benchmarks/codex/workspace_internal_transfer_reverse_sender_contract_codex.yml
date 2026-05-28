@@ -1,0 +1,23 @@
+name: workspace internal transfer reverse sender contract regression codex
+repo: ../../fixtures/ts_quality/workspace_internal_transfer_reverse_sender_contract/repo
+diff: ../../fixtures/ts_quality/workspace_internal_transfer_reverse_sender_contract/change.diff
+llm: true
+provider: codex_cli
+verify: true
+expected:
+  - file: src/internal-transfer-shared.ts
+    title_contains: reverse
+expected_context:
+  - pack_file: src/internal-transfer-shared.ts
+    pack_id_contains: reverseSenderOwnerRef
+    reference_file: src/internal-transfer-shared.ts
+    reference_kind: call
+    reference_text_contains: "reverseSenderOwnerRef(payload)"
+  - pack_file: src/internal-transfer-shared.ts
+    pack_id_contains: reverseSenderOwnerRef
+    contract_file: src/step-payloads.ts
+    contract_kind: contract
+    contract_snippet_contains: "providerAccountOwnerRef: string"
+  - pack_file: src/internal-transfer-shared.ts
+    pack_id_contains: reverseSenderOwnerRef
+    related_test: src/internal-transfer-shared.test.ts

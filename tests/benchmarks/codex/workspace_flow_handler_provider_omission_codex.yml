@@ -1,0 +1,18 @@
+name: workspace flow handler provider omission regression codex
+repo: ../../fixtures/ts_quality/workspace_flow_handler_provider_omission/repo
+diff: ../../fixtures/ts_quality/workspace_flow_handler_provider_omission/change.diff
+llm: true
+provider: codex_cli
+verify: true
+expected:
+  - file: src/flow-handler.providers.ts
+    title_contains: VA_TO_VA
+expected_context:
+  - pack_file: src/flow-handler.providers.ts
+    pack_id_contains: FLOW_HANDLER_PROVIDERS
+    reference_file: src/flow-handler.registry.ts
+    reference_kind: read
+    reference_text_contains: "@Inject(FLOW_HANDLER_PORT)"
+  - pack_file: src/flow-handler.providers.ts
+    pack_id_contains: FLOW_HANDLER_PROVIDERS
+    related_test: src/flow-handler.registry.test.ts

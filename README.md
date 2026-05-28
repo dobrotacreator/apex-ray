@@ -1,0 +1,202 @@
+# Apex Ray
+
+Local CLI-first AI code review for TypeScript and JavaScript projects.
+
+Apex Ray reads a git diff, builds compact context packs around changed code, runs optional LLM review through a local CLI provider, verifies findings, and writes Markdown/JSON/HTML reports. It is designed for teams that want review intelligence locally, without depending on a hosted PR-review product.
+
+> Apex Ray is pre-1.0. Report schemas and configuration can change while the project is prepared for production use.
+
+## What It Does
+
+- Builds TS/JS context packs from changed files, symbols, callers, callees, contracts, metadata, and related tests.
+- Supports project-specific rules and repo-committed review memory.
+- Runs without LLM calls, or with Codex CLI when configured.
+- Routes cheap and strong models through profiles.
+- Tracks LLM coverage, skipped packs, partial severity, provider failures, cache usage, and continuation commands.
+- Replays historical GitHub PR review comments for local evals.
+- Writes local telemetry so teams can tune cost, latency, and coverage over time.
+
+## What It Does Not Do
+
+Apex Ray does not replace CI, tests, linters, typecheck, dependency scanners, SAST, or human review. It focuses on diff-aware behavioral review.
+
+## Requirements
+
+- Python 3.14+
+- Node.js 24+
+- npm
+- git
+- uv for development
+- Codex CLI for LLM review
+- GitHub CLI only for historical PR capture/eval commands
+
+## Install
+
+The project is not published yet. For local development:
+
+```bash
+git clone git@github.com:dobrotacreator/apex-ray.git
+cd apex-ray
+uv sync --all-groups
+cd analyzers/typescript
+npm ci
+npm run build
+```
+
+Run from the repository root:
+
+```bash
+uv run apex-ray --version
+uv run apex-ray doctor
+```
+
+## Quickstart
+
+In a project you want to review:
+
+```bash
+apex-ray init
+apex-ray doctor
+apex-ray review --worktree --no-llm --output review.md --json review.json
+```
+
+`apex-ray init` creates `.apex-ray/config.yml`, rules/memory/report directories, gitignore entries, agent instruction files, and a Lefthook pre-push review command. Use `--hooks none` or `--agent-files none` for exceptional repositories.
+
+Run LLM review when Codex CLI is configured:
+
+```bash
+apex-ray review --worktree --llm --output review.md --json review.json --html review.html
+```
+
+Review a branch against the configured base:
+
+```bash
+apex-ray review --base main --llm
+```
+
+Continue only unreviewed packs from a partial report:
+
+```bash
+apex-ray review --continue-from review.json --residual-priority p0 --llm
+apex-ray review --continue-from review.json --only-pack 'apps/api/src/payments.ts#capture:1' --llm
+```
+
+## Configuration
+
+Project configuration lives in `.apex-ray/config.yml`:
+
+```yaml
+review:
+  base: main
+  ignore:
+    - "**/*.lock"
+    - "**/generated/**"
+  rule_paths:
+    - .apex-ray/rules
+  memory:
+    enabled: true
+    paths:
+      - .apex-ray/memory
+  llm:
+    enabled: false
+    provider: codex_cli
+    coverage_mode: balanced
+    max_input_tokens: 120000
+    verify: true
+  telemetry:
+    enabled: false
+    path: .apex-ray/telemetry/review-runs.jsonl
+```
+
+Machine-specific overrides can live in `.apex-ray/config.local.yml`. Apex Ray merges built-in defaults, shared config, local config, and CLI flags in that order. Local config is gitignored by default and is intended for provider/model/cost differences between contributors.
+
+See [docs/configuration.md](docs/configuration.md) for configuration details.
+
+## Rules And Memory
+
+Rules are Markdown files with YAML frontmatter under `.apex-ray/rules/`. They are matched to context packs and injected only when relevant.
+
+Memory cards are Markdown files under `.apex-ray/memory/`. They keep concise team learning, false-positive calibration, and domain review hints close to the codebase.
+
+See [docs/memory.md](docs/memory.md) for memory-card details.
+
+## LLM Providers
+
+Apex Ray supports Codex CLI and Claude Code CLI. Profiles let a project combine cheaper broad review with stronger verification/escalation, including mixed providers:
+
+```yaml
+review:
+  llm:
+    profiles:
+      cheap:
+        provider: codex_cli
+        model: "<cheap-codex-model>"
+      strong:
+        provider: claude_code_cli
+        model: "<strong-claude-model-or-alias>"
+    routing:
+      review_profile: cheap
+      verify_profile: strong
+      escalated_review_profile: strong
+      escalate_review_when:
+        risk: [auth, external_io, persistence]
+        rule_severity: [high, critical]
+        strict_rule: true
+        pack_truncated: true
+```
+
+Avoid near-sunset model IDs in shared defaults. Team members can use `.apex-ray/config.local.yml` for personal provider/model/path/cost overrides.
+
+See [docs/providers.md](docs/providers.md).
+
+## Coverage And Continuation
+
+LLM coverage modes:
+
+- `fast`: capped deep review.
+- `balanced`: deep review for high-value packs plus shallow breadth under token budget.
+- `exhaustive`: review every reviewable pack when budget allows.
+
+Reports include reviewed/unreviewed pack IDs, partial severity, residual P0/P1 packs, skipped reasons, provider failures, cache metrics, and suggested continuation commands.
+
+## Telemetry
+
+Local review telemetry is append-only JSONL. It is intended for tuning cost, latency, model routing, and coverage:
+
+```bash
+apex-ray review --worktree --llm --telemetry
+apex-ray telemetry-summary --telemetry-path .apex-ray/telemetry/review-runs.jsonl
+```
+
+Telemetry is measurement-only and is not injected into review prompts automatically. See [docs/telemetry.md](docs/telemetry.md).
+
+## Historical PR Evals
+
+Apex Ray can capture prior GitHub PR comments and replay local review on historical diffs:
+
+```bash
+apex-ray eval capture-prs --repo /path/to/project --output /path/to/project/.apex-ray/evals/cases --limit 10
+apex-ray eval run-prs --repo /path/to/project --cases /path/to/project/.apex-ray/evals/cases --output /path/to/project/.apex-ray/evals/runs/latest --llm
+```
+
+See [docs/pr-eval.md](docs/pr-eval.md).
+
+## Privacy
+
+When LLM review is enabled, Apex Ray sends selected diff and context-pack content to the configured local CLI provider. Review that provider's privacy and retention policy before using Apex Ray on private code.
+
+Caches and telemetry are local files. They may include repository paths, model names, finding counts, coverage metadata, and token estimates. Keep them ignored unless a team intentionally curates a shared artifact.
+
+## Development
+
+```bash
+uv run pytest -q
+cd analyzers/typescript && npm run build
+git diff --check
+```
+
+See [docs/development.md](docs/development.md) and [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## License
+
+Apache-2.0. See [LICENSE](LICENSE).

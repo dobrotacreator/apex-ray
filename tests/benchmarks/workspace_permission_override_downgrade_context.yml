@@ -1,0 +1,23 @@
+name: workspace permission override downgrade context
+repo: ../fixtures/ts_quality/workspace_permission_override_downgrade/repo
+diff: ../fixtures/ts_quality/workspace_permission_override_downgrade/change.diff
+llm: false
+expected: []
+expected_context:
+  - pack_file: src/quote-broker.controller.ts
+    pack_id_contains: cancel
+    metadata_file: src/quote-broker.controller.ts
+    metadata_kind: metadata
+    metadata_text_contains: "@RequirePermission(Permission.QUOTE_BROKER_VIEW)"
+  - pack_file: src/quote-broker.controller.ts
+    pack_id_contains: cancel
+    contract_file: src/permissions.ts
+    contract_kind: contract
+    contract_text_contains: Permission
+    contract_snippet_contains: QUOTE_BROKER_MANAGE
+  - pack_file: src/quote-broker.controller.ts
+    pack_id_contains: cancel
+    contract_file: src/permission.guard.ts
+    contract_kind: contract
+    contract_text_contains: PermissionGuard
+    contract_snippet_contains: "getAllAndOverride<Permission[]>(REQUIRED_PERMISSION_KEY"

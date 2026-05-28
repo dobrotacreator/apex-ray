@@ -1,0 +1,9 @@
+diff --git a/src/internal-transfer-shared.ts b/src/internal-transfer-shared.ts
+index 1111111..2222222 100644
+--- a/src/internal-transfer-shared.ts
++++ b/src/internal-transfer-shared.ts
+@@ -8,3 +8,3 @@ export function reverseSenderOwnerRef(payload: InternalTransferPayload): string
+ export function reverseSenderOwnerRef(payload: InternalTransferPayload): string {
+-  return payload.targetsClientAccount ? payload.clientOwnerRef : payload.providerAccountOwnerRef;
++  return payload.targetsClientAccount ? payload.providerAccountOwnerRef : payload.clientOwnerRef;
+ }

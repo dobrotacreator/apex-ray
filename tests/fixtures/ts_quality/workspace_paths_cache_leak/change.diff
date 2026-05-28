@@ -1,0 +1,9 @@
+diff --git a/packages/settings/src/cache.ts b/packages/settings/src/cache.ts
+index 1111111..2222222 100644
+--- a/packages/settings/src/cache.ts
++++ b/packages/settings/src/cache.ts
+@@ -1,3 +1,3 @@
+ export function workspaceCacheKey(tenantId: string, userId: string): string {
+-  return `${tenantId}:${userId}`;
++  return userId;
+ }

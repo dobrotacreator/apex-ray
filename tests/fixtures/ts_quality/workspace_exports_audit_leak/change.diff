@@ -1,0 +1,11 @@
+diff --git a/packages/audit/src/events/audit-event.ts b/packages/audit/src/events/audit-event.ts
+index 1111111..2222222 100644
+--- a/packages/audit/src/events/audit-event.ts
++++ b/packages/audit/src/events/audit-event.ts
+@@ -6,5 +6,5 @@ export interface AuditEvent {
+ export function buildAuditEvent(tenantId: string, action: string): AuditEvent {
+   return {
+-    id: `${tenantId}:${action}`,
++    id: action,
+     tenantId,
+     action,

@@ -1,0 +1,16 @@
+diff --git a/src/handler-version-invariant.service.ts b/src/handler-version-invariant.service.ts
+index 1111111..2222222 100644
+--- a/src/handler-version-invariant.service.ts
++++ b/src/handler-version-invariant.service.ts
+@@ -6,12 +6,11 @@ export class HandlerVersionInvariantService {
+   ): ReadonlyArray<PlanHandlerBinding> {
+     return triples.filter(
+       (triple) =>
+-        registry.resolve({
++        registry.resolveLatest({
+           flowType: triple.flowType,
+           executionMode: triple.executionMode,
+-          version: triple.handlerVersion,
+         }) === null,
+     );
+   }

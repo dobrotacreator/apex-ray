@@ -1,0 +1,15 @@
+name: workspace log metadata shadow canonical context
+repo: ../fixtures/ts_quality/workspace_log_metadata_shadow_canonical/repo
+diff: ../fixtures/ts_quality/workspace_log_metadata_shadow_canonical/change.diff
+llm: false
+expected: []
+expected_context:
+  - pack_file: src/http-client.ts
+    pack_id_contains: logFailure
+    reference_file: src/http-client.ts
+    reference_kind: call
+    reference_text_contains: "this.logFailure(method, path, statusCode, responseBody, metadata)"
+  - pack_file: src/http-client.ts
+    pack_id_contains: logFailure
+    related_test: src/http-client.test.ts
+    related_test_snippet_contains: "does not let metadata override failure canonical fields"

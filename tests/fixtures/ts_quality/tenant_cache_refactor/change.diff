@@ -1,0 +1,18 @@
+diff --git a/src/settings.ts b/src/settings.ts
+index 1111111..2222222 100644
+--- a/src/settings.ts
++++ b/src/settings.ts
+@@ -10,14 +10,14 @@ export interface SettingsStore {
+ const settingsCache = new Map<string, Promise<Settings>>();
+ 
+ export function settingsCacheKey(tenantId: string, userId: string): string {
+-  return `${tenantId}:${userId}`;
++  return [tenantId, userId].join(":");
+ }
+ 
+ export async function loadUserSettings(
+   store: SettingsStore,
+   tenantId: string,
+   userId: string,
+ ): Promise<Settings> {
+   const key = settingsCacheKey(tenantId, userId);

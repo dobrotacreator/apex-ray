@@ -1,0 +1,46 @@
+pre-commit:
+  parallel: true
+  commands:
+    ruff-format:
+      glob: "**/*.py"
+      run: uv run ruff format --check {staged_files}
+    ruff-check:
+      glob: "**/*.py"
+      run: uv run ruff check {staged_files}
+    whitespace:
+      run: git diff --cached --check
+
+commit-msg:
+  commands:
+    conventional-commits:
+      run: |
+        uv run python - "{1}" <<'PY'
+        import re
+        import sys
+        from pathlib import Path
+
+        message = Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()[0]
+        pattern = re.compile(
+            r"^(build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test)"
+            r"(\([a-z0-9._-]+\))?!?: .+"
+        )
+        if not pattern.match(message):
+            print("Commit message must use Conventional Commits, e.g. feat(llm): add provider")
+            sys.exit(1)
+        PY
+
+pre-push:
+  parallel: false
+  commands:
+    ruff-format:
+      run: uv run ruff format --check .
+    ruff-check:
+      run: uv run ruff check .
+    pyright:
+      run: uv run pyright
+    ts-build:
+      run: cd analyzers/typescript && npm run build
+    pytest:
+      run: uv run pytest -q
+    package:
+      run: uv build --sdist --wheel && uv run twine check dist/*

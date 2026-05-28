@@ -1,0 +1,14 @@
+name: workspace tsx component cache key regression codex
+repo: ../../fixtures/ts_quality/workspace_tsx_component_cache_leak/repo
+diff: ../../fixtures/ts_quality/workspace_tsx_component_cache_leak/change.diff
+llm: true
+provider: codex_cli
+verify: true
+expected:
+  - file: packages/settings/src/index.tsx
+    title_contains: tenant
+expected_context:
+  - pack_file: packages/settings/src/index.tsx
+    reference_file: apps/web/src/dashboard.tsx
+    reference_kind: call
+    reference_text_contains: SettingsPanel

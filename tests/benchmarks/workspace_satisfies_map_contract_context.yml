@@ -1,0 +1,12 @@
+name: workspace satisfies map contract context
+repo: ../fixtures/ts_quality/workspace_satisfies_map_contract_context/repo
+diff: ../fixtures/ts_quality/workspace_satisfies_map_contract_context/change.diff
+llm: false
+expected: []
+expected_context:
+  - pack_file: src/webhook-routing.ts
+    pack_id_contains: "identity-kyc"
+    contract_file: src/env.ts
+    contract_kind: contract
+    contract_text_contains: Env
+    contract_snippet_contains: COREBANK_IDENTITY_KYC_WEBHOOK_URL

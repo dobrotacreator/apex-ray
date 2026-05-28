@@ -1,0 +1,28 @@
+name: workspace nest controller metadata context
+repo: ../fixtures/ts_quality/workspace_nest_controller_metadata/repo
+diff: ../fixtures/ts_quality/workspace_nest_controller_metadata/change.diff
+llm: false
+expected: []
+expected_context:
+  - pack_file: src/admin-webhook.controller.ts
+    pack_id_contains: retrigger
+    metadata_file: src/admin-webhook.controller.ts
+    metadata_kind: metadata
+    metadata_text_contains: "@Controller('admin/webhooks/inbox')"
+    metadata_snippet_contains: "@Controller('admin/webhooks/inbox')"
+  - pack_file: src/admin-webhook.controller.ts
+    pack_id_contains: retrigger
+    metadata_file: src/admin-webhook.controller.ts
+    metadata_kind: metadata
+    metadata_text_contains: "@UseGuards(OperatorAuthGuard, PermissionGuard)"
+  - pack_file: src/admin-webhook.controller.ts
+    pack_id_contains: retrigger
+    metadata_file: src/admin-webhook.controller.ts
+    metadata_kind: metadata
+    metadata_text_contains: "@Post(':id/retrigger')"
+  - pack_file: src/admin-webhook.controller.ts
+    pack_id_contains: retrigger
+    metadata_file: src/admin-webhook.controller.ts
+    metadata_kind: metadata
+    metadata_text_contains: "@RequirePermission(Permission.WEBHOOK_RETRIGGER)"
+    metadata_snippet_contains: "@RequirePermission(Permission.WEBHOOK_RETRIGGER)"

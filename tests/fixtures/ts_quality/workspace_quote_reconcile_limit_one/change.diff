@@ -1,0 +1,17 @@
+diff --git a/src/quote-reconcile.service.ts b/src/quote-reconcile.service.ts
+index 1111111..2222222 100644
+--- a/src/quote-reconcile.service.ts
++++ b/src/quote-reconcile.service.ts
+@@ -34,9 +34,9 @@ export class QuoteReconcileService {
+
+     if (request.outcome === 'LANDED') {
+       await this.applyLandedSteps({
+-        steps: ambiguousSteps,
++        steps: ambiguousSteps.slice(0, 1),
+         externalRef: request.externalRef,
+       });
+       await this.assertNoRemainingAmbiguousSteps(orderId);
+     } else {
+-      await this.recordLostStepAudits({ steps: ambiguousSteps });
++      await this.recordLostStepAudits({ steps: ambiguousSteps.slice(0, 1) });
+     }

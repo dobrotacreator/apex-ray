@@ -1,0 +1,12 @@
+name: workspace schema argument contract context
+repo: ../fixtures/ts_quality/workspace_schema_argument_contract_context/repo
+diff: ../fixtures/ts_quality/workspace_schema_argument_contract_context/change.diff
+llm: false
+expected: []
+expected_context:
+  - pack_file: src/client.ts
+    pack_id_contains: loadPersonStatus
+    contract_file: src/schemas.ts
+    contract_kind: contract
+    contract_text_contains: CoreBankPersonSchema
+    contract_snippet_contains: "verificationStatus: 'number'"

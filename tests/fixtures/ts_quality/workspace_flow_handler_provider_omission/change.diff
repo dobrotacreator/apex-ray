@@ -1,0 +1,14 @@
+diff --git a/src/flow-handler.providers.ts b/src/flow-handler.providers.ts
+index 1111111..2222222 100644
+--- a/src/flow-handler.providers.ts
++++ b/src/flow-handler.providers.ts
+@@ -7,7 +7,7 @@ export const FLOW_HANDLER_PROVIDERS = [
+   VaToVaAgentHandler,
+   {
+     provide: FLOW_HANDLER_PORT,
+-    useFactory: (vaToFiat: VaToFiatAgentHandler, vaToVa: VaToVaAgentHandler) => [vaToFiat, vaToVa],
+-    inject: [VaToFiatAgentHandler, VaToVaAgentHandler],
++    useFactory: (vaToFiat: VaToFiatAgentHandler, vaToVa: VaToVaAgentHandler) => [vaToFiat],
++    inject: [VaToFiatAgentHandler],
+   },
+ ];

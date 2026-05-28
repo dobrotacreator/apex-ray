@@ -1,0 +1,18 @@
+name: workspace transfer step screen gate regression codex
+repo: ../../fixtures/ts_quality/workspace_transfer_step_screen_gate/repo
+diff: ../../fixtures/ts_quality/workspace_transfer_step_screen_gate/change.diff
+llm: true
+provider: codex_cli
+verify: true
+expected:
+  - file: src/step-type.ts
+    title_contains: screen-before-credit
+expected_context:
+  - pack_file: src/step-type.ts
+    pack_id_contains: INTERNAL_BANK_TRANSFER
+    reference_file: src/plan-invariants.ts
+    reference_kind: read
+    reference_text_contains: "TRANSFER_STEP_TYPES"
+  - pack_file: src/step-type.ts
+    pack_id_contains: INTERNAL_BANK_TRANSFER
+    related_test: src/plan-invariants.test.ts

@@ -1,0 +1,10 @@
+diff --git a/src/order-status.ts b/src/order-status.ts
+index 1111111..2222222 100644
+--- a/src/order-status.ts
++++ b/src/order-status.ts
+@@ -21,4 +21,4 @@ function createStateMachine<S extends string, E extends string>(
+ }
+ export const transitionOrder = createStateMachine<OrderStatus, OrderEvent>('order', [
+-  [OrderStatus.AWAITING_RECONCILIATION, OrderEvent.OPS_RECONCILED_LANDED_CANCEL, OrderStatus.CANCELLED],
++  [OrderStatus.AWAITING_RECONCILIATION, OrderEvent.OPS_RECONCILED_LANDED_CANCEL, OrderStatus.FAILED],
+ ]);

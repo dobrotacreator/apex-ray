@@ -1,0 +1,18 @@
+{
+  "name": "@apex-fixture/audit-core",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./dist/index.js"
+    },
+    "./audit-event": {
+      "types": "./src/audit-event.ts",
+      "default": "./dist/audit-event.js"
+    },
+    "./idempotency": {
+      "types": "./src/idempotency.ts",
+      "default": "./dist/idempotency.js"
+    }
+  },
+  "types": "./src/index.ts"
+}

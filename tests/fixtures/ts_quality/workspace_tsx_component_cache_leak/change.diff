@@ -1,0 +1,9 @@
+diff --git a/packages/settings/src/index.tsx b/packages/settings/src/index.tsx
+index 1111111..2222222 100644
+--- a/packages/settings/src/index.tsx
++++ b/packages/settings/src/index.tsx
+@@ -14,3 +14,3 @@ export function SettingsPanel(props: SettingsPanelProps) {
+   const key =
+-    `${props.tenantId}:${props.userId}`;
++    props.userId;
+   let cached = panelCache.get(key);

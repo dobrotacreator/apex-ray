@@ -1,0 +1,11 @@
+diff --git a/src/webhook-routing.ts b/src/webhook-routing.ts
+index 1111111..2222222 100644
+--- a/src/webhook-routing.ts
++++ b/src/webhook-routing.ts
+@@ -1,5 +1,5 @@
+ import type { Env } from './env.js';
+
+ export const PROXY_TARGET_ENV = Object.freeze({
+-  'identity-kyc': 'COREBANK_IDENTITY_KYC_WEBHOOK_URL',
++  'identity-kyc': 'COREBANK_IDENTITY_TRAVEL_RULE_WEBHOOK_URL',
+ } as const) satisfies Readonly<Record<string, keyof Env>>;

@@ -1,0 +1,11 @@
+diff --git a/src/controller.ts b/src/controller.ts
+index 1111111..2222222 100644
+--- a/src/controller.ts
++++ b/src/controller.ts
+@@ -1,4 +1,4 @@
+ import { verifyWebhookSignature } from './signature.js';
+-export function handleWebhook(rawBody: string, signature: string): boolean {
+-  return verifyWebhookSignature(rawBody, signature);
++export function handleWebhook(body: unknown, signature: string): boolean {
++  return verifyWebhookSignature(JSON.stringify(body), signature);
+ }

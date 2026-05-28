@@ -1,0 +1,13 @@
+name: workspace set business event entry context
+repo: ../fixtures/ts_quality/workspace_set_business_event_entry/repo
+diff: ../fixtures/ts_quality/workspace_set_business_event_entry/change.diff
+llm: false
+expected: []
+expected_context:
+  - pack_file: src/webhook-routing.ts
+    pack_id_contains: "IDENTITY_BUSINESS_EVENTS:applicantReviewedd"
+    reference_file: src/webhook-routing.ts
+    reference_kind: read
+    reference_text_contains: IDENTITY_BUSINESS_EVENTS.has
+  - pack_file: src/webhook-routing.ts
+    related_test: src/webhook-routing.test.ts

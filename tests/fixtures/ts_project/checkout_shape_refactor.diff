@@ -1,0 +1,14 @@
+diff --git a/src/checkout.ts b/src/checkout.ts
+index 1111111..2222222 100644
+--- a/src/checkout.ts
++++ b/src/checkout.ts
+@@ -1,7 +1,8 @@
+ import { calculateTotal, CartItem } from "./cart";
+ 
+ export function checkout(items: CartItem[]) {
++  const total = calculateTotal(items);
+   return {
+-    total: calculateTotal(items),
++    total,
+   };
+ }

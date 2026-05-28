@@ -1,0 +1,18 @@
+name: workspace settlement step direct reverse bypass regression codex
+repo: ../../fixtures/ts_quality/workspace_settlement_step_direct_reverse_bypass/repo
+diff: ../../fixtures/ts_quality/workspace_settlement_step_direct_reverse_bypass/change.diff
+llm: true
+provider: codex_cli
+verify: true
+expected:
+  - file: src/settlement-step-status.ts
+    title_contains: REVERSING
+expected_context:
+  - pack_file: src/settlement-step-status.ts
+    pack_id_contains: "transitionSettlementStep:StepStatus.COMPLETED StepEvent.COMPENSATE_OK"
+    reference_file: src/plan-driven-settlement-orchestrator.ts
+    reference_kind: call
+    reference_text_contains: "transitionSettlementStep(StepStatus.REVERSING, StepEvent.COMPENSATE_OK)"
+  - pack_file: src/settlement-step-status.ts
+    pack_id_contains: "transitionSettlementStep:StepStatus.COMPLETED StepEvent.COMPENSATE_OK"
+    related_test: src/settlement-step-status.test.ts

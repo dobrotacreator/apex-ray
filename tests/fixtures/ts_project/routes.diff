@@ -1,0 +1,21 @@
+diff --git a/src/routes.ts b/src/routes.ts
+index 1111111..2222222 100644
+--- a/src/routes.ts
++++ b/src/routes.ts
+@@ -3,10 +3,7 @@ type RequestLike = {
+ 
+ export function middleware(request: RequestLike) {
+   if (
+-    request.path.startsWith("/api/webhook/") ||
+-    request.path.startsWith("/api/payment/webhook/")
++    request.path.startsWith("/api/webhook/")
+   ) {
+     return { cors: true };
+   }
+@@ -14,5 +11,5 @@ export function middleware(request: RequestLike) {
+ }
+ 
+ export const config = {
+-  matcher: ["/api/webhook/:path*", "/api/payment/webhook/:path*"],
++  matcher: ["/api/webhook/:path*"],
+ };

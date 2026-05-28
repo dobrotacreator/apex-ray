@@ -1,0 +1,11 @@
+diff --git a/src/quote-broker.controller.ts b/src/quote-broker.controller.ts
+index 1111111..2222222 100644
+--- a/src/quote-broker.controller.ts
++++ b/src/quote-broker.controller.ts
+@@ -43,5 +43,5 @@ export class QuoteBrokerController {
+  @Post(':quoteId/cancel')
+-  @RequirePermission(Permission.QUOTE_BROKER_MANAGE)
++  @RequirePermission(Permission.QUOTE_BROKER_VIEW)
+  cancel(quoteId: string): string {
+     return this.service.cancel(quoteId);
+   }

@@ -1,0 +1,22 @@
+name: workspace probe reverse noop contract context
+repo: ../fixtures/ts_quality/workspace_probe_reverse_noop_contract/repo
+diff: ../fixtures/ts_quality/workspace_probe_reverse_noop_contract/change.diff
+llm: false
+expected: []
+expected_context:
+  - pack_file: src/layer-2-screening.executor.ts
+    pack_id_contains: probeReverse
+    contract_file: src/step-executor.port.ts
+    contract_kind: contract
+    contract_text_contains: "probeReverse(args"
+    contract_snippet_contains: "MUST return `{ status: 'NOT_FOUND' }`"
+  - pack_file: src/layer-2-screening.executor.ts
+    pack_id_contains: probeReverse
+    reference_file: src/plan-driven-settlement-orchestrator.ts
+    reference_kind: call
+    reference_text_contains: "executor.probeReverse(args)"
+    reference_snippet_contains: "outcome.status === 'COMPLETED'"
+  - pack_file: src/layer-2-screening.executor.ts
+    pack_id_contains: probeReverse
+    related_test: src/layer-2-screening.executor.test.ts
+    related_test_snippet_contains: "returns NOT_FOUND because screening has no external reverse to probe"

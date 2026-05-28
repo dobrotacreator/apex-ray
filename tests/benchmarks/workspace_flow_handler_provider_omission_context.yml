@@ -1,0 +1,21 @@
+name: workspace flow handler provider omission context
+repo: ../fixtures/ts_quality/workspace_flow_handler_provider_omission/repo
+diff: ../fixtures/ts_quality/workspace_flow_handler_provider_omission/change.diff
+llm: false
+expected: []
+expected_context:
+  - pack_file: src/flow-handler.providers.ts
+    pack_id_contains: FLOW_HANDLER_PROVIDERS
+    reference_file: src/quote.module.ts
+    reference_kind: read
+    reference_text_contains: "@Module({"
+    reference_snippet_contains: "...FLOW_HANDLER_PROVIDERS"
+  - pack_file: src/flow-handler.providers.ts
+    pack_id_contains: FLOW_HANDLER_PROVIDERS
+    reference_file: src/flow-handler.registry.ts
+    reference_kind: read
+    reference_text_contains: "@Inject(FLOW_HANDLER_PORT)"
+  - pack_file: src/flow-handler.providers.ts
+    pack_id_contains: FLOW_HANDLER_PROVIDERS
+    related_test: src/flow-handler.registry.test.ts
+    related_test_snippet_contains: "FlowType.VA_TO_VA"

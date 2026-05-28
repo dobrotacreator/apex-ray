@@ -1,0 +1,4 @@
+{
+  "name": "@acme/settings",
+  "main": "./src/index.js"
+}

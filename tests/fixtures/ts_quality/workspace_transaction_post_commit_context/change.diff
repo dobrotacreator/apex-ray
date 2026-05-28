@@ -1,0 +1,14 @@
+diff --git a/src/reconcile.service.ts b/src/reconcile.service.ts
+index 1111111..2222222 100644
+--- a/src/reconcile.service.ts
++++ b/src/reconcile.service.ts
+@@ -6,8 +6,9 @@ export class ReconcileService {
+   async reconcile(orderId: string): Promise<void> {
+     const postCommitEmit = await this.uow.transaction(async (trx) => {
+       await trx.save(orderId);
+-      return () => this.queue.publish({ type: 'RECONCILED', orderId });
++      await this.queue.publish({ type: 'RECONCILED', orderId });
++      return () => Promise.resolve();
+     });
+     await postCommitEmit();
+   }

@@ -1,0 +1,11 @@
+diff --git a/src/client-options.ts b/src/client-options.ts
+index 1111111..2222222 100644
+--- a/src/client-options.ts
++++ b/src/client-options.ts
+@@ -50,5 +50,5 @@ export function buildCoreBankHttpClientOptions(
+ }
+
+ function isEnvSource(source: CoreBankHttpClientEnv | CoreBankHttpClientConfig): source is CoreBankHttpClientEnv {
+-  return 'COREBANK_TIMEOUT_MS' in source || 'COREBANK_API_URL' in source;
++  return 'COREBANK_API_URL' in source;
+ }

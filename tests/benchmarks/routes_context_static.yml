@@ -1,0 +1,5 @@
+name: routes middleware config clustering
+repo: ../fixtures/ts_project
+diff: ../fixtures/ts_project/routes.diff
+llm: false
+expected: []

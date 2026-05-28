@@ -1,0 +1,17 @@
+name: workspace decorator factory contract context
+repo: ../fixtures/ts_quality/workspace_decorator_factory_contract_context/repo
+diff: ../fixtures/ts_quality/workspace_decorator_factory_contract_context/change.diff
+llm: false
+expected: []
+expected_context:
+  - pack_file: src/admin-webhook.controller.ts
+    pack_id_contains: retrigger
+    metadata_file: src/admin-webhook.controller.ts
+    metadata_kind: metadata
+    metadata_text_contains: "@RequirePermission(Permission.WEBHOOK_RETRIGGER)"
+  - pack_file: src/admin-webhook.controller.ts
+    pack_id_contains: retrigger
+    contract_file: src/require-permission.decorator.ts
+    contract_kind: contract
+    contract_text_contains: RequirePermission
+    contract_snippet_contains: REQUIRED_PERMISSION_KEY

@@ -1,0 +1,13 @@
+diff --git a/src/step-executor.registry.ts b/src/step-executor.registry.ts
+index 1111111..2222222 100644
+--- a/src/step-executor.registry.ts
++++ b/src/step-executor.registry.ts
+@@ -10,9 +10,6 @@ export class StepExecutorRegistry {
+     const m = new Map<StepType, StepExecutorPort>();
+     for (const executor of executors) {
+-      if (m.has(executor.stepType)) {
+-        throw new Error(`Duplicate StepExecutor for ${executor.stepType}`);
+-      }
+       m.set(executor.stepType, executor);
+     }
+     this.byStepType = m;

@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: analyzers/typescript/package-lock.json
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Install TypeScript analyzer dependencies
+        working-directory: analyzers/typescript
+        run: npm ci
+
+      - name: Typecheck TypeScript analyzer
+        working-directory: analyzers/typescript
+        run: npm run typecheck
+
+      - name: Build TypeScript analyzer
+        working-directory: analyzers/typescript
+        run: npm run build
+
+      - name: Install Python dependencies
+        run: uv sync --locked --all-groups
+
+      - name: Check Python formatting
+        run: uv run ruff format --check .
+
+      - name: Lint Python
+        run: uv run ruff check .
+
+      - name: Typecheck Python
+        run: uv run pyright
+
+      - name: Run Python tests
+        run: uv run pytest -q
+
+      - name: Build package
+        run: uv build --sdist --wheel
+
+      - name: Check package metadata
+        run: uv run twine check dist/*
+
+      - name: Smoke test installed wheel
+        run: |
+          wheel="$(ls dist/*.whl | head -n 1)"
+          uv venv .ci-smoke-venv
+          uv pip install --python .ci-smoke-venv/bin/python "$wheel"
+          .ci-smoke-venv/bin/apex-ray --version
+          tmpdir="$(mktemp -d)"
+          (cd "$tmpdir" && "$GITHUB_WORKSPACE/.ci-smoke-venv/bin/apex-ray" doctor)

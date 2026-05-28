@@ -1,0 +1,27 @@
+name: workspace identity routing multianchor context
+repo: ../fixtures/ts_quality/workspace_identity_routing_multianchor/repo
+diff: ../fixtures/ts_quality/workspace_identity_routing_multianchor/change.diff
+llm: false
+expected: []
+expected_context:
+  - pack_file: src/webhook-routing.service.ts
+    pack_id_contains: "IDENTITY_TRAVEL_RULE_EVENTS:applicantKytTxnReviewedd"
+    reference_file: src/webhook-routing.service.ts
+    reference_kind: read
+    reference_text_contains: "IDENTITY_TRAVEL_RULE_EVENTS.includes(eventType as never)"
+  - pack_file: src/webhook-routing.service.ts
+    pack_id_contains: "IDENTITY_TRAVEL_RULE_EVENTS:applicantKytTxnReviewedd"
+    reference_file: src/admin-webhook-ops.service.ts
+    reference_kind: call
+    reference_text_contains: "this.routing.buildJobs(eventType)"
+    reference_snippet_contains: "expectedTargetsFor"
+  - pack_file: src/webhook-routing.service.ts
+    pack_id_contains: "IDENTITY_TRAVEL_RULE_EVENTS:applicantKytTxnReviewedd"
+    callee_file: src/webhook-routing.service.ts
+    callee_kind: callee
+    callee_text_contains: buildJobs
+    callee_snippet_contains: "IDENTITY_TRAVEL_RULE_EVENTS.includes"
+  - pack_file: src/webhook-routing.service.ts
+    pack_id_contains: "IDENTITY_TRAVEL_RULE_EVENTS:applicantKytTxnReviewedd"
+    related_test: src/webhook-routing.service.test.ts
+    related_test_snippet_contains: "fans reviewed KYT transactions out"

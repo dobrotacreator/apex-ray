@@ -1,0 +1,22 @@
+name: audit actor default regression codex
+repo: ../../fixtures/ts_quality/audit_actor_default/repo
+diff: ../../fixtures/ts_quality/audit_actor_default/change.diff
+llm: true
+provider: codex_cli
+verify: true
+expected:
+  - file: packages/audit-core/src/audit-event.ts
+    title_contains: actor
+    confidence: high
+expected_context:
+  - pack_file: packages/audit-core/src/audit-event.ts
+    reference_file: apps/api/src/common/audit/record-audit.ts
+    reference_kind: call
+    reference_text_contains: buildCoreAuditEvent
+  - pack_file: packages/audit-core/src/audit-event.ts
+    related_test: packages/audit-core/src/audit-event.test.ts
+  - pack_file: packages/audit-core/src/audit-event.ts
+    pack_id_contains: buildAuditEvent
+    contract_file: packages/audit-core/src/audit-event.ts
+    contract_kind: contract
+    contract_text_contains: typedAuditEntrySchema

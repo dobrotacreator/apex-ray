@@ -1,0 +1,13 @@
+name: tenant settings cache key regression codex
+repo: ../../fixtures/ts_quality/tenant_cache_leak/repo
+diff: ../../fixtures/ts_quality/tenant_cache_leak/change.diff
+llm: true
+provider: codex_cli
+verify: true
+expected:
+  - file: src/settings.ts
+    title_contains: tenant
+expected_context:
+  - pack_file: src/settings.ts
+    reference_file: src/settings.ts
+    reference_text_contains: settingsCacheKey(tenantId, userId)

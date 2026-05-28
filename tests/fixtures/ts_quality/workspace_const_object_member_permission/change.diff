@@ -1,0 +1,10 @@
+diff --git a/packages/types/src/permission.ts b/packages/types/src/permission.ts
+index 1111111..2222222 100644
+--- a/packages/types/src/permission.ts
++++ b/packages/types/src/permission.ts
+@@ -1,4 +1,4 @@
+ export const Permission = {
+   WEBHOOK_INBOX_VIEW: "WEBHOOK_INBOX_VIEW",
+-  WEBHOOK_RETRIGGER: "WEBHOOK_RETRIGGER",
++  WEBHOOK_RETRIGGER: "WEBHOOK_RETRIGGER_DISABLED",
+ } as const;

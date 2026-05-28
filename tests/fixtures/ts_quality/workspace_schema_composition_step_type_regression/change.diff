@@ -1,0 +1,11 @@
+diff --git a/src/mapper.ts b/src/mapper.ts
+index 1111111..2222222 100644
+--- a/src/mapper.ts
++++ b/src/mapper.ts
+@@ -1,6 +1,6 @@
+ import { QuoteStepPayloadSchema, STEP_TYPES } from './step-payloads.js';
+ export function extractQuoteStepType(raw: unknown): (typeof STEP_TYPES)[number] {
+   const parsed = QuoteStepPayloadSchema.parse(raw);
+-  return parsed.stepType;
++  return parsed.settlementId as (typeof STEP_TYPES)[number];
+ }

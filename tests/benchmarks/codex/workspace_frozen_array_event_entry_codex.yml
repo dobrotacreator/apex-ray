@@ -1,0 +1,17 @@
+name: workspace frozen array event entry regression codex
+repo: ../../fixtures/ts_quality/workspace_frozen_array_event_entry/repo
+diff: ../../fixtures/ts_quality/workspace_frozen_array_event_entry/change.diff
+llm: true
+provider: codex_cli
+verify: true
+expected:
+  - file: src/webhook-routing.ts
+    title_contains: Reviewed KYT
+expected_context:
+  - pack_file: src/webhook-routing.ts
+    pack_id_contains: "IDENTITY_TRAVEL_RULE_EVENTS:applicantKytTxnReviewedd"
+    reference_file: src/webhook-routing.ts
+    reference_kind: read
+    reference_text_contains: IDENTITY_TRAVEL_RULE_EVENTS.map
+  - pack_file: src/webhook-routing.ts
+    related_test: src/webhook-routing.test.ts

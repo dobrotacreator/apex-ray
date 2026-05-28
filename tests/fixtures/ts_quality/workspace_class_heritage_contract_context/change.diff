@@ -1,0 +1,11 @@
+diff --git a/src/admin-webhook-ops.errors.ts b/src/admin-webhook-ops.errors.ts
+index 1111111..2222222 100644
+--- a/src/admin-webhook-ops.errors.ts
++++ b/src/admin-webhook-ops.errors.ts
+@@ -1,7 +1,7 @@
+ import { BusinessRuleError } from './errors.js';
+ export class WebhookRetriggerAlreadyInProgressError extends BusinessRuleError {
+-  static readonly wireDetailKeys = ['retryAfterMs'] as const;
++  static readonly wireDetailKeys = [] as const;
+   constructor(public readonly retryAfterMs: number) {
+     super('Webhook retrigger is already in progress');

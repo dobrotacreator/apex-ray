@@ -1,0 +1,18 @@
+name: workspace handler version numeric compare regression codex
+repo: ../../fixtures/ts_quality/workspace_handler_version_numeric_compare/repo
+diff: ../../fixtures/ts_quality/workspace_handler_version_numeric_compare/change.diff
+llm: true
+provider: codex_cli
+verify: true
+expected:
+  - file: src/handler-version.ts
+    title_contains: version
+expected_context:
+  - pack_file: src/handler-version.ts
+    pack_id_contains: compareHandlerVersions
+    reference_file: src/flow-handler.registry.ts
+    reference_kind: call
+    reference_text_contains: compareHandlerVersions
+  - pack_file: src/handler-version.ts
+    pack_id_contains: compareHandlerVersions
+    related_test: src/flow-handler.registry.test.ts

@@ -1,0 +1,12 @@
+name: workspace dto property metadata context
+repo: ../fixtures/ts_quality/workspace_dto_property_metadata_context/repo
+diff: ../fixtures/ts_quality/workspace_dto_property_metadata_context/change.diff
+llm: false
+expected: []
+expected_context:
+  - pack_file: src/dto.ts
+    pack_id_contains: RetriggerBodyDto
+    metadata_file: src/dto.ts
+    metadata_kind: metadata
+    metadata_text_contains: "@MaxLength(500)"
+    metadata_snippet_contains: "@MaxLength(500)"

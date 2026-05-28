@@ -1,0 +1,8 @@
+diff --git a/src/step-type.ts b/src/step-type.ts
+index 1111111..2222222 100644
+--- a/src/step-type.ts
++++ b/src/step-type.ts
+@@ -20,3 +20,2 @@ export const TRANSFER_STEP_TYPES: ReadonlySet<StepType> = new Set([
+   StepType.INTERNAL_VAULT_TRANSFER,
+-  StepType.INTERNAL_BANK_TRANSFER,
+   StepType.EXTERNAL_CRYPTO_SEND,

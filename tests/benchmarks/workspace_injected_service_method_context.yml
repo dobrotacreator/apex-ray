@@ -1,0 +1,12 @@
+name: workspace injected service method context
+repo: ../fixtures/ts_quality/workspace_injected_service_method_call/repo
+diff: ../fixtures/ts_quality/workspace_injected_service_method_call/change.diff
+llm: false
+expected: []
+expected_context:
+  - pack_file: packages/webhooks/src/index.ts
+    reference_file: apps/api/src/admin-webhook.controller.ts
+    reference_kind: call
+    reference_text_contains: this.ops.retrigger
+  - pack_file: packages/webhooks/src/index.ts
+    related_test: packages/webhooks/src/index.test.ts

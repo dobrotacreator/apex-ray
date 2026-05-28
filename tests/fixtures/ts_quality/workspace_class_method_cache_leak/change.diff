@@ -1,0 +1,9 @@
+diff --git a/packages/settings/src/index.ts b/packages/settings/src/index.ts
+index 1111111..2222222 100644
+--- a/packages/settings/src/index.ts
++++ b/packages/settings/src/index.ts
+@@ -14,3 +14,3 @@ export class SettingsClient {
+   buildTenantSettingsKey(tenantId: string, userId: string): string {
+-    return `${tenantId}:${userId}`;
++    return userId;
+   }

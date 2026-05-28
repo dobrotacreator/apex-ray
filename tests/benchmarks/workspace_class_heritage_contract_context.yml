@@ -1,0 +1,18 @@
+name: workspace class heritage contract context
+repo: ../fixtures/ts_quality/workspace_class_heritage_contract_context/repo
+diff: ../fixtures/ts_quality/workspace_class_heritage_contract_context/change.diff
+llm: false
+expected: []
+expected_context:
+  - pack_file: src/admin-webhook-ops.errors.ts
+    pack_id_contains: WebhookRetriggerAlreadyInProgressError
+    contract_file: src/errors.ts
+    contract_kind: contract
+    contract_text_contains: BusinessRuleError
+    contract_snippet_contains: BusinessRuleError
+  - pack_file: src/admin-webhook-ops.errors.ts
+    pack_id_contains: WebhookRetriggerAlreadyInProgressError
+    contract_file: src/errors.ts
+    contract_kind: contract
+    contract_text_contains: DomainError
+    contract_snippet_contains: "Keys copied to the public wire error detail payload"

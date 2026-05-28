@@ -1,0 +1,16 @@
+diff --git a/src/http-client.ts b/src/http-client.ts
+index 1111111..2222222 100644
+--- a/src/http-client.ts
++++ b/src/http-client.ts
+@@ -27,8 +27,8 @@ export class HttpClient {
+       {
+-        ...metadata,
+         event: HttpEvent.FAILURE,
+         method,
+         path,
+         statusCode,
+         responseBody,
++        ...metadata,
+       },
+       `${method} ${path} ${statusCode}`,
+     );

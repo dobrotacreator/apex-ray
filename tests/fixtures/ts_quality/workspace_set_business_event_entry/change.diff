@@ -1,0 +1,9 @@
+diff --git a/src/webhook-routing.ts b/src/webhook-routing.ts
+index 1111111..2222222 100644
+--- a/src/webhook-routing.ts
++++ b/src/webhook-routing.ts
+@@ -1,3 +1,3 @@
+ const IDENTITY_BUSINESS_EVENTS = new Set([
+-  'applicantReviewed',
++  'applicantReviewedd',
+ ]);

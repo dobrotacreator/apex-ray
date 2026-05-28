@@ -1,0 +1,10 @@
+diff --git a/src/step-type.ts b/src/step-type.ts
+index 1111111..2222222 100644
+--- a/src/step-type.ts
++++ b/src/step-type.ts
+@@ -7,4 +7,5 @@ export const ACTIVE_STEP_TYPES: readonly StepType[] = [
+   StepType.INTERNAL_BANK_TRANSFER,
+   StepType.OPERATOR_CONFIRMATION,
+   StepType.LAYER_2_SCREENING,
++  StepType.EXTERNAL_CRYPTO_SEND,
+ ];

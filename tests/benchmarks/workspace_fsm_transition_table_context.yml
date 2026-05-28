@@ -1,0 +1,12 @@
+name: workspace fsm transition table context
+repo: ../fixtures/ts_quality/workspace_fsm_transition_table_context/repo
+diff: ../fixtures/ts_quality/workspace_fsm_transition_table_context/change.diff
+llm: false
+expected: []
+expected_context:
+  - pack_file: src/reconcile.service.ts
+    pack_id_contains: reconcileOrder
+    callee_file: src/order-status.ts
+    callee_kind: callee
+    callee_text_contains: transitionOrder
+    callee_snippet_contains: "OrderEvent.OPS_RECONCILED_LANDED_CANCEL, OrderStatus.CANCELLED"

@@ -1,0 +1,13 @@
+diff --git a/src/mapper.ts b/src/mapper.ts
+index 1111111..2222222 100644
+--- a/src/mapper.ts
++++ b/src/mapper.ts
+@@ -2,7 +2,7 @@ import type { Infer } from './schemas.js';
+ import { CoreBankEmailSchema } from './schemas.js';
+
+ export function extractPrimaryEmail(emails: Infer<typeof CoreBankEmailSchema>[] | undefined): string {
+-  const primary = emails?.find((email) => email.primary);
+-  return primary?.email ?? emails?.[0]?.email ?? '';
++  const first = emails?.[0];
++  return first?.email ?? '';
+ }
