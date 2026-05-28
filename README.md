@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/assets/apex-ray-logo-animated.svg" alt="Apex Ray logo animation" width="168">
+</p>
+
 # Apex Ray
 
 Local CLI-first AI code review for TypeScript and JavaScript projects.

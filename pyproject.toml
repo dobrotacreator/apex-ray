@@ -23,7 +23,7 @@ classifiers = [
 dependencies = [
     "pydantic>=2.12",
     "pyyaml>=6.0",
-    "typer>=0.16",
+    "typer>=0.26.2",
 ]
 
 [project.urls]
