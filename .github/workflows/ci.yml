@@ -32,7 +32,7 @@ jobs:
           cache: npm
           cache-dependency-path: analyzers/typescript/package-lock.json
 
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@v7
 
       - name: Install TypeScript analyzer dependencies
         working-directory: analyzers/typescript
