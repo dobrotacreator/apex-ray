@@ -38,9 +38,9 @@ pre-push:
       run: uv run ruff check .
     pyright:
       run: uv run pyright
-    ts-build:
-      run: cd analyzers/typescript && npm run build
-    pytest:
-      run: uv run pytest -q
+    ts-analyzer:
+      run: npm --prefix analyzers/typescript run typecheck && npm --prefix analyzers/typescript run coverage
+    python-coverage:
+      run: uv run coverage run -m pytest -q && uv run coverage report -m
     package:
       run: uv build --sdist --wheel && uv run twine check dist/*

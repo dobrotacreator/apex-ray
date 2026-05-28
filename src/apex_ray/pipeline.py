@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import json
 import re
 from pathlib import Path
@@ -180,7 +178,6 @@ def continue_review_from_report(
     provider: LLMProvider | None = None,
 ) -> tuple[ReviewReport, list[ContextPack]]:
     effective_config = config.model_copy(deep=True) if config is not None else report.config.model_copy(deep=True)
-    effective_config.llm.enabled = True
     root = repo_root or Path(report.project.root)
     selected_packs = select_continuation_context_packs(
         report,
@@ -203,6 +200,26 @@ def continue_review_from_report(
                 llm_selection=report.llm_selection,
             ),
             [],
+        )
+
+    if not effective_config.llm.enabled:
+        diff_summary = report.diff.model_copy(deep=True)
+        warning = "LLM review is disabled; pass --llm or enable review.llm.enabled to review continuation packs."
+        if warning not in diff_summary.warnings:
+            diff_summary.warnings.append(warning)
+        return (
+            build_report(
+                report.project,
+                effective_config,
+                diff_summary,
+                analyzer_results=report.analyzer_results,
+                context_packs=report.context_packs,
+                findings=report.findings,
+                verifications=report.verifications,
+                llm_runs=report.llm_runs,
+                llm_selection=report.llm_selection,
+            ),
+            selected_packs,
         )
 
     new_findings, review_runs = review_context_packs(

@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import hashlib
 import json
 import multiprocessing
@@ -28,11 +26,11 @@ except ImportError:  # pragma: no cover - fcntl is not available on Windows.
 
 from apex_ray import git
 from apex_ray.config import ConfigError, load_config
+from apex_ray.invocation import ReviewOverrides, apply_review_overrides
 from apex_ray.models import (
     Finding,
     LLMCoverageMode,
     LLMProviderName,
-    LLMRoutingConfig,
     TargetMode,
 )
 from apex_ray.pipeline import run_review_pipeline
@@ -1493,36 +1491,30 @@ def _run_one_pr_eval_case(
                 config, loaded_config_path = load_config(worktree, config_path if config_path.exists() else None)
             except ConfigError as exc:
                 raise PrEvalError(f"PR #{case.number}: invalid Apex Ray config: {exc}") from exc
-            config.llm.enabled = llm_enabled
-            if provider_override:
-                config.llm.provider = provider_override
-            if model_override:
-                config.llm.model = model_override
-                config.llm.profiles = {}
-                config.llm.routing = LLMRoutingConfig()
-            if verify_override is not None:
-                config.llm.verify = verify_override
-            if cache_enabled is not None:
-                config.llm.cache_enabled = cache_enabled and config.llm.cache_enabled
-            if refresh_cache:
-                config.llm.refresh_cache = True
-            if cache_dir:
-                config.llm.cache_dir = str(cache_dir)
-            elif config.llm.cache_enabled and not config.llm.cache_dir:
-                config.llm.cache_dir = str(repo_root / ".apex-ray" / "cache" / "llm")
-            if llm_jobs is not None:
-                config.llm.jobs = llm_jobs
+            parsed_coverage_mode = None
             if llm_coverage_mode is not None:
                 try:
-                    config.llm.coverage_mode = LLMCoverageMode(llm_coverage_mode)
+                    parsed_coverage_mode = LLMCoverageMode(llm_coverage_mode)
                 except ValueError as exc:
                     raise PrEvalError(f"PR #{case.number}: unsupported LLM coverage mode: {llm_coverage_mode}") from exc
-            if llm_max_deep_packs is not None:
-                config.llm.max_deep_packs = llm_max_deep_packs
-            if llm_max_input_tokens is not None:
-                config.llm.max_input_tokens = llm_max_input_tokens
-            if analyzer_timeout_seconds is not None:
-                config.analyzer.timeout_seconds = analyzer_timeout_seconds
+            config = apply_review_overrides(
+                config,
+                ReviewOverrides(
+                    llm_enabled=llm_enabled,
+                    provider=provider_override,
+                    model=model_override,
+                    verify=verify_override,
+                    cache_allowed=cache_enabled,
+                    refresh_cache=refresh_cache,
+                    cache_dir=cache_dir,
+                    default_cache_dir=repo_root / ".apex-ray" / "cache" / "llm",
+                    llm_jobs=llm_jobs,
+                    coverage_mode=parsed_coverage_mode,
+                    max_deep_packs=llm_max_deep_packs,
+                    max_input_tokens=llm_max_input_tokens,
+                    analyzer_timeout_seconds=analyzer_timeout_seconds,
+                ),
+            )
 
             if status_path is not None:
                 _write_case_status(

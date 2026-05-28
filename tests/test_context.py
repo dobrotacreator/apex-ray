@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from pathlib import Path
 
 from apex_ray.analyzers import run_typescript_analyzer
@@ -2269,6 +2267,72 @@ index 1111111..2222222 100644
     assert "apps/api/test/tenant-settings.test.ts" in result.files[0].related_tests
 
 
+def test_typescript_analyzer_resolves_path_aliases_from_workspace_tsconfig_extends(
+    tmp_path: Path,
+    built_ts_analyzer: None,
+) -> None:
+    config_pkg = tmp_path / "packages" / "tsconfig"
+    package_src = tmp_path / "packages" / "settings" / "src"
+    app_src = tmp_path / "apps" / "api" / "src"
+    config_pkg.mkdir(parents=True)
+    package_src.mkdir(parents=True)
+    app_src.mkdir(parents=True)
+    (tmp_path / "package.json").write_text('{"workspaces":["apps/*","packages/*"]}', encoding="utf-8")
+    (config_pkg / "package.json").write_text('{"name":"@acme/tsconfig","version":"0.0.0"}', encoding="utf-8")
+    (config_pkg / "node.json").write_text(
+        '{"compilerOptions":{"target":"ES2022","module":"ESNext","moduleResolution":"Bundler",'
+        '"baseUrl":"../..","paths":{"@settings/*":["packages/settings/src/*"]}}}',
+        encoding="utf-8",
+    )
+    (tmp_path / "packages" / "settings" / "package.json").write_text(
+        '{"name":"@acme/settings","types":"./src/cache.ts"}',
+        encoding="utf-8",
+    )
+    (tmp_path / "packages" / "settings" / "tsconfig.json").write_text(
+        '{"compilerOptions":{"target":"ES2022","module":"ESNext","moduleResolution":"Bundler"},'
+        '"include":["src/**/*.ts"]}',
+        encoding="utf-8",
+    )
+    (tmp_path / "apps" / "api" / "tsconfig.json").write_text(
+        '{"extends":"@acme/tsconfig/node.json","include":["src/**/*.ts"]}',
+        encoding="utf-8",
+    )
+    (package_src / "cache.ts").write_text(
+        "export function workspaceCacheKey(tenantId: string, userId: string): string {\n  return userId;\n}\n",
+        encoding="utf-8",
+    )
+    (app_src / "service.ts").write_text(
+        'import { workspaceCacheKey } from "@settings/cache";\n'
+        "export const key = workspaceCacheKey('tenant-a', 'user-a');\n",
+        encoding="utf-8",
+    )
+    diff = parse_unified_diff(
+        """diff --git a/packages/settings/src/cache.ts b/packages/settings/src/cache.ts
+index 1111111..2222222 100644
+--- a/packages/settings/src/cache.ts
++++ b/packages/settings/src/cache.ts
+@@ -1,3 +1,3 @@
+ export function workspaceCacheKey(tenantId: string, userId: string): string {
+-  return `${tenantId}:${userId}`;
++  return userId;
+ }
+""",
+        TargetMode.PATCH,
+    )
+    diff = classify_diff(diff, ignore_patterns=[])
+
+    result = run_typescript_analyzer(tmp_path, diff.files)
+
+    assert result is not None
+    references = result.files[0].changed_symbols[0].references
+    assert any(
+        reference.file == "apps/api/src/service.ts"
+        and reference.kind == "call"
+        and "workspaceCacheKey('tenant-a', 'user-a')" in reference.text
+        for reference in references
+    )
+
+
 def test_typescript_analyzer_collects_workspace_package_import_references(
     tmp_path: Path,
     built_ts_analyzer: None,
@@ -4366,6 +4430,78 @@ index 1111111..2222222 100644
     )
 
 
+def test_typescript_analyzer_keeps_this_super_and_subclass_method_references(
+    tmp_path: Path,
+    built_ts_analyzer: None,
+) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    (tmp_path / "tsconfig.json").write_text(
+        '{"compilerOptions":{"target":"ES2022","module":"ESNext","moduleResolution":"Bundler","strict":true},'
+        '"include":["src/**/*.ts"]}',
+        encoding="utf-8",
+    )
+    (src / "service.ts").write_text(
+        "export class BaseService {\n"
+        "  changed(id: string): string {\n"
+        "    return id;\n"
+        "  }\n"
+        "\n"
+        "  callBase(id: string): string {\n"
+        "    return this.changed(id);\n"
+        "  }\n"
+        "}\n"
+        "\n"
+        "export class DerivedService extends BaseService {\n"
+        "  callDerived(id: string): string {\n"
+        "    return this.changed(id);\n"
+        "  }\n"
+        "}\n"
+        "\n"
+        "export class OverrideService extends BaseService {\n"
+        "  changed(id: string): string {\n"
+        "    return super.changed(id);\n"
+        "  }\n"
+        "}\n"
+        "\n"
+        "const derived = new DerivedService();\n"
+        "export const value = derived.changed('id');\n",
+        encoding="utf-8",
+    )
+    diff = parse_unified_diff(
+        """diff --git a/src/service.ts b/src/service.ts
+index 1111111..2222222 100644
+--- a/src/service.ts
++++ b/src/service.ts
+@@ -1,4 +1,4 @@
+export class BaseService {
+  changed(id: string): string {
+-    return `${id}:old`;
++    return id;
+  }
+""",
+        TargetMode.PATCH,
+    )
+    diff = classify_diff(diff, ignore_patterns=[])
+
+    result = run_typescript_analyzer(tmp_path, diff.files)
+
+    assert result is not None
+    references = {symbol.name: symbol for symbol in result.files[0].changed_symbols}["changed"].references
+    assert any(
+        reference.kind == "call" and reference.file == "src/service.ts" and "this.changed(id)" in reference.text
+        for reference in references
+    )
+    assert any(
+        reference.kind == "call" and reference.file == "src/service.ts" and "super.changed(id)" in reference.text
+        for reference in references
+    )
+    assert any(
+        reference.kind == "call" and reference.file == "src/service.ts" and "derived.changed('id')" in reference.text
+        for reference in references
+    )
+
+
 def test_typescript_analyzer_collects_nest_provider_token_injection_references(
     tmp_path: Path,
     built_ts_analyzer: None,
@@ -4521,13 +4657,26 @@ def test_typescript_analyzer_collects_injected_service_method_call_references(
         'import type { AdminWebhookOpsService } from "@acme/webhooks";\n'
         'import { ADMIN_WEBHOOK_OPS_SERVICE } from "./tokens";\n'
         "\n"
+        "type OpsService = AdminWebhookOpsService;\n"
+        "\n"
         "export class AdminWebhookController {\n"
-        "  constructor(@Inject(ADMIN_WEBHOOK_OPS_SERVICE) private readonly ops: AdminWebhookOpsService) {}\n"
+        "  constructor(@Inject(ADMIN_WEBHOOK_OPS_SERVICE) private readonly ops: OpsService) {}\n"
         "\n"
         "  retrigger(id: string, actorId: string): string {\n"
         "    return this.ops.retrigger(id, actorId);\n"
         "  }\n"
-        "}\n",
+        "}\n"
+        "\n"
+        "export function unrelated(ops: { retrigger(id: string, actorId: string): string }): string {\n"
+        "  return ops.retrigger('local', 'actor');\n"
+        "}\n"
+        "\n"
+        "const unrelatedOps = {\n"
+        "  retrigger(id: string, actorId: string): string {\n"
+        "    return `${actorId}:${id}`;\n"
+        "  },\n"
+        "};\n"
+        "export const unrelated = unrelatedOps.retrigger('local', 'actor');\n",
         encoding="utf-8",
     )
     diff = parse_unified_diff(
@@ -4558,6 +4707,14 @@ index 1111111..2222222 100644
         and "this.ops.retrigger(id, actorId)" in reference.text
         for reference in references
     )
+    assert any(
+        reference.file == "apps/api/src/admin-webhook.controller.ts"
+        and reference.kind == "import"
+        and "AdminWebhookOpsService" in reference.text
+        for reference in references
+    )
+    assert all("ops.retrigger('local', 'actor')" not in reference.text for reference in references)
+    assert all("unrelatedOps.retrigger" not in reference.text for reference in references)
 
 
 def test_typescript_analyzer_treats_export_statements_as_package_exports(

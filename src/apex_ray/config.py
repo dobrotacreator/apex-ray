@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from pathlib import Path
 from typing import Any
 
@@ -22,7 +20,7 @@ DEFAULT_CONFIG_TEXT = """review:
     paths:
       - .apex-ray/memory
   llm:
-    enabled: true
+    enabled: false
     provider: codex_cli
     coverage_mode: balanced
     max_input_tokens: 120000
@@ -50,9 +48,9 @@ ROOT_GITIGNORE_BLOCK = """# Apex Ray
 .apex-ray/eval/telemetry/
 .apex-ray/eval/runs/
 .apex-ray/evals/runs/
-review*.md
-review*.json
-review*.html
+/review*.md
+/review*.json
+/review*.html
 """
 
 AGENTS_TEMPLATE = """# Apex Ray
@@ -63,16 +61,16 @@ This project uses Apex Ray for local diff-aware code review.
 
 ```bash
 apex-ray doctor
-apex-ray review --base main --output .apex-ray/reports/review.md --json .apex-ray/reports/review.json
-apex-ray review --continue-from .apex-ray/reports/review.json --residual-priority p0
+apex-ray review --base main --no-llm --output .apex-ray/reports/review.md --json .apex-ray/reports/review.json
+apex-ray review --continue-from .apex-ray/reports/review.json --residual-priority p0 --no-llm
 ```
 
-Use `--no-llm` when the configured local provider is unavailable or the cost is not appropriate.
+Add `--llm` only when the configured local provider is available and the cost is appropriate.
 Do not commit `.apex-ray/config.local.yml`, caches, telemetry, eval runs, or generated reports.
 """
 
 LEFTHOOK_APEX_RAY_COMMAND = (
-    "apex-ray review --base main --output .apex-ray/reports/pre-push.md --json .apex-ray/reports/pre-push.json"
+    "apex-ray review --base main --no-llm --output .apex-ray/reports/pre-push.md --json .apex-ray/reports/pre-push.json"
 )
 
 

@@ -1,7 +1,6 @@
-from __future__ import annotations
-
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 from typer.testing import CliRunner
 
@@ -42,6 +41,7 @@ def test_init_creates_config(tmp_path: Path, monkeypatch) -> None:
     assert (tmp_path / "AGENTS.md").exists()
     assert (tmp_path / ".claude" / "CLAUDE.md").exists()
     assert "apex-ray-review" in (tmp_path / "lefthook.yml").read_text(encoding="utf-8")
+    assert "--no-llm" in (tmp_path / "lefthook.yml").read_text(encoding="utf-8")
 
 
 def test_init_can_skip_hooks_and_agent_files(tmp_path: Path, monkeypatch) -> None:
@@ -229,6 +229,71 @@ def test_review_rejects_same_markdown_and_html_output(tmp_path: Path, monkeypatc
     assert "Markdown and HTML output paths must be different" in result.output
 
 
+def test_review_continue_from_respects_configured_llm_default(tmp_path: Path, monkeypatch) -> None:
+    report = build_report(
+        ProjectProfile(root=str(tmp_path), is_git_repo=True),
+        ReviewConfig(),
+        DiffSummary(target_mode=TargetMode.PATCH, stats=DiffStats(files_changed=1)),
+    )
+    report_path = tmp_path / "review.json"
+    output = tmp_path / "continued.md"
+    json_output = tmp_path / "continued.json"
+    report_path.write_text(report.model_dump_json(indent=2), encoding="utf-8")
+    seen: dict[str, bool] = {}
+
+    def fake_continue(*args, **kwargs):
+        seen["llm_enabled"] = kwargs["config"].llm.enabled
+        return report, [object()]
+
+    monkeypatch.setattr("apex_ray.cli.continue_review_from_report", fake_continue)
+
+    result = runner.invoke(
+        app,
+        ["review", "--continue-from", str(report_path), "--output", str(output), "--json", str(json_output)],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert seen["llm_enabled"] is False
+
+
+def test_review_continue_from_can_enable_llm_explicitly(tmp_path: Path, monkeypatch) -> None:
+    report = build_report(
+        ProjectProfile(root=str(tmp_path), is_git_repo=True),
+        ReviewConfig(),
+        DiffSummary(target_mode=TargetMode.PATCH, stats=DiffStats(files_changed=1)),
+    )
+    report_path = tmp_path / "review.json"
+    output = tmp_path / "continued.md"
+    json_output = tmp_path / "continued.json"
+    report_path.write_text(report.model_dump_json(indent=2), encoding="utf-8")
+    seen: dict[str, bool] = {}
+
+    def fake_continue(*args, **kwargs):
+        seen["llm_enabled"] = kwargs["config"].llm.enabled
+        return report, [object()]
+
+    monkeypatch.setattr("apex_ray.cli.continue_review_from_report", fake_continue)
+
+    result = runner.invoke(
+        app,
+        [
+            "review",
+            "--continue-from",
+            str(report_path),
+            "--llm",
+            "--output",
+            str(output),
+            "--json",
+            str(json_output),
+        ],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert seen["llm_enabled"] is True
+
+
 def test_review_patch_can_run_fake_llm(tmp_path: Path, monkeypatch, built_ts_analyzer: None) -> None:
     monkeypatch.chdir(tmp_path)
     fixture = FIXTURE_DIR / "ts_project"
@@ -267,3 +332,82 @@ review:
     assert data["llm_runs"][0]["provider"] == "fake"
     assert data["llm_runs"][0]["prompt_version"] == REVIEW_PROMPT_VERSION
     assert "No LLM findings reported." in output.read_text(encoding="utf-8")
+
+
+def test_eval_run_prs_cli_passes_options_to_runner(tmp_path: Path, monkeypatch) -> None:
+    seen: dict[str, object] = {}
+
+    def fake_run_pr_eval_cases(**kwargs: object) -> SimpleNamespace:
+        seen.update(kwargs)
+        return SimpleNamespace(
+            matched_greptile_findings_total=2,
+            greptile_findings_total=3,
+            extra_apex_findings_total=1,
+            failed=False,
+        )
+
+    monkeypatch.setattr("apex_ray.cli.run_pr_eval_cases", fake_run_pr_eval_cases)
+
+    result = runner.invoke(
+        app,
+        [
+            "eval",
+            "run-prs",
+            "--repo",
+            str(tmp_path / "repo"),
+            "--cases",
+            str(tmp_path / "cases"),
+            "--output",
+            str(tmp_path / "run"),
+            "--pr",
+            "12",
+            "--llm",
+            "--llm-provider",
+            "fake",
+            "--llm-model",
+            "fake-strong",
+            "--verify",
+            "--cache-dir",
+            str(tmp_path / "cache"),
+            "--telemetry-path",
+            str(tmp_path / "telemetry.jsonl"),
+            "--case-jobs",
+            "2",
+        ],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert "Matched Greptile findings: 2/3; extra Apex findings: 1" in result.stdout
+    assert seen["source_repo"] == tmp_path / "repo"
+    assert seen["cases_dir"] == tmp_path / "cases"
+    assert seen["output_dir"] == tmp_path / "run"
+    assert seen["pr_numbers"] == [12]
+    assert seen["llm_enabled"] is True
+    assert seen["provider_override"] == "fake"
+    assert seen["model_override"] == "fake-strong"
+    assert seen["verify_override"] is True
+    assert seen["cache_dir"] == tmp_path / "cache"
+    assert seen["telemetry_path"] == tmp_path / "telemetry.jsonl"
+    assert seen["case_jobs"] == 2
+
+
+def test_eval_run_prs_cli_rejects_conflicting_llm_flags(tmp_path: Path) -> None:
+    result = runner.invoke(
+        app,
+        [
+            "eval",
+            "run-prs",
+            "--repo",
+            str(tmp_path / "repo"),
+            "--cases",
+            str(tmp_path / "cases"),
+            "--output",
+            str(tmp_path / "run"),
+            "--llm",
+            "--no-llm",
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "Use only one of --llm or --no-llm" in result.output

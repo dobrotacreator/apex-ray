@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import json
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -10,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, computed_fie
 
 from apex_ray import git
 from apex_ray.diff import parse_unified_diff
+from apex_ray.invocation import ReviewOverrides, apply_review_overrides
 from apex_ray.llm import FakeLLMProvider, LLMProvider
 from apex_ray.models import (
     AnalyzerReference,
@@ -341,32 +340,27 @@ def run_benchmark_case(
         raise BenchmarkError(f"Benchmark diff does not exist for {case.name}: {diff_path}")
 
     config = ReviewConfig(rules=case.rules)
-    config.llm.enabled = case.llm if case.llm is not None else llm_enabled
-    config.llm.provider = provider_override or case.provider or config.llm.provider
-    if case.model:
-        config.llm.model = case.model
     if case.profiles:
         config.llm.profiles = case.profiles
     if case.routing:
         config.llm.routing = case.routing
-    if verify_override is not None:
-        config.llm.verify = verify_override
-    elif case.verify is not None:
-        config.llm.verify = case.verify
-    if cache_enabled is not None:
-        config.llm.cache_enabled = cache_enabled and config.llm.cache_enabled
-    if refresh_cache:
-        config.llm.refresh_cache = True
-    if cache_dir:
-        config.llm.cache_dir = str(cache_dir)
-    if llm_jobs is not None:
-        config.llm.jobs = llm_jobs
-    if analyzer_cache_enabled is not None:
-        config.analyzer.index_cache_enabled = analyzer_cache_enabled and config.analyzer.index_cache_enabled
-    if refresh_analyzer_cache:
-        config.analyzer.refresh_index_cache = True
-    if analyzer_cache_dir:
-        config.analyzer.index_cache_dir = str(analyzer_cache_dir)
+    config = apply_review_overrides(
+        config,
+        ReviewOverrides(
+            llm_enabled=case.llm if case.llm is not None else llm_enabled,
+            provider=provider_override or case.provider,
+            model=case.model,
+            clear_routing_on_model=not (case.profiles or case.routing),
+            verify=verify_override if verify_override is not None else case.verify,
+            cache_allowed=cache_enabled,
+            refresh_cache=refresh_cache,
+            cache_dir=cache_dir,
+            llm_jobs=llm_jobs,
+            analyzer_cache_allowed=analyzer_cache_enabled,
+            refresh_analyzer_cache=refresh_analyzer_cache,
+            analyzer_cache_dir=analyzer_cache_dir,
+        ),
+    )
 
     provider = _provider_for_case(case, config.llm)
     report = run_review_pipeline(

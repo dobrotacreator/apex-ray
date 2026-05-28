@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from apex_ray.models import (
     AnalyzerSymbol,
     ContextPack,

@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from pathlib import Path
 
 import pytest
@@ -35,7 +33,7 @@ def test_init_config_creates_default_file(tmp_path: Path) -> None:
     assert config.memory.paths == [".apex-ray/memory"]
     assert config.memory.max_cards_per_pack == 4
     assert config.llm.profiles == {}
-    assert config.llm.enabled is True
+    assert config.llm.enabled is False
     assert config.telemetry.enabled is False
     assert config.telemetry.path == ".apex-ray/telemetry/review-runs.jsonl"
 
@@ -147,6 +145,10 @@ def test_init_project_creates_team_setup_files(tmp_path: Path) -> None:
     assert "apex-ray-review" in (tmp_path / "lefthook.yml").read_text(encoding="utf-8")
     assert (tmp_path / "AGENTS.md").exists()
     assert (tmp_path / ".claude" / "CLAUDE.md").exists()
+    assert "--no-llm" in (tmp_path / "lefthook.yml").read_text(encoding="utf-8")
+    agents_text = (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
+    assert "review --continue-from .apex-ray/reports/review.json --residual-priority p0 --no-llm" in agents_text
+    assert "Add `--llm` only when" in agents_text
 
 
 def test_init_project_is_idempotent_for_existing_agent_files(tmp_path: Path) -> None:

@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from collections import Counter
 from collections.abc import Iterable
 from datetime import UTC, datetime

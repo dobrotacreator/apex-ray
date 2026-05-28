@@ -6,6 +6,11 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "build:test": "npm run build && tsc -p tsconfig.test.json",
+    "typecheck:test": "npm run build && tsc -p tsconfig.test.json --noEmit",
+    "pretest": "npm run build:test",
+    "test": "node --test dist-test/*.test.js",
+    "coverage": "npm run build:test && node --test --experimental-test-coverage --test-coverage-include=dist/**/*.js --test-coverage-exclude=**/node_modules/** dist-test/*.test.js",
     "analyze": "node dist/analyze.js"
   },
   "dependencies": {

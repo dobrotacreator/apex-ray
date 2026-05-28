@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from pathlib import Path
 
 from apex_ray.classify import classify_diff, detect_file_kind, detect_language

@@ -16,9 +16,8 @@ Install dependencies and build the TypeScript analyzer:
 
 ```bash
 uv sync --all-groups
-cd analyzers/typescript
-npm ci
-npm run build
+npm --prefix analyzers/typescript ci
+npm --prefix analyzers/typescript run build
 ```
 
 Run the main checks from the repository root:
@@ -27,8 +26,11 @@ Run the main checks from the repository root:
 uv run ruff format --check .
 uv run ruff check .
 uv run pyright
-uv run pytest -q
-cd analyzers/typescript && npm run build
+uv run coverage run -m pytest -q
+uv run coverage report -m
+npm --prefix analyzers/typescript run typecheck
+npm --prefix analyzers/typescript test
+npm --prefix analyzers/typescript run coverage
 uv build --sdist --wheel
 uv run twine check dist/*
 git diff --check

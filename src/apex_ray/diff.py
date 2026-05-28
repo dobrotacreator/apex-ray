@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import re
 
 from apex_ray.models import (
@@ -67,14 +65,14 @@ def parse_unified_diff(text: str, target_mode: TargetMode, base: str | None = No
             current_file.status = FileStatus.COPIED
             current_file.new_path = raw_line.removeprefix("copy to ").strip()
             continue
-        if raw_line.startswith("--- "):
+        if current_hunk is None and raw_line.startswith("--- "):
             path = _parse_marker_path(raw_line[4:])
             if path is None:
                 current_file.old_path = None
             elif current_file.status not in {FileStatus.RENAMED, FileStatus.COPIED}:
                 current_file.old_path = path
             continue
-        if raw_line.startswith("+++ "):
+        if current_hunk is None and raw_line.startswith("+++ "):
             path = _parse_marker_path(raw_line[4:])
             if path is None:
                 current_file.new_path = None
@@ -99,13 +97,13 @@ def parse_unified_diff(text: str, target_mode: TargetMode, base: str | None = No
         if current_hunk is None:
             continue
 
-        if raw_line.startswith("+") and not raw_line.startswith("+++"):
+        if raw_line.startswith("+"):
             current_hunk.lines.append(
                 DiffLine(kind=DiffLineKind.ADD, content=raw_line[1:], old_line=None, new_line=new_line)
             )
             current_file.additions += 1
             new_line += 1
-        elif raw_line.startswith("-") and not raw_line.startswith("---"):
+        elif raw_line.startswith("-"):
             current_hunk.lines.append(
                 DiffLine(kind=DiffLineKind.DELETE, content=raw_line[1:], old_line=old_line, new_line=None)
             )

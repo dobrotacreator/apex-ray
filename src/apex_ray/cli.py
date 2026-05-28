@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import shutil
 import time
 from pathlib import Path
@@ -22,9 +20,10 @@ from apex_ray.benchmark import (
 )
 from apex_ray.config import ConfigError, find_local_config, init_project, load_config
 from apex_ray.discovery import discover_project
+from apex_ray.invocation import ReviewOverrides, apply_review_overrides
 from apex_ray.llm import LLMProviderError
 from apex_ray.memory import memory_suggestions_from_report
-from apex_ray.models import LLMCoverageMode, LLMProviderName, LLMRoutingConfig, ReviewReport, TargetMode
+from apex_ray.models import LLMCoverageMode, LLMProviderName, ReviewReport, TargetMode
 from apex_ray.pipeline import continue_review_from_report, run_review_pipeline
 from apex_ray.pr_eval import (
     DEFAULT_FIRST_PASS_WINDOW_MINUTES,
@@ -538,47 +537,37 @@ def review(
         root = Path(prior_report.project.root)
         review_config = prior_report.config
 
-    effective_config = review_config.model_copy(deep=True)
+    parsed_provider = None
     if llm_provider:
         try:
-            effective_config.llm.provider = LLMProviderName(llm_provider)
+            parsed_provider = LLMProviderName(llm_provider)
         except ValueError as exc:
             raise typer.BadParameter(f"Unsupported LLM provider: {llm_provider}") from exc
-    if llm_model:
-        effective_config.llm.model = llm_model
-        effective_config.llm.profiles = {}
-        effective_config.llm.routing = LLMRoutingConfig()
-    if llm_jobs is not None:
-        effective_config.llm.jobs = llm_jobs
+    parsed_coverage_mode = None
     if llm_coverage_mode is not None:
         try:
-            effective_config.llm.coverage_mode = LLMCoverageMode(llm_coverage_mode)
+            parsed_coverage_mode = LLMCoverageMode(llm_coverage_mode)
         except ValueError as exc:
             raise typer.BadParameter(f"Unsupported LLM coverage mode: {llm_coverage_mode}") from exc
-    if llm_max_deep_packs is not None:
-        effective_config.llm.max_deep_packs = llm_max_deep_packs
-    if llm_max_input_tokens is not None:
-        effective_config.llm.max_input_tokens = llm_max_input_tokens
-    if llm:
-        effective_config.llm.enabled = True
-    if no_llm:
-        effective_config.llm.enabled = False
-    if continue_from is not None and not no_llm:
-        effective_config.llm.enabled = True
-    if verify:
-        effective_config.llm.verify = True
-    if no_verify:
-        effective_config.llm.verify = False
-    effective_config.llm.cache_enabled = cache and effective_config.llm.cache_enabled
-    if refresh_cache:
-        effective_config.llm.refresh_cache = True
-    if cache_dir:
-        effective_config.llm.cache_dir = str(cache_dir)
-    effective_config.analyzer.index_cache_enabled = analyzer_cache and effective_config.analyzer.index_cache_enabled
-    if refresh_analyzer_cache:
-        effective_config.analyzer.refresh_index_cache = True
-    if analyzer_cache_dir:
-        effective_config.analyzer.index_cache_dir = str(analyzer_cache_dir)
+    effective_config = apply_review_overrides(
+        review_config,
+        ReviewOverrides(
+            llm_enabled=True if llm else False if no_llm else None,
+            provider=parsed_provider,
+            model=llm_model,
+            verify=True if verify else False if no_verify else None,
+            cache_allowed=cache,
+            refresh_cache=refresh_cache,
+            cache_dir=cache_dir,
+            llm_jobs=llm_jobs,
+            coverage_mode=parsed_coverage_mode,
+            max_deep_packs=llm_max_deep_packs,
+            max_input_tokens=llm_max_input_tokens,
+            analyzer_cache_allowed=analyzer_cache,
+            refresh_analyzer_cache=refresh_analyzer_cache,
+            analyzer_cache_dir=analyzer_cache_dir,
+        ),
+    )
     telemetry_enabled = (
         effective_config.telemetry.enabled or telemetry or telemetry_path is not None
     ) and not no_telemetry

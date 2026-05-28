@@ -14,7 +14,7 @@ Apex Ray reads a git diff, builds compact context packs around changed code, run
 
 - Builds TS/JS context packs from changed files, symbols, callers, callees, contracts, metadata, and related tests.
 - Supports project-specific rules and repo-committed review memory.
-- Runs without LLM calls, or with Codex CLI when configured.
+- Runs without LLM calls, or with Codex CLI / Claude Code CLI when configured.
 - Routes cheap and strong models through profiles.
 - Tracks LLM coverage, skipped packs, partial severity, provider failures, cache usage, and continuation commands.
 - Replays historical GitHub PR review comments for local evals.
@@ -31,7 +31,7 @@ Apex Ray does not replace CI, tests, linters, typecheck, dependency scanners, SA
 - npm
 - git
 - uv for development
-- Codex CLI for LLM review
+- Codex CLI or Claude Code CLI for LLM review
 - GitHub CLI only for historical PR capture/eval commands
 
 ## Install
@@ -42,9 +42,8 @@ The project is not published yet. For local development:
 git clone git@github.com:dobrotacreator/apex-ray.git
 cd apex-ray
 uv sync --all-groups
-cd analyzers/typescript
-npm ci
-npm run build
+npm --prefix analyzers/typescript ci
+npm --prefix analyzers/typescript run build
 ```
 
 Run from the repository root:
@@ -52,6 +51,13 @@ Run from the repository root:
 ```bash
 uv run apex-ray --version
 uv run apex-ray doctor
+```
+
+The shorter `apex-ray ...` commands below assume the console script is installed on your `PATH`. When working from a source checkout, either prefix commands with `uv run` or install the local checkout as a user tool:
+
+```bash
+uv tool install --editable .
+apex-ray doctor
 ```
 
 ## Quickstart
@@ -64,7 +70,7 @@ apex-ray doctor
 apex-ray review --worktree --no-llm --output review.md --json review.json
 ```
 
-`apex-ray init` creates `.apex-ray/config.yml`, rules/memory/report directories, gitignore entries, agent instruction files, and a Lefthook pre-push review command. Use `--hooks none` or `--agent-files none` for exceptional repositories.
+`apex-ray init` creates `.apex-ray/config.yml`, rules/memory/report directories, gitignore entries, agent instruction files, and a no-LLM Lefthook pre-push review command. Use `--hooks none` or `--agent-files none` for exceptional repositories.
 
 Run LLM review when Codex CLI is configured:
 
@@ -194,8 +200,11 @@ Caches and telemetry are local files. They may include repository paths, model n
 ## Development
 
 ```bash
-uv run pytest -q
-cd analyzers/typescript && npm run build
+uv run coverage run -m pytest -q
+uv run coverage report -m
+npm --prefix analyzers/typescript run typecheck
+npm --prefix analyzers/typescript test
+npm --prefix analyzers/typescript run coverage
 git diff --check
 ```
 

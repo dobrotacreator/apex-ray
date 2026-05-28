@@ -1,8 +1,7 @@
-from __future__ import annotations
-
 import json
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from apex_ray.benchmark import (
@@ -30,6 +29,10 @@ from apex_ray.models import Finding, FindingConfidence, FindingSeverity, LLMRun
 
 ROOT = Path(__file__).resolve().parents[1]
 BENCHMARKS = ROOT / "tests" / "benchmarks"
+CONTEXT_BENCHMARK_CASES = [
+    *sorted(BENCHMARKS.glob("*_context.yml")),
+    BENCHMARKS / "routes_context_static.yml",
+]
 runner = CliRunner()
 
 
@@ -102,6 +105,15 @@ def test_run_benchmark_cases_with_fake_provider() -> None:
     assert report.expected_context_total == 1
     assert report.missed_context_total == 0
     assert report.extra_findings_total == 0
+
+
+@pytest.mark.parametrize("case_path", CONTEXT_BENCHMARK_CASES, ids=lambda path: path.stem)
+def test_context_benchmark_case_passes(case_path: Path, built_ts_analyzer: None) -> None:
+    report = run_benchmark_cases([case_path])
+
+    assert report.total == 1
+    assert report.failed == 0
+    assert report.missed_context_total == 0
 
 
 def test_benchmark_cache_telemetry_uses_batch_counters() -> None:
