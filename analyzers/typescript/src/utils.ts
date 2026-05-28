@@ -62,6 +62,21 @@ export function sourceFileName(source: ts.SourceFile): string {
   return normalizeRelPath(source.fileName);
 }
 
+export function readUtf8(filePath: string): string | null {
+  try {
+    return fs.readFileSync(filePath, "utf-8");
+  } catch {
+    return null;
+  }
+}
+
+export function scriptKindForPath(filePath: string): ts.ScriptKind {
+  if (/\.tsx$/.test(filePath)) return ts.ScriptKind.TSX;
+  if (/\.jsx$/.test(filePath)) return ts.ScriptKind.JSX;
+  if (/\.js$/.test(filePath)) return ts.ScriptKind.JS;
+  return ts.ScriptKind.TS;
+}
+
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }

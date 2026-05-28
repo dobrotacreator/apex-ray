@@ -44,6 +44,34 @@ export function identifiersFromArrayExpression(expression: ts.Expression | undef
     .filter((identifier): identifier is ts.Identifier => identifier !== null);
 }
 
+export function arrayLiteralExpressionForInitializer(expression: ts.Expression | undefined): ts.ArrayLiteralExpression | null {
+  const unwrapped = unwrapExpression(expression);
+  if (!unwrapped) return null;
+  if (ts.isArrayLiteralExpression(unwrapped)) return unwrapped;
+  if (!isObjectFreezeCall(unwrapped) && !isCollectionConstructorCall(unwrapped)) return null;
+
+  const [argument] = unwrapped.arguments ?? [];
+  const arrayArgument = unwrapExpression(argument);
+  return arrayArgument && ts.isArrayLiteralExpression(arrayArgument) ? arrayArgument : null;
+}
+
+export function isObjectFreezeCall(expression: ts.Expression): expression is ts.CallExpression {
+  if (!ts.isCallExpression(expression)) return false;
+  const callee = expression.expression;
+  return (
+    ts.isPropertyAccessExpression(callee) &&
+    ts.isIdentifier(callee.expression) &&
+    callee.expression.text === "Object" &&
+    callee.name.text === "freeze"
+  );
+}
+
+function isCollectionConstructorCall(expression: ts.Expression): expression is ts.NewExpression {
+  if (!ts.isNewExpression(expression)) return false;
+  if (!ts.isIdentifier(expression.expression)) return false;
+  return expression.expression.text === "Map" || expression.expression.text === "Set";
+}
+
 export function unwrapExpression(expression: ts.Expression | undefined): ts.Expression | null {
   if (!expression) return null;
   let current = expression;
