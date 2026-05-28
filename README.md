@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/apex-ray-logo-animated.svg" alt="Apex Ray logo animation" width="168">
+  <img src="docs/assets/apex-ray-logo-animated.svg" alt="Apex Ray logo animation" width="240">
 </p>
 
 # Apex Ray
