@@ -4,9 +4,10 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "clean:test": "node -e \"const fs=require('node:fs'); fs.rmSync('dist-test',{recursive:true,force:true});\"",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "build:test": "npm run build && tsc -p tsconfig.test.json",
+    "build:test": "npm run build && npm run clean:test && tsc -p tsconfig.test.json",
     "typecheck:test": "npm run build && tsc -p tsconfig.test.json --noEmit",
     "pretest": "npm run build:test",
     "test": "node --test dist-test/*.test.js",
