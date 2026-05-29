@@ -11,6 +11,7 @@ from apex_ray.context_snippets import metadata_snippets as _metadata_snippets
 from apex_ray.context_snippets import reference_snippets as _reference_snippets
 from apex_ray.context_snippets import test_anchor_terms as _test_anchor_terms
 from apex_ray.context_snippets import test_snippets as _test_snippets
+from apex_ray.line_ranges import merge_line_ranges as _merge_line_ranges
 from apex_ray.memory import select_memory_for_pack
 from apex_ray.models import (
     AnalyzerFile,
@@ -485,20 +486,6 @@ def _changed_lines_for_symbols(changed_file: ChangedFile, symbols: list[Analyzer
                 continue
             changed_ranges.append((max(hunk_start, symbol_start), min(hunk_end, symbol_end)))
     return _merge_line_ranges(changed_ranges) or hunk_ranges
-
-
-def _merge_line_ranges(ranges: list[tuple[int, int]]) -> list[tuple[int, int]]:
-    ordered = sorted((min(start, end), max(start, end)) for start, end in ranges if start > 0 and end > 0)
-    if not ordered:
-        return []
-    merged = [ordered[0]]
-    for start, end in ordered[1:]:
-        previous_start, previous_end = merged[-1]
-        if start <= previous_end + 1:
-            merged[-1] = (previous_start, max(previous_end, end))
-        else:
-            merged.append((start, end))
-    return merged
 
 
 def _risk_signals_for_ranges(
