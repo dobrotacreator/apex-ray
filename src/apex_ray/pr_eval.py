@@ -2,8 +2,6 @@ import hashlib
 import json
 import multiprocessing
 import os
-import re
-import shutil
 import signal
 import subprocess
 import tempfile
@@ -14,7 +12,6 @@ from multiprocessing.process import BaseProcess
 from pathlib import Path
 from typing import Any, Literal, TypedDict
 
-import yaml
 from pydantic import ValidationError
 
 try:
@@ -23,6 +20,7 @@ except ImportError:  # pragma: no cover - fcntl is not available on Windows.
     fcntl = None
 
 from apex_ray import git
+from apex_ray import pr_eval_github as _github_helpers
 from apex_ray.config import ConfigError, load_config
 from apex_ray.invocation import ReviewOverrides, apply_review_overrides
 from apex_ray.models import (
@@ -33,9 +31,6 @@ from apex_ray.models import (
 from apex_ray.pipeline import run_review_pipeline
 from apex_ray.pr_eval_greptile import (
     greptile_findings_from_comments as _greptile_findings_from_comments,
-)
-from apex_ray.pr_eval_greptile import (
-    load_greptile_comments as _load_greptile_comments_from_github,
 )
 from apex_ray.pr_eval_greptile import (
     parse_iso as _parse_iso,
@@ -905,22 +900,15 @@ def _run_one_pr_eval_case(
 
 
 def _load_prs(repo_root: Path, pr_numbers: list[int] | None, limit: int) -> list[dict[str, Any]]:
-    fields = "number,title,url,author,baseRefName,headRefName,baseRefOid,headRefOid,mergeCommit,createdAt,mergedAt"
-    if pr_numbers:
-        return [_run_gh_json(["pr", "view", str(number), "--json", fields], repo_root) for number in pr_numbers]
-    return _run_gh_json(["pr", "list", "--state", "merged", "--limit", str(limit), "--json", fields], repo_root)
+    return _github_helpers.load_prs(repo_root, pr_numbers, limit, run_gh_json=_run_gh_json)
 
 
 def _load_pr_commit_oids(repo_root: Path, number: int) -> list[str]:
-    data = _run_gh_json(["pr", "view", str(number), "--json", "commits"], repo_root)
-    commits = data.get("commits", [])
-    if not isinstance(commits, list):
-        return []
-    return [str(commit.get("oid")) for commit in commits if isinstance(commit, dict) and commit.get("oid")]
+    return _github_helpers.load_pr_commit_oids(repo_root, number, run_gh_json=_run_gh_json)
 
 
 def _load_greptile_comments(owner_repo: str, number: int, repo_root: Path) -> list[GreptileComment]:
-    return _load_greptile_comments_from_github(
+    return _github_helpers.load_greptile_comments(
         owner_repo,
         number,
         repo_root,
@@ -930,85 +918,43 @@ def _load_greptile_comments(owner_repo: str, number: int, repo_root: Path) -> li
 
 
 def _github_name_with_owner(repo_root: Path) -> str:
-    data = _run_gh_json(["repo", "view", "--json", "nameWithOwner"], repo_root)
-    value = data.get("nameWithOwner")
-    if not value:
-        raise PrEvalError("Unable to resolve GitHub repository nameWithOwner via gh.")
-    return str(value)
+    return _github_helpers.github_name_with_owner(repo_root, run_gh_json=_run_gh_json)
 
 
 def _run_gh_json(args: list[str], cwd: Path) -> Any:
-    proc = _run_gh(args, cwd)
-    try:
-        return json.loads(proc.stdout or "null")
-    except json.JSONDecodeError as exc:
-        raise PrEvalError(f"Unable to parse gh JSON output for {' '.join(args)}: {exc}") from exc
+    return _github_helpers.run_gh_json_default(args, cwd)
 
 
 def _run_gh_api_paginated_array(path: str, cwd: Path) -> list[dict[str, Any]]:
-    payload = _run_gh_json(["api", path, "--paginate", "--slurp"], cwd)
-    if isinstance(payload, list) and all(isinstance(page, list) for page in payload):
-        return [item for page in payload for item in page if isinstance(item, dict)]
-    if isinstance(payload, list):
-        return [item for item in payload if isinstance(item, dict)]
-    raise PrEvalError(f"Expected gh api {path} to return a JSON array.")
+    return _github_helpers.run_gh_api_paginated_array_default(path, cwd, run_gh_json=_run_gh_json)
 
 
 def _run_gh_text(args: list[str], cwd: Path) -> str:
-    return _run_gh(args, cwd).stdout
+    return _github_helpers.run_gh_text_default(args, cwd)
 
 
 def _run_gh(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
-    if shutil.which("gh") is None:
-        raise PrEvalError("GitHub CLI `gh` is not available.")
-    proc = subprocess.run(["gh", *args], cwd=cwd, text=True, capture_output=True, check=False)
-    if proc.returncode != 0:
-        details = proc.stderr.strip() or proc.stdout.strip()
-        raise PrEvalError(f"gh {' '.join(args)} failed ({proc.returncode}): {details}")
-    return proc
+    return _github_helpers.run_gh(args, cwd)
 
 
 def _merge_commit_oid(pr: dict[str, Any]) -> str | None:
-    merge_commit = pr.get("mergeCommit")
-    if isinstance(merge_commit, dict):
-        return merge_commit.get("oid")
-    return None
+    return _github_helpers.merge_commit_oid(pr)
 
 
 def _write_case_manifest(path: Path, case: PullRequestEvalCase) -> None:
-    _atomic_write_text(
-        path,
-        yaml.safe_dump(case.model_dump(mode="json", exclude_none=True), sort_keys=False),
-    )
+    _github_helpers.write_case_manifest(path, case)
 
 
 def _case_manifest_paths(cases_dir: Path, pr_numbers: list[int] | None, limit: int | None) -> list[Path]:
-    if pr_numbers:
-        paths = [cases_dir / f"pr-{number}" / "manifest.yml" for number in pr_numbers]
-    else:
-        paths = sorted(cases_dir.glob("pr-*/manifest.yml"), key=lambda path: _pr_number_from_case_path(path))
-    if limit is not None:
-        paths = paths[:limit]
-    missing = [path for path in paths if not path.exists()]
-    if missing:
-        raise PrEvalError("Missing PR eval manifest(s): " + ", ".join(str(path) for path in missing))
-    return paths
+    return _github_helpers.case_manifest_paths(cases_dir, pr_numbers, limit)
 
 
 def _pr_number_from_case_path(path: Path) -> int:
-    match = re.search(r"pr-(\d+)", path.as_posix())
-    return int(match.group(1)) if match else 0
+    return _github_helpers.pr_number_from_case_path(path)
 
 
 def _replay_head_sha_from_findings(findings: list[GreptileFinding]) -> str | None:
-    first_pass_shas = [
-        finding.original_commit_id or finding.commit_id
-        for finding in findings
-        if finding.first_pass and (finding.original_commit_id or finding.commit_id)
-    ]
-    if not first_pass_shas:
-        return None
-    return first_pass_shas[0]
+    return _github_helpers.replay_head_sha_from_findings(findings)
 
 
 def _replay_base_sha(
@@ -1018,19 +964,18 @@ def _replay_base_sha(
     replay_head_sha: str,
     default_base_sha: str,
 ) -> str:
-    if replay_head_sha not in pr_commit_oids or not pr_commit_oids:
-        return default_base_sha
-    first_pr_commit = pr_commit_oids[0]
-    return _github_commit_first_parent(owner_repo, first_pr_commit, repo_root) or default_base_sha
+    return _github_helpers.replay_base_sha(
+        repo_root,
+        owner_repo,
+        pr_commit_oids,
+        replay_head_sha,
+        default_base_sha,
+        github_commit_first_parent=_github_commit_first_parent,
+    )
 
 
 def _github_commit_first_parent(owner_repo: str, sha: str, repo_root: Path) -> str | None:
-    data = _run_gh_json(["api", f"repos/{owner_repo}/commits/{sha}"], repo_root)
-    parents = data.get("parents", [])
-    if isinstance(parents, list) and parents and isinstance(parents[0], dict):
-        parent = parents[0].get("sha")
-        return str(parent) if parent else None
-    return None
+    return _github_helpers.github_commit_first_parent_default(owner_repo, sha, repo_root, run_gh_json=_run_gh_json)
 
 
 def _pr_diff_from_git(
@@ -1042,84 +987,32 @@ def _pr_diff_from_git(
     *,
     allow_pr_diff_fallback: bool = False,
 ) -> str:
-    if not base_sha or not head_sha:
-        raise PrEvalError(f"PR #{pr_number}: missing base/head commit SHA for diff capture.")
-    errors: list[str] = []
-    try:
-        _ensure_commit_available(repo_root, base_sha, pr_number=pr_number)
-        _ensure_commit_available(repo_root, head_sha, pr_number=pr_number)
-        proc = git.run_git(
-            ["diff", "--no-ext-diff", "--find-renames", "--find-copies", f"{base_sha}...{head_sha}"],
-            cwd=repo_root,
-            check=False,
-        )
-        if proc.returncode == 0 and proc.stdout.strip():
-            return proc.stdout
-        errors.append(proc.stderr.strip() or f"git diff {base_sha}...{head_sha} returned {proc.returncode}")
-    except PrEvalError as exc:
-        errors.append(str(exc))
-    diff = _github_compare_diff(owner_repo, base_sha, head_sha, repo_root)
-    if not diff.strip() and allow_pr_diff_fallback:
-        diff = _run_gh_text(["pr", "diff", str(pr_number)], repo_root)
-    if not diff.strip():
-        detail = "; ".join(error for error in errors if error)
-        suffix = f" Local git diff failed first: {detail}" if detail else ""
-        raise PrEvalError(f"PR #{pr_number}: captured diff is empty.{suffix}")
-    return diff
+    return _github_helpers.pr_diff_from_git(
+        repo_root,
+        owner_repo,
+        pr_number,
+        base_sha,
+        head_sha,
+        allow_pr_diff_fallback=allow_pr_diff_fallback,
+        ensure_commit_available=_ensure_commit_available,
+        github_compare_diff=_github_compare_diff,
+        run_gh_text=_run_gh_text,
+    )
 
 
 def _github_compare_diff(owner_repo: str, base_sha: str, head_sha: str, repo_root: Path) -> str:
-    try:
-        return _run_gh_text(
-            [
-                "api",
-                f"repos/{owner_repo}/compare/{base_sha}...{head_sha}",
-                "-H",
-                "Accept: application/vnd.github.v3.diff",
-            ],
-            repo_root,
-        )
-    except PrEvalError:
-        return ""
+    return _github_helpers.github_compare_diff_default(
+        owner_repo,
+        base_sha,
+        head_sha,
+        repo_root,
+        run_gh_text=_run_gh_text,
+    )
 
 
 def _ensure_commit_available(repo_root: Path, sha: str, *, pr_number: int | None = None) -> None:
-    if git.run_git(["cat-file", "-e", f"{sha}^{{commit}}"], cwd=repo_root, check=False).returncode == 0:
-        return
-    fetch_attempts = [["fetch", "origin", sha, "--depth=1"]]
-    if pr_number is not None:
-        fetch_attempts.extend(
-            [
-                ["fetch", "origin", f"+refs/pull/{pr_number}/head:refs/apex-ray/pr-eval/{pr_number}/head", "--depth=1"],
-                [
-                    "fetch",
-                    "origin",
-                    f"+refs/pull/{pr_number}/merge:refs/apex-ray/pr-eval/{pr_number}/merge",
-                    "--depth=1",
-                ],
-            ]
-        )
-    errors: list[str] = []
-    for args in fetch_attempts:
-        proc = git.run_git(args, cwd=repo_root, check=False)
-        if (
-            proc.returncode == 0
-            and git.run_git(["cat-file", "-e", f"{sha}^{{commit}}"], cwd=repo_root, check=False).returncode == 0
-        ):
-            return
-        if proc.returncode != 0:
-            errors.append(proc.stderr.strip() or f"git {' '.join(args)} failed with {proc.returncode}")
-    detail = "; ".join(error for error in errors if error)
-    suffix = f": {detail}" if detail else ""
-    raise PrEvalError(f"Commit {sha} is not available locally and could not be fetched{suffix}")
+    _github_helpers.ensure_commit_available_default(repo_root, sha, pr_number=pr_number)
 
 
 def _overlay_current_apex_config(source_repo: Path, worktree: Path) -> None:
-    source = source_repo / ".apex-ray"
-    if not source.exists():
-        return
-    target = worktree / ".apex-ray"
-    if target.exists():
-        shutil.rmtree(target)
-    ignore = shutil.ignore_patterns("cache", "config.local.yml", "telemetry", "reports", "eval", "evals")
-    shutil.copytree(source, target, ignore=ignore)
+    _github_helpers.overlay_current_apex_config(source_repo, worktree)
