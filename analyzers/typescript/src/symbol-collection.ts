@@ -4,14 +4,13 @@ import {
   arrayLiteralExpressionForInitializer,
   decoratorsForNode,
   isObjectFreezeCall,
-  moduleExportNameText,
   propertyAssignmentNamed,
   propertyNameText,
   unwrapExpression,
 } from "./ast-utils.js";
 import { canonicalSymbol } from "./checker-utils.js";
 import { ARRAY_OBJECT_ENTRY_ID_PROPERTY_NAMES } from "./constants.js";
-import { commonJsExportEntries } from "./import-export-index.js";
+import { collectExportedSymbolInfo } from "./symbol-export-info.js";
 import type {
   CollectedSymbol,
   DeletedLine,
@@ -19,6 +18,8 @@ import type {
   ExportedSymbolInfo,
   SymbolKind,
 } from "./types.js";
+
+export { collectExports, collectImports } from "./symbol-export-info.js";
 
 export function collectSymbols(source: ts.SourceFile, checker: ts.TypeChecker): CollectedSymbol[] {
   const symbols: CollectedSymbol[] = [];
@@ -117,34 +118,6 @@ export function preferSyntheticChildSymbols(symbols: CollectedSymbol[]): Collect
   const containerNodes = new Set(symbols.map((symbol) => symbol.containerNode).filter((node): node is ts.Node => Boolean(node)));
   if (containerNodes.size === 0) return symbols;
   return symbols.filter((symbol) => !containerNodes.has(symbol.node));
-}
-
-export function collectImports(source: ts.SourceFile): string[] {
-  const imports: string[] = [];
-  for (const statement of source.statements) {
-    if (ts.isImportDeclaration(statement)) {
-      imports.push(statement.getText(source));
-    }
-  }
-  return imports;
-}
-
-export function collectExports(source: ts.SourceFile): string[] {
-  const exports: string[] = [];
-  for (const statement of source.statements) {
-    if (ts.isExpressionStatement(statement) && commonJsExportEntries(statement.expression).length > 0) {
-      exports.push(statement.getText(source));
-      continue;
-    }
-    if (ts.isExportDeclaration(statement) || ts.isExportAssignment(statement)) {
-      exports.push(statement.getText(source));
-      continue;
-    }
-    if (ts.canHaveModifiers(statement) && ts.getModifiers(statement)?.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword)) {
-      exports.push(statement.getText(source).split("\n")[0].trim());
-    }
-  }
-  return exports;
 }
 
 function nodeStartIncludingDecorators(source: ts.SourceFile, node: ts.Node): number {
@@ -517,46 +490,6 @@ function compactExpressionValueText(expression: ts.Expression, source: ts.Source
 function compactSymbolNameSegment(value: string): string {
   const compacted = value.replace(/\s+/g, " ").trim();
   return compacted.length > 100 ? `${compacted.slice(0, 97)}...` : compacted;
-}
-
-function collectExportedSymbolInfo(source: ts.SourceFile): ExportedSymbolInfo {
-  const named = new Set<string>();
-  const defaultNames = new Set<string>();
-
-  for (const statement of source.statements) {
-    if (ts.isExpressionStatement(statement)) {
-      for (const entry of commonJsExportEntries(statement.expression)) {
-        if (entry.defaultExported) {
-          defaultNames.add(entry.localName);
-        } else {
-          named.add(entry.localName);
-        }
-      }
-      continue;
-    }
-
-    if (ts.isExportDeclaration(statement)) {
-      if (statement.moduleSpecifier || !statement.exportClause || !ts.isNamedExports(statement.exportClause)) {
-        continue;
-      }
-      for (const specifier of statement.exportClause.elements) {
-        const localName = moduleExportNameText(specifier.propertyName ?? specifier.name);
-        const exportedName = moduleExportNameText(specifier.name);
-        if (exportedName === "default") {
-          defaultNames.add(localName);
-        } else {
-          named.add(localName);
-        }
-      }
-      continue;
-    }
-
-    if (ts.isExportAssignment(statement) && ts.isIdentifier(statement.expression)) {
-      defaultNames.add(statement.expression.text);
-    }
-  }
-
-  return { named, defaultNames };
 }
 
 function exportContainerForNode(node: ts.Node, exportInfo: ExportedSymbolInfo): ExportContainer | null {
