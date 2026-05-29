@@ -97,9 +97,11 @@ def render_markdown(report: ReviewReport) -> str:
         f"- Deletions: `{report.diff.stats.deletions}`",
         f"- Ignored files: `{report.diff.stats.ignored_files}`",
         "",
-        "## Changed Files",
-        "",
     ]
+
+    _append_findings_section(lines, report)
+
+    lines.extend(["## Changed Files", ""])
 
     if not report.diff.files:
         lines.append("No changed files detected.")
@@ -313,31 +315,6 @@ def render_markdown(report: ReviewReport) -> str:
                 )
         lines.append("")
 
-    lines.extend(["## Findings", ""])
-    if not report.findings:
-        if report.llm_runs:
-            lines.append("No LLM findings reported.")
-        else:
-            lines.append("LLM review was not run.")
-        lines.append("")
-    else:
-        for severity in ("critical", "high", "medium", "low"):
-            matching = [finding for finding in report.findings if finding.severity == severity]
-            if not matching:
-                continue
-            lines.append(f"### {severity.title()}")
-            lines.append("")
-            for finding in matching:
-                location = f"{finding.file}:{finding.line}" if finding.line else finding.file
-                lines.append(f"- {finding.title} (`{finding.confidence}` confidence) at `{location}`")
-                if finding.context_pack_id:
-                    lines.append(f"  - Context pack: `{finding.context_pack_id}`")
-                lines.append(f"  - Failure mode: {finding.failure_mode}")
-                lines.append(f"  - Evidence: {finding.evidence}")
-                lines.append(f"  - Suggested fix: {finding.suggested_fix}")
-                lines.append(f"  - Suggested test: {finding.suggested_test}")
-            lines.append("")
-
     lines.extend(["## Verifier", ""])
     if not report.verifications:
         lines.append("Verifier was not run.")
@@ -397,6 +374,33 @@ def render_markdown(report: ReviewReport) -> str:
     lines.append("")
 
     return "\n".join(lines)
+
+
+def _append_findings_section(lines: list[str], report: ReviewReport) -> None:
+    lines.extend(["## Findings", ""])
+    if not report.findings:
+        if report.llm_runs:
+            lines.append("No LLM findings reported.")
+        else:
+            lines.append("LLM review was not run.")
+        lines.append("")
+        return
+    for severity in ("critical", "high", "medium", "low"):
+        matching = [finding for finding in report.findings if finding.severity == severity]
+        if not matching:
+            continue
+        lines.append(f"### {severity.title()}")
+        lines.append("")
+        for finding in matching:
+            location = f"{finding.file}:{finding.line}" if finding.line else finding.file
+            lines.append(f"- {finding.title} (`{finding.confidence}` confidence) at `{location}`")
+            if finding.context_pack_id:
+                lines.append(f"  - Context pack: `{finding.context_pack_id}`")
+            lines.append(f"  - Failure mode: {finding.failure_mode}")
+            lines.append(f"  - Evidence: {finding.evidence}")
+            lines.append(f"  - Suggested fix: {finding.suggested_fix}")
+            lines.append(f"  - Suggested test: {finding.suggested_test}")
+        lines.append("")
 
 
 def _build_memory_summary(config: ReviewConfig, context_packs: list[ContextPack]) -> MemorySummary:

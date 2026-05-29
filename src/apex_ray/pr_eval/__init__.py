@@ -1,10 +1,12 @@
 import json
 import multiprocessing
 import os
+import shutil
 import signal
 import subprocess
 import tempfile
 import time
+import uuid
 from collections.abc import Mapping
 from contextlib import contextmanager
 from multiprocessing.process import BaseProcess
@@ -22,6 +24,7 @@ from apex_ray.invocation import ReviewOverrides, apply_review_overrides
 from apex_ray.models import (
     LLMCoverageMode,
     LLMProviderName,
+    ReviewReport,
     TargetMode,
 )
 from apex_ray.pipeline import run_review_pipeline
@@ -85,6 +88,7 @@ from apex_ray.pr_eval.store import now_iso as _now_iso
 from apex_ray.pr_eval.store import pr_eval_label_path as pr_eval_label_path
 from apex_ray.pr_eval.store import write_pr_eval_label_templates as write_pr_eval_label_templates
 from apex_ray.report import render_markdown
+from apex_ray.report.coverage import continue_command_for_pack
 
 DEFAULT_LABELS_DIR = ".apex-ray/eval/labels"
 DEFAULT_TELEMETRY_PATH = ".apex-ray/eval/telemetry/pr-eval-runs.jsonl"
@@ -120,69 +124,75 @@ def capture_pr_eval_cases(
     repo_root = git.repo_root(source_repo) or source_repo.resolve()
     if not git.is_git_repo(repo_root):
         raise PrEvalError(f"Source repo is not a git repository: {source_repo}")
-    if output_dir.exists() and any(output_dir.iterdir()) and not overwrite:
-        raise PrEvalError(f"Output directory is not empty: {output_dir}")
-    output_dir.mkdir(parents=True, exist_ok=True)
+    write_dir, replace_output = _capture_output_dir(output_dir, overwrite=overwrite)
 
     owner_repo = _github_name_with_owner(repo_root)
     prs = _load_prs(repo_root, pr_numbers, limit)
     warnings: list[str] = []
     cases: list[PullRequestEvalCase] = []
 
-    for pr in prs:
-        number = int(pr["number"])
-        case_dir = output_dir / f"pr-{number}"
-        case_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        write_dir.mkdir(parents=True, exist_ok=True)
+        for pr in prs:
+            number = int(pr["number"])
+            case_dir = write_dir / f"pr-{number}"
+            case_dir.mkdir(parents=True, exist_ok=True)
 
-        base_sha = str(pr.get("baseRefOid") or "")
-        head_sha = str(pr.get("headRefOid") or "")
-        comments = _load_greptile_comments(owner_repo, number, repo_root)
-        raw_comments_path = case_dir / "greptile-comments.json"
-        raw_comments_path.write_text(
-            json.dumps([comment.model_dump(mode="json") for comment in comments], indent=2), encoding="utf-8"
-        )
+            base_sha = str(pr.get("baseRefOid") or "")
+            head_sha = str(pr.get("headRefOid") or "")
+            comments = _load_greptile_comments(owner_repo, number, repo_root)
+            raw_comments_path = case_dir / "greptile-comments.json"
+            raw_comments_path.write_text(
+                json.dumps([comment.model_dump(mode="json") for comment in comments], indent=2), encoding="utf-8"
+            )
 
-        findings = _greptile_findings_from_comments(comments, first_pass_window_minutes)
-        pr_commit_oids = _load_pr_commit_oids(repo_root, number)
-        replay_head_sha = _replay_head_sha_from_findings(findings) or head_sha
-        replay_base_sha = _replay_base_sha(repo_root, owner_repo, pr_commit_oids, replay_head_sha, base_sha)
-        diff_text = _pr_diff_from_git(
-            repo_root,
-            owner_repo,
-            number,
-            replay_base_sha,
-            replay_head_sha,
-            allow_pr_diff_fallback=replay_head_sha == head_sha and replay_base_sha == base_sha,
-        )
-        diff_path = case_dir / "pr.diff"
-        diff_path.write_text(diff_text, encoding="utf-8")
+            findings = _greptile_findings_from_comments(comments, first_pass_window_minutes)
+            pr_commit_oids = _load_pr_commit_oids(repo_root, number)
+            replay_head_sha = _replay_head_sha_from_findings(findings) or head_sha
+            replay_base_sha = _replay_base_sha(repo_root, owner_repo, pr_commit_oids, replay_head_sha, base_sha)
+            diff_text = _pr_diff_from_git(
+                repo_root,
+                owner_repo,
+                number,
+                replay_base_sha,
+                replay_head_sha,
+                allow_pr_diff_fallback=replay_head_sha == head_sha and replay_base_sha == base_sha,
+            )
+            diff_path = case_dir / "pr.diff"
+            diff_path.write_text(diff_text, encoding="utf-8")
 
-        first_at = min((_parse_iso(comment.created_at) for comment in comments), default=None)
-        case = PullRequestEvalCase(
-            number=number,
-            title=str(pr.get("title") or ""),
-            url=str(pr.get("url") or ""),
-            base_ref_name=str(pr.get("baseRefName") or ""),
-            head_ref_name=str(pr.get("headRefName") or ""),
-            base_sha=base_sha,
-            head_sha=head_sha,
-            replay_base_sha=replay_base_sha,
-            replay_head_sha=replay_head_sha,
-            merge_commit_sha=_merge_commit_oid(pr),
-            created_at=str(pr.get("createdAt") or ""),
-            merged_at=pr.get("mergedAt"),
-            first_greptile_at=first_at.isoformat().replace("+00:00", "Z") if first_at else None,
-            first_pass_window_minutes=first_pass_window_minutes,
-            greptile_findings=findings,
-        )
-        _write_case_manifest(case_dir / "manifest.yml", case)
-        cases.append(case)
-        if not any(finding.first_pass for finding in findings):
-            warnings.append(f"PR #{number}: no first-pass Greptile findings captured")
+            first_at = min((_parse_iso(comment.created_at) for comment in comments), default=None)
+            case = PullRequestEvalCase(
+                number=number,
+                title=str(pr.get("title") or ""),
+                url=str(pr.get("url") or ""),
+                base_ref_name=str(pr.get("baseRefName") or ""),
+                head_ref_name=str(pr.get("headRefName") or ""),
+                base_sha=base_sha,
+                head_sha=head_sha,
+                replay_base_sha=replay_base_sha,
+                replay_head_sha=replay_head_sha,
+                merge_commit_sha=_merge_commit_oid(pr),
+                created_at=str(pr.get("createdAt") or ""),
+                merged_at=pr.get("mergedAt"),
+                first_greptile_at=first_at.isoformat().replace("+00:00", "Z") if first_at else None,
+                first_pass_window_minutes=first_pass_window_minutes,
+                greptile_findings=findings,
+            )
+            _write_case_manifest(case_dir / "manifest.yml", case)
+            cases.append(case)
+            if not any(finding.first_pass for finding in findings):
+                warnings.append(f"PR #{number}: no first-pass Greptile findings captured")
 
-    result = PullRequestEvalCaptureResult(output_dir=str(output_dir), cases=cases, warnings=warnings)
-    _atomic_write_text(output_dir / "capture-summary.json", result.model_dump_json(indent=2))
-    return result
+        result = PullRequestEvalCaptureResult(output_dir=str(output_dir), cases=cases, warnings=warnings)
+        _atomic_write_text(write_dir / "capture-summary.json", result.model_dump_json(indent=2))
+        if replace_output:
+            _replace_output_directory(write_dir, output_dir)
+        return result
+    except Exception:
+        if replace_output:
+            shutil.rmtree(write_dir, ignore_errors=True)
+        raise
 
 
 def run_pr_eval_cases(
@@ -553,6 +563,28 @@ def _warnings_indicate_partial_analysis(warnings: list[str]) -> bool:
     return _run_state.warnings_indicate_partial_analysis(warnings)
 
 
+def _capture_output_dir(output_dir: Path, *, overwrite: bool) -> tuple[Path, bool]:
+    if not output_dir.exists() or not any(output_dir.iterdir()):
+        return output_dir, False
+    if not overwrite:
+        raise PrEvalError(f"Output directory is not empty: {output_dir}")
+    return output_dir.with_name(f".{output_dir.name}.{uuid.uuid4().hex}.tmp"), True
+
+
+def _replace_output_directory(source: Path, destination: Path) -> None:
+    if destination.exists():
+        if destination.is_dir() and not destination.is_symlink():
+            shutil.rmtree(destination)
+        else:
+            destination.unlink()
+    source.replace(destination)
+
+
+def _set_report_continue_commands(report: ReviewReport, report_json_path: Path) -> None:
+    for todo in report.llm_coverage.coverage_todos:
+        todo.suggested_command = continue_command_for_pack(todo.context_pack_id, str(report_json_path))
+
+
 @contextmanager
 def _git_worktree_lock(repo_root: Path):
     lock_path = _git_common_dir(repo_root) / "apex-ray-pr-eval-worktree.lock"
@@ -705,6 +737,7 @@ def _run_one_pr_eval_case(
 
     report_json_path = output_dir / "apex-report.json"
     report_md_path = output_dir / "apex-report.md"
+    _set_report_continue_commands(report, report_json_path)
     _atomic_write_text(report_json_path, report.model_dump_json(indent=2))
     _atomic_write_text(report_md_path, render_markdown(report))
 

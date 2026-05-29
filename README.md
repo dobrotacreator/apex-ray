@@ -67,15 +67,23 @@ In a project you want to review:
 ```bash
 apex-ray init
 apex-ray doctor
-apex-ray review --worktree --no-llm --output review.md --json review.json
+git status --short
 ```
 
-`apex-ray init` creates `.apex-ray/config.yml`, rules/memory/report directories, gitignore entries, brief agent instruction pointers, project-local Apex Ray skills, and a no-LLM Lefthook pre-push review command. Use `--hooks none`, `--agent-files none`, or `--no-agent-skill` for exceptional repositories.
+Inspect and commit the setup files before using the first worktree review for application changes.
+
+`apex-ray init` creates `.apex-ray/config.yml`, rules/memory/report directories, gitignore entries, brief agent instruction pointers, project-local Apex Ray skills, and a Lefthook pre-push review command that follows shared and local config. Use `--hooks none`, `--agent-files none`, or `--no-agent-skill` for exceptional repositories.
+
+After the setup commit, run a deterministic local review:
+
+```bash
+apex-ray review --worktree --no-llm --output .apex-ray/reports/review.md --json .apex-ray/reports/review.json
+```
 
 Run LLM review when Codex CLI is configured:
 
 ```bash
-apex-ray review --worktree --llm --output review.md --json review.json --html review.html
+apex-ray review --worktree --llm --output .apex-ray/reports/review.md --json .apex-ray/reports/review.json --html .apex-ray/reports/review.html
 ```
 
 Review a branch against the configured base:
@@ -87,8 +95,8 @@ apex-ray review --base main --llm
 Continue only unreviewed packs from a partial report:
 
 ```bash
-apex-ray review --continue-from review.json --residual-priority p0 --llm
-apex-ray review --continue-from review.json --only-pack 'apps/api/src/payments.ts#capture:1' --llm
+apex-ray review --continue-from .apex-ray/reports/review.json --residual-priority p0 --llm
+apex-ray review --continue-from .apex-ray/reports/review.json --only-pack 'apps/api/src/payments.ts#capture:1' --llm
 ```
 
 ## Configuration

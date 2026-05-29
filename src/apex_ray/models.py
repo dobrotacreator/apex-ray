@@ -700,6 +700,7 @@ class LLMRun(ApexModel):
 
 
 class ReviewReport(ApexModel):
+    schema_version: str = "review-report/v1"
     project: ProjectProfile
     config: ReviewConfig
     diff: DiffSummary

@@ -1,5 +1,6 @@
 import shutil
 import time
+from enum import StrEnum
 from pathlib import Path
 from typing import Annotated
 
@@ -19,6 +20,7 @@ from apex_ray.llm import LLMProviderError
 from apex_ray.models import LLMCoverageMode, LLMProviderName, ReviewReport, TargetMode
 from apex_ray.pipeline import continue_review_from_report, run_review_pipeline
 from apex_ray.report import render_html, render_markdown
+from apex_ray.report.coverage import continue_command_for_pack
 from apex_ray.telemetry import (
     DEFAULT_REVIEW_TELEMETRY_PATH,
     TelemetryError,
@@ -37,6 +39,19 @@ app.add_typer(eval_app, name="eval")
 register_benchmark_commands(app)
 
 
+class InitHookMode(StrEnum):
+    LEFTHOOK = "lefthook"
+    GIT = "git"
+    NONE = "none"
+
+
+class InitAgentFilesMode(StrEnum):
+    BOTH = "both"
+    CODEX = "codex"
+    CLAUDE = "claude"
+    NONE = "none"
+
+
 @app.callback()
 def main(
     version: Annotated[bool, typer.Option("--version", help="Show version and exit.")] = False,
@@ -53,13 +68,13 @@ def init(
         typer.Option("--overwrite", "--force", help="Overwrite Apex Ray-managed setup files when safe."),
     ] = False,
     hooks: Annotated[
-        str,
+        InitHookMode,
         typer.Option("--hooks", help="Hook setup mode: lefthook, git, or none."),
-    ] = "lefthook",
+    ] = InitHookMode.LEFTHOOK,
     agent_files: Annotated[
-        str,
+        InitAgentFilesMode,
         typer.Option("--agent-files", help="Agent instruction files: both, codex, claude, or none."),
-    ] = "both",
+    ] = InitAgentFilesMode.BOTH,
     agent_skill: Annotated[
         bool,
         typer.Option("--agent-skill/--no-agent-skill", help="Add Apex Ray project skill files for selected agents."),
@@ -76,8 +91,8 @@ def init(
             root,
             overwrite=overwrite,
             update_gitignore=update_gitignore,
-            hooks=hooks,
-            agent_files=agent_files,
+            hooks=hooks.value,
+            agent_files=agent_files.value,
             agent_skill=agent_skill,
         )
     except ConfigError as exc:
@@ -85,6 +100,22 @@ def init(
     typer.echo(f"Apex Ray ready: {root}")
     for path in paths:
         typer.echo(f"- {path}")
+    for message in _init_next_steps(hooks.value):
+        typer.echo(message)
+
+
+def _init_next_steps(hooks: str) -> list[str]:
+    messages = [
+        "Next: inspect and commit Apex Ray setup files before reviewing application changes.",
+    ]
+    if hooks == "lefthook":
+        if shutil.which("lefthook") is None:
+            messages.append("Hook note: install Lefthook, then run `lefthook install` to activate pre-push review.")
+        else:
+            messages.append("Hook note: run `lefthook install` to activate pre-push review.")
+    if hooks in {"lefthook", "git"}:
+        messages.append("Hook note: generated hooks call `apex-ray`; ensure it is available on PATH for Git hooks.")
+    return messages
 
 
 @app.command()
@@ -346,6 +377,8 @@ def review(
         raise typer.BadParameter(str(exc)) from exc
     duration_ms = round((time.monotonic() - started_monotonic) * 1000)
 
+    _set_continue_commands(report, json_output)
+
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(render_markdown(report), encoding="utf-8")
 
@@ -376,6 +409,11 @@ def review(
         typer.echo(f"Wrote {html_output}")
     if telemetry_enabled:
         typer.echo(f"Appended telemetry: {effective_telemetry_path}")
+
+
+def _set_continue_commands(report: ReviewReport, json_output: Path) -> None:
+    for todo in report.llm_coverage.coverage_todos:
+        todo.suggested_command = continue_command_for_pack(todo.context_pack_id, str(json_output))
 
 
 def _load_diff(

@@ -37,6 +37,13 @@ def memory_lint(
 def memory_suggest(
     from_report: Annotated[Path, typer.Option("--from-report", help="Apex Ray review JSON report.")],
     output: Annotated[Path | None, typer.Option("--output", help="Optional markdown output path.")] = None,
+    include_unverified: Annotated[
+        bool,
+        typer.Option(
+            "--include-unverified",
+            help="Draft suggestions from unverified findings. Default uses approved verifier findings only.",
+        ),
+    ] = False,
 ) -> None:
     """Draft curated memory cards from a review JSON report."""
     try:
@@ -46,7 +53,7 @@ def memory_suggest(
     except ValidationError as exc:
         raise typer.BadParameter(f"Invalid Apex Ray report {from_report}: {exc}") from exc
 
-    suggestions = memory_suggestions_from_report(report)
+    suggestions = memory_suggestions_from_report(report, include_unverified=include_unverified)
     if output:
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(suggestions, encoding="utf-8")

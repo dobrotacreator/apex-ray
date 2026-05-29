@@ -4,6 +4,7 @@ import time
 from multiprocessing import get_context
 from pathlib import Path
 
+import pytest
 import yaml
 
 from apex_ray import pr_eval
@@ -277,6 +278,47 @@ def test_capture_pr_eval_cases_writes_manifest_and_greptile_comments(
     assert case.replay_base_sha == "replay-base-sha"
     assert case.replay_head_sha == "head-sha"
     assert case.greptile_findings[0].first_pass is True
+
+
+def test_capture_pr_eval_cases_overwrite_preserves_existing_output_on_capture_failure(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(["init"], repo)
+    output = tmp_path / "cases"
+    output.mkdir()
+    keep = output / "keep.txt"
+    keep.write_text("previous\n", encoding="utf-8")
+
+    monkeypatch.setattr(pr_eval, "_github_name_with_owner", lambda _repo: "org/repo")
+    monkeypatch.setattr(
+        pr_eval,
+        "_load_prs",
+        lambda _repo, _numbers, _limit: [
+            {
+                "number": 12,
+                "title": "Fix cart total",
+                "url": "https://github.com/org/repo/pull/12",
+                "baseRefName": "main",
+                "headRefName": "feature/cart",
+                "baseRefOid": "base-sha",
+                "headRefOid": "head-sha",
+                "createdAt": "2026-01-01T00:00:00Z",
+            }
+        ],
+    )
+
+    def fail_comments(_owner_repo: str, _number: int, _repo: Path) -> list[GreptileComment]:
+        raise pr_eval.PrEvalError("comments failed")
+
+    monkeypatch.setattr(pr_eval, "_load_greptile_comments", fail_comments)
+
+    with pytest.raises(pr_eval.PrEvalError, match="comments failed"):
+        capture_pr_eval_cases(source_repo=repo, output_dir=output, pr_numbers=[12], overwrite=True)
+
+    assert keep.read_text(encoding="utf-8") == "previous\n"
 
 
 def test_run_gh_api_paginated_array_flattens_slurped_pages(tmp_path: Path, monkeypatch) -> None:

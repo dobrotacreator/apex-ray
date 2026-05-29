@@ -1,4 +1,5 @@
 from collections import Counter
+from shlex import quote
 from typing import Literal
 
 from apex_ray.models import (
@@ -488,7 +489,7 @@ def _build_coverage_todos(
                 priority=risk.priority,
                 slice=_pack_review_slice(pack),
                 reason=risk.reason,
-                suggested_command=_continue_command_for_pack(pack.id),
+                suggested_command=continue_command_for_pack(pack.id),
                 estimated_chars=pack.stats.estimated_chars,
                 changed_lines=pack.changed_lines,
                 changed_symbols=_pack_symbol_names([pack]),
@@ -497,6 +498,5 @@ def _build_coverage_todos(
     return todos
 
 
-def _continue_command_for_pack(pack_id: str) -> str:
-    safe_id = pack_id.replace("'", "'\"'\"'")
-    return f"apex-ray review --continue-from <report.json> --only-pack '{safe_id}' --llm"
+def continue_command_for_pack(pack_id: str, report_path: str = "<report.json>") -> str:
+    return f"apex-ray review --continue-from {quote(report_path)} --only-pack {quote(pack_id)} --llm"

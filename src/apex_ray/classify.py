@@ -214,10 +214,16 @@ def add_risk_signals(file: ChangedFile) -> None:
             content = line.content.lower()
             target_line = line.new_line or line.old_line
             for kind, (severity, keywords, reason) in RISK_KEYWORDS.items():
-                if any(keyword in content for keyword in keywords):
+                if any(_matches_risk_keyword(content, keyword) for keyword in keywords):
                     signal = _append_signal(file, seen, kind, severity, reason, target_line)
                     if signal:
                         hunk.risk_signals.append(signal)
+
+
+def _matches_risk_keyword(content: str, keyword: str) -> bool:
+    if any(character in keyword for character in " ()."):
+        return keyword in content
+    return re.search(rf"(?<![a-z0-9_]){re.escape(keyword)}(?![a-z0-9_])", content) is not None
 
 
 def _append_signal(

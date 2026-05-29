@@ -152,6 +152,7 @@ def capture_benchmark(
     expected_file: Annotated[
         str | None, typer.Option("--expected-file", help="Optional expected finding file path.")
     ] = None,
+    llm: Annotated[bool, typer.Option("--llm", help="Create case with llm: true. Default is no LLM cost.")] = False,
     no_llm: Annotated[bool, typer.Option("--no-llm", help="Create case with llm: false.")] = False,
     llm_provider: Annotated[str, typer.Option("--llm-provider", help="LLM provider for captured case.")] = "codex_cli",
     no_verify: Annotated[bool, typer.Option("--no-verify", help="Create case with verify: false.")] = False,
@@ -163,6 +164,8 @@ def capture_benchmark(
     explicit_modes = sum(bool(value) for value in (staged, worktree, base is not None))
     if explicit_modes != 1:
         raise typer.BadParameter("Use exactly one capture target: --worktree, --staged, or --base.")
+    if llm and no_llm:
+        raise typer.BadParameter("Use only one of --llm or --no-llm.")
     try:
         provider = LLMProviderName(llm_provider)
     except ValueError as exc:
@@ -178,7 +181,7 @@ def capture_benchmark(
             base=base,
             expected_title_contains=expected_title_contains,
             expected_file=expected_file,
-            llm=not no_llm,
+            llm=llm and not no_llm,
             provider=provider,
             verify=not no_verify,
             overwrite=overwrite,

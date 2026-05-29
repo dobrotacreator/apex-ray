@@ -8,6 +8,7 @@ from pydantic import ValidationError
 
 from apex_ray.models import (
     ContextPack,
+    Finding,
     FindingSeverity,
     MemoryCard,
     MemoryConfig,
@@ -135,21 +136,31 @@ def render_memory_card(card: MemoryCard, config: MemoryConfig) -> str:
     return f"{header}\n{body}" if body else header
 
 
-def memory_suggestions_from_report(report: ReviewReport) -> str:
+def memory_suggestions_from_report(report: ReviewReport, *, include_unverified: bool = False) -> str:
+    findings = report.findings if include_unverified else _verified_report_findings(report)
     lines = [
         "# Apex Ray Memory Suggestions",
         "",
         "Review these suggestions before committing them under `.apex-ray/memory/`.",
-        "They are generated from approved findings and should be edited into stable project knowledge.",
+        (
+            "They are generated from unverified report findings and must be manually validated before use."
+            if include_unverified
+            else "They are generated from approved verifier findings and should be edited into stable project knowledge."
+        ),
         "",
     ]
-    if not report.findings:
-        lines.append("No approved findings were available for memory suggestions.")
+    if not findings:
+        lines.append(
+            "No findings were available for memory suggestions."
+            if include_unverified
+            else "No verified approved findings were available for memory suggestions. "
+            "Use --include-unverified only when manually triaging an unverified report."
+        )
         lines.append("")
         return "\n".join(lines)
 
     seen: set[str] = set()
-    for finding in report.findings:
+    for finding in findings:
         slug = _slugify(finding.title) or "review-memory"
         if slug in seen:
             suffix = 2
@@ -157,21 +168,21 @@ def memory_suggestions_from_report(report: ReviewReport) -> str:
                 suffix += 1
             slug = f"{slug}-{suffix}"
         seen.add(slug)
+        frontmatter = {
+            "id": slug,
+            "title": finding.title,
+            "kind": "bug_pattern",
+            "severity": str(finding.severity),
+            "paths": [finding.file],
+            "triggers": {"text": [finding.title]},
+        }
         lines.extend(
             [
                 f"## {finding.title}",
                 "",
                 "```md",
                 "---",
-                f"id: {slug}",
-                f"title: {finding.title!r}",
-                "kind: bug_pattern",
-                f"severity: {finding.severity}",
-                "paths:",
-                f"  - {finding.file}",
-                "triggers:",
-                "  text:",
-                f"    - {finding.title!r}",
+                yaml.safe_dump(frontmatter, sort_keys=False).strip(),
                 "---",
                 finding.failure_mode,
                 "",
@@ -183,6 +194,25 @@ def memory_suggestions_from_report(report: ReviewReport) -> str:
             ]
         )
     return "\n".join(lines)
+
+
+def _verified_report_findings(report: ReviewReport) -> list[Finding]:
+    approved = {
+        _finding_identity(verification.finding) for verification in report.verifications if verification.approved
+    }
+    if not approved:
+        return []
+    return [finding for finding in report.findings if _finding_identity(finding) in approved]
+
+
+def _finding_identity(finding: object) -> tuple[object, ...]:
+    return (
+        getattr(finding, "title", ""),
+        getattr(finding, "file", ""),
+        getattr(finding, "line", None),
+        getattr(finding, "failure_mode", ""),
+        getattr(finding, "evidence", ""),
+    )
 
 
 def memory_cards_for_audience(pack: ContextPack, audience: str) -> list[MemoryMatch]:

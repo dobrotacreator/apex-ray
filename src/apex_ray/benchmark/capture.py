@@ -1,3 +1,5 @@
+import shutil
+import uuid
 from pathlib import Path
 
 import yaml
@@ -28,7 +30,7 @@ def capture_benchmark_case(
     base: str | None = None,
     expected_title_contains: str | None = None,
     expected_file: str | None = None,
-    llm: bool = True,
+    llm: bool = False,
     provider: LLMProviderName = LLMProviderName.CODEX_CLI,
     verify: bool = True,
     overwrite: bool = False,
@@ -36,8 +38,7 @@ def capture_benchmark_case(
     repo_root = git.repo_root(source_repo) or source_repo.resolve()
     if not git.is_git_repo(repo_root):
         raise BenchmarkError(f"Source repo is not a git repository: {source_repo}")
-    if output_dir.exists() and any(output_dir.iterdir()) and not overwrite:
-        raise BenchmarkError(f"Output directory is not empty: {output_dir}")
+    write_dir, replace_output = _capture_output_dir(output_dir, overwrite=overwrite)
 
     diff_text = _diff_for_capture(repo_root, target_mode, base)
     diff_summary = parse_unified_diff(diff_text, target_mode)
@@ -45,45 +46,69 @@ def capture_benchmark_case(
         raise BenchmarkError("No changed files found to capture.")
     context_paths, expected_context, context_warnings = _capture_context(repo_root, diff_text, target_mode, base)
 
-    repo_dir = output_dir / "repo"
-    diff_path = output_dir / "change.diff"
-    case_path = output_dir / "case.yml"
-    repo_dir.mkdir(parents=True, exist_ok=True)
+    repo_dir = write_dir / "repo"
+    diff_path = write_dir / "change.diff"
+    case_path = write_dir / "case.yml"
     copied_files: list[str] = []
     warnings: list[str] = [*context_warnings]
+    try:
+        repo_dir.mkdir(parents=True, exist_ok=True)
 
-    for config_file in CONFIG_FILES:
-        copied_files.extend(_copy_if_exists(repo_root, repo_dir, config_file))
+        for config_file in CONFIG_FILES:
+            copied_files.extend(_copy_if_exists(repo_root, repo_dir, config_file))
 
-    for changed_file in diff_summary.files:
-        if changed_file.status == FileStatus.DELETED or changed_file.new_path is None:
-            warnings.append(f"Skipped deleted file: {changed_file.old_path}")
-            continue
-        copied_files.extend(_copy_file_with_local_configs(repo_root, repo_dir, changed_file.new_path))
+        for changed_file in diff_summary.files:
+            if changed_file.status == FileStatus.DELETED or changed_file.new_path is None:
+                warnings.append(f"Skipped deleted file: {changed_file.old_path}")
+                continue
+            copied_files.extend(_copy_file_with_local_configs(repo_root, repo_dir, changed_file.new_path))
 
-    for context_path in sorted(context_paths):
-        copied_files.extend(_copy_file_with_local_configs(repo_root, repo_dir, context_path))
+        for context_path in sorted(context_paths):
+            copied_files.extend(_copy_file_with_local_configs(repo_root, repo_dir, context_path))
 
-    diff_path.write_text(diff_text, encoding="utf-8")
-    case = _captured_case_dict(
-        name=name,
-        llm=llm,
-        provider=provider,
-        verify=verify,
-        expected_title_contains=expected_title_contains,
-        expected_file=expected_file,
-        expected_context=expected_context,
-    )
-    case_path.write_text(yaml.safe_dump(case, sort_keys=False), encoding="utf-8")
+        diff_path.write_text(diff_text, encoding="utf-8")
+        case = _captured_case_dict(
+            name=name,
+            llm=llm,
+            provider=provider,
+            verify=verify,
+            expected_title_contains=expected_title_contains,
+            expected_file=expected_file,
+            expected_context=expected_context,
+        )
+        case_path.write_text(yaml.safe_dump(case, sort_keys=False), encoding="utf-8")
+        if replace_output:
+            _replace_output_directory(write_dir, output_dir)
+    except Exception:
+        if replace_output:
+            shutil.rmtree(write_dir, ignore_errors=True)
+        raise
 
     return CaptureResult(
         output_dir=str(output_dir),
-        case_path=str(case_path),
-        diff_path=str(diff_path),
-        repo_dir=str(repo_dir),
+        case_path=str(output_dir / "case.yml"),
+        diff_path=str(output_dir / "change.diff"),
+        repo_dir=str(output_dir / "repo"),
         copied_files=sorted(set(copied_files)),
         warnings=warnings,
     )
+
+
+def _capture_output_dir(output_dir: Path, *, overwrite: bool) -> tuple[Path, bool]:
+    if not output_dir.exists() or not any(output_dir.iterdir()):
+        return output_dir, False
+    if not overwrite:
+        raise BenchmarkError(f"Output directory is not empty: {output_dir}")
+    return output_dir.with_name(f".{output_dir.name}.{uuid.uuid4().hex}.tmp"), True
+
+
+def _replace_output_directory(source: Path, destination: Path) -> None:
+    if destination.exists():
+        if destination.is_dir() and not destination.is_symlink():
+            shutil.rmtree(destination)
+        else:
+            destination.unlink()
+    source.replace(destination)
 
 
 def _capture_context(

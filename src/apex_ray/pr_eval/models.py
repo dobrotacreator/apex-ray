@@ -269,6 +269,7 @@ class PrEvalTelemetryCase(StrictPrEvalModel):
 
 
 class PrEvalTelemetryEntry(StrictPrEvalModel):
+    schema_version: str = "pr-eval-telemetry/v1"
     run_id: str
     created_at: str
     source_repo: str

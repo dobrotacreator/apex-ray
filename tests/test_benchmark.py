@@ -624,6 +624,52 @@ def test_capture_benchmark_cli_writes_self_contained_case(tmp_path: Path, built_
     assert case.expected_context[0].reference_text_contains == "calculateTotal"
 
 
+def test_capture_benchmark_overwrite_preserves_existing_output_on_capture_failure(tmp_path: Path) -> None:
+    from apex_ray.benchmark.capture import capture_benchmark_case
+    from apex_ray.models import TargetMode
+
+    repo = tmp_path / "source"
+    repo.mkdir()
+    _run(["git", "init"], repo)
+    _run(["git", "config", "user.email", "test@example.com"], repo)
+    _run(["git", "config", "user.name", "Test"], repo)
+    (repo / "src.ts").write_text("export const value = 1;\n", encoding="utf-8")
+    _run(["git", "add", "."], repo)
+    _run(["git", "commit", "-m", "initial"], repo)
+    output = tmp_path / "captured"
+    output.mkdir()
+    keep = output / "keep.txt"
+    keep.write_text("previous\n", encoding="utf-8")
+
+    with pytest.raises(BenchmarkError, match="No changed files"):
+        capture_benchmark_case(repo, output, "empty", TargetMode.WORKTREE, overwrite=True)
+
+    assert keep.read_text(encoding="utf-8") == "previous\n"
+
+
+def test_capture_benchmark_function_defaults_to_no_llm(
+    tmp_path: Path,
+    built_ts_analyzer: None,
+) -> None:
+    from apex_ray.benchmark.capture import capture_benchmark_case
+    from apex_ray.models import TargetMode
+
+    repo = tmp_path / "source"
+    repo.mkdir()
+    _run(["git", "init"], repo)
+    _run(["git", "config", "user.email", "test@example.com"], repo)
+    _run(["git", "config", "user.name", "Test"], repo)
+    (repo / "src.ts").write_text("export const value = 1;\n", encoding="utf-8")
+    _run(["git", "add", "."], repo)
+    _run(["git", "commit", "-m", "initial"], repo)
+    (repo / "src.ts").write_text("export const value = 2;\n", encoding="utf-8")
+    output = tmp_path / "captured"
+
+    capture_benchmark_case(repo, output, "default no llm", TargetMode.WORKTREE)
+
+    assert load_benchmark_case(output / "case.yml").llm is False
+
+
 def _run(command: list[str], cwd: Path) -> None:
     import subprocess
 

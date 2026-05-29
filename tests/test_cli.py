@@ -44,7 +44,8 @@ def test_init_creates_config(tmp_path: Path, monkeypatch) -> None:
     assert (tmp_path / ".codex" / "skills" / "apex-ray" / "SKILL.md").exists()
     assert (tmp_path / ".claude" / "skills" / "apex-ray" / "SKILL.md").exists()
     assert "apex-ray-review" in (tmp_path / "lefthook.yml").read_text(encoding="utf-8")
-    assert "--no-llm" in (tmp_path / "lefthook.yml").read_text(encoding="utf-8")
+    assert "--no-llm" not in (tmp_path / "lefthook.yml").read_text(encoding="utf-8")
+    assert "Next: inspect and commit Apex Ray setup files" in result.stdout
 
 
 def test_init_can_skip_hooks_and_agent_files(tmp_path: Path, monkeypatch) -> None:
@@ -67,6 +68,7 @@ def test_init_can_skip_agent_skill(tmp_path: Path, monkeypatch) -> None:
     assert result.exit_code == 0
     assert (tmp_path / "AGENTS.md").exists()
     assert not (tmp_path / ".apex-ray" / "skills").exists()
+    assert "$apex-ray" not in (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
 
 
 def test_doctor_reports_local_config(tmp_path: Path, monkeypatch) -> None:
@@ -122,7 +124,7 @@ def test_memory_suggest_writes_cards_from_report(tmp_path: Path) -> None:
 
     result = runner.invoke(
         app,
-        ["memory", "suggest", "--from-report", str(report_path), "--output", str(output)],
+        ["memory", "suggest", "--from-report", str(report_path), "--output", str(output), "--include-unverified"],
         catch_exceptions=False,
     )
 
@@ -358,6 +360,7 @@ def test_eval_run_prs_cli_passes_options_to_runner(tmp_path: Path, monkeypatch) 
             greptile_findings_total=3,
             extra_apex_findings_total=1,
             failed=False,
+            partial=0,
         )
 
     monkeypatch.setattr("apex_ray.cli_eval.run_pr_eval_cases", fake_run_pr_eval_cases)
@@ -404,6 +407,37 @@ def test_eval_run_prs_cli_passes_options_to_runner(tmp_path: Path, monkeypatch) 
     assert seen["cache_dir"] == tmp_path / "cache"
     assert seen["telemetry_path"] == tmp_path / "telemetry.jsonl"
     assert seen["case_jobs"] == 2
+
+
+def test_eval_run_prs_cli_fails_on_partial_by_default(tmp_path: Path, monkeypatch) -> None:
+    def fake_run_pr_eval_cases(**_kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(
+            matched_greptile_findings_total=1,
+            greptile_findings_total=1,
+            extra_apex_findings_total=0,
+            failed=0,
+            partial=1,
+        )
+
+    monkeypatch.setattr("apex_ray.cli_eval.run_pr_eval_cases", fake_run_pr_eval_cases)
+
+    result = runner.invoke(
+        app,
+        [
+            "eval",
+            "run-prs",
+            "--repo",
+            str(tmp_path / "repo"),
+            "--cases",
+            str(tmp_path / "cases"),
+            "--output",
+            str(tmp_path / "run"),
+        ],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 1
+    assert "Partial PR eval cases: 1" in result.stdout
 
 
 def test_eval_run_prs_cli_rejects_conflicting_llm_flags(tmp_path: Path) -> None:

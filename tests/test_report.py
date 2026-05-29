@@ -307,7 +307,7 @@ def test_report_json_exposes_residual_risk_gate_and_file_coverage() -> None:
     assert data["llm_coverage"]["coverage_todos"][0]["context_pack_id"] == "src/payments.ts#file"
     assert data["llm_coverage"]["coverage_todos"][0]["priority"] == "p0"
     assert "Coverage todo:" in markdown
-    assert "apex-ray review --continue-from <report.json> --only-pack" in markdown
+    assert "apex-ray review --continue-from '<report.json>' --only-pack" in markdown
     assert data["llm_coverage"]["cluster_context_packs"] == 1
     assert data["llm_coverage"]["file_context_packs"] == 1
     assert data["llm_coverage"]["file_coverage"] == [

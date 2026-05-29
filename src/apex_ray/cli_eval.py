@@ -3,6 +3,7 @@ from typing import Annotated
 
 import typer
 
+from apex_ray import git
 from apex_ray.llm import LLMProviderError
 from apex_ray.models import LLMProviderName
 from apex_ray.pr_eval import (
@@ -99,6 +100,10 @@ def eval_run_prs(
         bool,
         typer.Option("--allow-extra-findings", help="Use a recall-only pass gate; still report extra Apex findings."),
     ] = False,
+    allow_partial: Annotated[
+        bool,
+        typer.Option("--allow-partial", help="Exit 0 even when one or more PR eval cases have partial coverage."),
+    ] = False,
     labels_dir: Annotated[
         Path | None,
         typer.Option("--labels-dir", help="Optional PR eval labels directory for triage feedback."),
@@ -175,6 +180,9 @@ def eval_run_prs(
     )
     if report.failed:
         raise typer.Exit(code=1)
+    if report.partial and not allow_partial:
+        typer.echo(f"Partial PR eval cases: {report.partial}; rerun incomplete cases or pass --allow-partial.")
+        raise typer.Exit(code=1)
 
 
 @eval_app.command("suggest-memory")
@@ -232,8 +240,10 @@ def eval_telemetry_summary(
     ] = Path(DEFAULT_TELEMETRY_PATH),
 ) -> None:
     """Summarize long-lived PR replay telemetry."""
+    root = git.repo_root(Path.cwd()) or Path.cwd()
+    effective_path = telemetry_path if telemetry_path.is_absolute() else root / telemetry_path
     try:
-        entries = load_pr_eval_telemetry(telemetry_path)
+        entries = load_pr_eval_telemetry(effective_path)
     except PrEvalError as exc:
         raise typer.BadParameter(str(exc)) from exc
     typer.echo(render_pr_eval_telemetry_summary(entries))

@@ -26,6 +26,16 @@ def render_html(report: ReviewReport) -> str:
         ],
         empty="No unreviewed context packs.",
     )
+    coverage_todos_html = _html_list(
+        [
+            (
+                f"<code>{escape(todo.priority)}</code> <code>{escape(todo.context_pack_id)}</code> - "
+                f"{escape(todo.reason)}<br><code>{escape(todo.suggested_command)}</code>"
+            )
+            for todo in coverage.coverage_todos[:50]
+        ],
+        empty="No continuation tasks.",
+    )
     routes_html = _html_list(
         [
             (
@@ -120,6 +130,7 @@ def render_html(report: ReviewReport) -> str:
   </ul>
   <details open><summary>Model Routes</summary>{routes_html}</details>
   <details><summary>Slice Coverage</summary>{slices_html}</details>
+  <details open><summary>Continue Partial Coverage</summary>{coverage_todos_html}</details>
   <details><summary>Unreviewed Context Packs</summary>{unreviewed_html}</details>
 
   <h2>Memory</h2>

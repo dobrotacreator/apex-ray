@@ -198,16 +198,16 @@ def load_pr_eval_telemetry(path: Path) -> list[PrEvalTelemetryEntry]:
         return []
     entries: list[PrEvalTelemetryEntry] = []
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        with path.open(encoding="utf-8") as handle:
+            for line_number, line in enumerate(handle, start=1):
+                if not line.strip():
+                    continue
+                try:
+                    entries.append(PrEvalTelemetryEntry.model_validate_json(line))
+                except ValidationError as exc:
+                    raise PrEvalError(f"Invalid telemetry entry {path}:{line_number}: {exc}") from exc
     except OSError as exc:
         raise PrEvalError(f"Unable to read PR eval telemetry {path}: {exc}") from exc
-    for line_number, line in enumerate(lines, start=1):
-        if not line.strip():
-            continue
-        try:
-            entries.append(PrEvalTelemetryEntry.model_validate_json(line))
-        except ValidationError as exc:
-            raise PrEvalError(f"Invalid telemetry entry {path}:{line_number}: {exc}") from exc
     return entries
 
 
