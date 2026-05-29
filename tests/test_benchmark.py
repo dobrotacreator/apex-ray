@@ -24,7 +24,7 @@ from apex_ray.benchmark import (
     run_benchmark_cases,
 )
 from apex_ray.cli import app
-from apex_ray.llm_cache import REVIEW_PROMPT_VERSION, VERIFIER_PROMPT_VERSION
+from apex_ray.llm.cache import REVIEW_PROMPT_VERSION, VERIFIER_PROMPT_VERSION
 from apex_ray.models import Finding, FindingConfidence, FindingSeverity, LLMRun
 
 ROOT = Path(__file__).resolve().parents[1]

@@ -6,7 +6,7 @@ import test from "node:test";
 import ts from "typescript";
 
 import { NAMESPACE_EXPORT_LOCAL_NAME, STAR_EXPORT_LOCAL_NAME } from "../dist/constants.js";
-import { exportedNamesForTarget } from "../dist/workspace-export-names.js";
+import { exportedNamesForTarget } from "../dist/workspace/workspace-export-names.js";
 import type {
   CollectedSymbol,
   ExportIndexEntry,

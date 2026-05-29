@@ -7,14 +7,14 @@ import test from "node:test";
 import ts from "typescript";
 
 import { parseArgs } from "../dist/cli.js";
-import { buildRepoIndex } from "../dist/repo-index.js";
-import { collectSymbols } from "../dist/symbol-collection.js";
+import { buildRepoIndex } from "../dist/indexes/repo-index.js";
+import { collectSymbols } from "../dist/symbols/symbol-collection.js";
 import type { Reference } from "../dist/types.js";
 import {
   collectWorkspaceImportReferences,
   collectWorkspaceMemberReferences,
   filterInvalidWorkspaceMemberReferences,
-} from "../dist/workspace-references.js";
+} from "../dist/workspace/workspace-references.js";
 import { writeFile } from "./helpers.js";
 
 test("workspace references capture imports and filter unrelated member receivers", () => {

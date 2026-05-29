@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from typer.testing import CliRunner
 
 from apex_ray.cli import app
-from apex_ray.llm_cache import REVIEW_PROMPT_VERSION
+from apex_ray.llm.cache import REVIEW_PROMPT_VERSION
 from apex_ray.models import (
     DiffStats,
     DiffSummary,

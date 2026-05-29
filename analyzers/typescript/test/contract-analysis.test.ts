@@ -6,8 +6,8 @@ import test from "node:test";
 
 import ts from "typescript";
 
-import { collectFrameworkMetadata, collectSchemaContracts } from "../dist/contract-analysis.js";
-import { collectSymbols } from "../dist/symbol-collection.js";
+import { collectFrameworkMetadata, collectSchemaContracts } from "../dist/contracts/contract-analysis.js";
+import { collectSymbols } from "../dist/symbols/symbol-collection.js";
 import { writeFile } from "./helpers.js";
 
 test("contract analysis captures declared types, schema receivers, and framework metadata", () => {

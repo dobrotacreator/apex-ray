@@ -5,7 +5,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { parseArgs } from "../dist/cli.js";
-import { buildRepoIndex } from "../dist/repo-index.js";
+import { buildRepoIndex } from "../dist/indexes/repo-index.js";
 import { findRelatedTests, isTestPath } from "../dist/test-discovery.js";
 import type { Reference } from "../dist/types.js";
 import { writeFile } from "./helpers.js";

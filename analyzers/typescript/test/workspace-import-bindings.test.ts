@@ -8,7 +8,7 @@ import ts from "typescript";
 import {
   importedBindingsForTarget,
   isIdentifierMatchedByImportedBindings,
-} from "../dist/workspace-import-bindings.js";
+} from "../dist/workspace/workspace-import-bindings.js";
 import type {
   CollectedSymbol,
   ExportedNamesForTarget,

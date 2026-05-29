@@ -10,7 +10,7 @@ import {
   isModuleSpecifierRelatedToPath,
   moduleSpecifierCandidatePaths,
 } from "../dist/module-resolution.js";
-import { buildRepoIndex } from "../dist/repo-index.js";
+import { buildRepoIndex } from "../dist/indexes/repo-index.js";
 import type { PackageInfo } from "../dist/types.js";
 import { assertIncludesPath, writeFile } from "./helpers.js";
 

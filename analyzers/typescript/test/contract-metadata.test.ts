@@ -9,8 +9,8 @@ import ts from "typescript";
 import {
   collectDecoratorMetadataKeyConsumerContracts,
   collectFrameworkMetadata,
-} from "../dist/contract-metadata.js";
-import { collectSymbols } from "../dist/symbol-collection.js";
+} from "../dist/contracts/contract-metadata.js";
+import { collectSymbols } from "../dist/symbols/symbol-collection.js";
 import type { Reference } from "../dist/types.js";
 import { writeFile } from "./helpers.js";
 

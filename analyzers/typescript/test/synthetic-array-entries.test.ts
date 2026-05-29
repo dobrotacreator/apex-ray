@@ -5,7 +5,7 @@ import test from "node:test";
 
 import ts from "typescript";
 
-import { arrayEntrySymbolName } from "../dist/synthetic-array-entries.js";
+import { arrayEntrySymbolName } from "../dist/symbols/synthetic-array-entries.js";
 
 test("synthetic array entry names prefer route tuple, object ids, primitives, and fallbacks", () => {
   const filePath = path.join(os.tmpdir(), "apex-ray-ts-synthetic-array-entries.ts");

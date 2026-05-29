@@ -6,8 +6,8 @@ import test from "node:test";
 
 import ts from "typescript";
 
-import { isReferenceToTarget } from "../dist/reference-target-match.js";
-import { collectSymbols } from "../dist/symbol-collection.js";
+import { isReferenceToTarget } from "../dist/references/reference-target-match.js";
+import { collectSymbols } from "../dist/symbols/symbol-collection.js";
 import { writeFile } from "./helpers.js";
 
 test("reference target matching accepts inherited member receivers and rejects unrelated members", () => {

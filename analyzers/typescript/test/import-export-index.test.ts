@@ -6,7 +6,7 @@ import test from "node:test";
 import ts from "typescript";
 
 import { STAR_EXPORT_LOCAL_NAME } from "../dist/constants.js";
-import { collectExportIndex, collectImportIndex, commonJsExportEntries } from "../dist/import-export-index.js";
+import { collectExportIndex, collectImportIndex, commonJsExportEntries } from "../dist/indexes/import-export-index.js";
 
 test("import/export index captures module syntaxes and CommonJS exports", () => {
   const repo = path.join(os.tmpdir(), "apex-ray-ts-import-export-index");

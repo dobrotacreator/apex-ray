@@ -1,15 +1,15 @@
 import path from "node:path";
 
-import { collectFrameworkMetadata, collectSchemaContracts } from "./contract-analysis.js";
+import { collectFrameworkMetadata, collectSchemaContracts } from "./contracts/contract-analysis.js";
 import { REFERENCE_COLLECTION_LIMIT, REFERENCE_LIMIT } from "./constants.js";
 import {
   collectCallees,
   collectImplementedMemberUsageReferences,
   collectReferenceConsumerImpact,
   collectReferences,
-} from "./reference-analysis.js";
-import { mergeReferences } from "./reference-merge.js";
-import { buildRepoIndex } from "./repo-index.js";
+} from "./references/reference-analysis.js";
+import { mergeReferences } from "./references/reference-merge.js";
+import { buildRepoIndex } from "./indexes/repo-index.js";
 import { createProgramContexts } from "./program.js";
 import {
   collectDeletedSymbols,
@@ -17,7 +17,7 @@ import {
   collectImports,
   collectSymbols,
   preferSyntheticChildSymbols,
-} from "./symbol-collection.js";
+} from "./symbols/symbol-collection.js";
 import { findRelatedTests, isTestPath } from "./test-discovery.js";
 import type {
   AnalyzerResult,
@@ -31,7 +31,7 @@ import {
   collectWorkspaceImportReferences,
   collectWorkspaceMemberReferences,
   filterInvalidWorkspaceMemberReferences,
-} from "./workspace-references.js";
+} from "./workspace/workspace-references.js";
 
 export type {
   AnalyzerResult,

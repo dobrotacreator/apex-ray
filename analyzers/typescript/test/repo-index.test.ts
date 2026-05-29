@@ -5,7 +5,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { parseArgs } from "../dist/cli.js";
-import { buildRepoIndex } from "../dist/repo-index.js";
+import { buildRepoIndex } from "../dist/indexes/repo-index.js";
 import { writeFile } from "./helpers.js";
 
 test("repo index builder captures module, identifier, receiver, and cache metadata", () => {

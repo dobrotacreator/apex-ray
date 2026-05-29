@@ -32,7 +32,7 @@ from apex_ray.llm import (
     verification_response_schema,
     verify_findings,
 )
-from apex_ray.llm_cache import REVIEW_PROMPT_VERSION, REVIEW_SHALLOW_PROMPT_VERSION, VERIFIER_PROMPT_VERSION, LLMCache
+from apex_ray.llm.cache import REVIEW_PROMPT_VERSION, REVIEW_SHALLOW_PROMPT_VERSION, VERIFIER_PROMPT_VERSION, LLMCache
 from apex_ray.models import (
     AnalyzerReference,
     AnalyzerSymbol,
@@ -1046,7 +1046,7 @@ def test_codex_provider_runs_outside_reviewed_repo(
         output_path.write_text(json.dumps({"findings": []}), encoding="utf-8")
         return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
-    monkeypatch.setattr("apex_ray.llm_providers.subprocess.run", fake_run)
+    monkeypatch.setattr("apex_ray.llm.providers.subprocess.run", fake_run)
 
     provider = CodexCLIProvider(LLMConfig(provider=LLMProviderName.CODEX_CLI, codex_path=str(codex)))
     findings = provider.review_context_pack(make_pack(), repo)
@@ -1082,7 +1082,7 @@ def test_codex_provider_resolves_relative_codex_path_before_changing_cwd(
         output_path.write_text(json.dumps({"findings": []}), encoding="utf-8")
         return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
-    monkeypatch.setattr("apex_ray.llm_providers.subprocess.run", fake_run)
+    monkeypatch.setattr("apex_ray.llm.providers.subprocess.run", fake_run)
 
     provider = CodexCLIProvider(LLMConfig(provider=LLMProviderName.CODEX_CLI, codex_path="tools/codex"))
     findings = provider.review_context_pack(make_pack(), repo)
@@ -1139,7 +1139,7 @@ def test_codex_provider_verifies_findings_in_one_batch(
         )
         return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
-    monkeypatch.setattr("apex_ray.llm_providers.subprocess.run", fake_run)
+    monkeypatch.setattr("apex_ray.llm.providers.subprocess.run", fake_run)
 
     provider = CodexCLIProvider(LLMConfig(provider=LLMProviderName.CODEX_CLI, codex_path="tools/codex"))
     verifications = provider.verify_findings([first, second], make_pack(), repo)
@@ -1191,7 +1191,7 @@ def test_claude_provider_runs_outside_reviewed_repo_and_parses_json_result(
         stdout = json.dumps({"type": "result", "result": json.dumps({"findings": []})})
         return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
 
-    monkeypatch.setattr("apex_ray.llm_providers.subprocess.run", fake_run)
+    monkeypatch.setattr("apex_ray.llm.providers.subprocess.run", fake_run)
 
     provider = ClaudeCodeCLIProvider(LLMConfig(provider=LLMProviderName.CLAUDE_CODE_CLI, claude_path=str(claude)))
     findings = provider.review_context_pack(make_pack(), repo)
@@ -1225,7 +1225,7 @@ def test_claude_provider_resolves_relative_claude_path_before_changing_cwd(
         seen_command = command
         return subprocess.CompletedProcess(command, 0, stdout=json.dumps({"result": {"findings": []}}), stderr="")
 
-    monkeypatch.setattr("apex_ray.llm_providers.subprocess.run", fake_run)
+    monkeypatch.setattr("apex_ray.llm.providers.subprocess.run", fake_run)
 
     provider = ClaudeCodeCLIProvider(LLMConfig(provider=LLMProviderName.CLAUDE_CODE_CLI, claude_path="tools/claude"))
     findings = provider.review_context_pack(make_pack(), repo)
@@ -1280,7 +1280,7 @@ def test_claude_provider_verifies_findings_in_one_batch(
         )
         return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
 
-    monkeypatch.setattr("apex_ray.llm_providers.subprocess.run", fake_run)
+    monkeypatch.setattr("apex_ray.llm.providers.subprocess.run", fake_run)
 
     provider = ClaudeCodeCLIProvider(LLMConfig(provider=LLMProviderName.CLAUDE_CODE_CLI, claude_path="tools/claude"))
     verifications = provider.verify_findings([first, second], make_pack(), repo)
