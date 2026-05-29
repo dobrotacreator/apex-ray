@@ -6,8 +6,8 @@ import { entityNameText, propertyNameText } from "../ast-utils.js";
 import { canonicalSymbol } from "../checker-utils.js";
 import { CONTRACT_DEPENDENCY_DEPTH_LIMIT, IGNORED_CONTRACT_DEPENDENCY_NAMES } from "../constants.js";
 import { isDeclarationInsideTarget } from "../declaration-utils.js";
-import { addReference } from "../references/reference-merge.js";
-import { hasAncestor, referenceForNode } from "../references/reference-utils.js";
+import { addReference } from "../references/merge.js";
+import { hasAncestor, referenceForNode } from "../references/utils.js";
 import type { Reference } from "../types.js";
 import { isInsideRepo, isRepoRelativePath, normalizeRelPath } from "../utils.js";
 

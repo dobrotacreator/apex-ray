@@ -4,9 +4,9 @@ import { calleeNameNode, decoratorsForNode, unwrapExpression } from "../ast-util
 import { canonicalSymbol } from "../checker-utils.js";
 import { REFLECTOR_METADATA_METHOD_NAMES } from "../constants.js";
 import { isDeclarationInsideTarget } from "../declaration-utils.js";
-import { addReference } from "../references/reference-merge.js";
-import { referenceForNode } from "../references/reference-utils.js";
-import { metadataNodesForTarget } from "./contract-targets.js";
+import { addReference } from "../references/merge.js";
+import { referenceForNode } from "../references/utils.js";
+import { metadataNodesForTarget } from "./targets.js";
 import type { CollectedSymbol, MetadataKeyIdentity, Reference } from "../types.js";
 import { isInsideRepo } from "../utils.js";
 

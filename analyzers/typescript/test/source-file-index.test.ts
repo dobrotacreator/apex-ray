@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { indexSourceFile, isAnalyzableSourceFile } from "../dist/indexes/source-file-index.js";
+import { indexSourceFile, isAnalyzableSourceFile } from "../dist/indexes/source-file.js";
 
 test("source file index captures imports, exports, receivers, heritage, aliases, and DI", () => {
   const repo = path.join(os.tmpdir(), "apex-ray-ts-source-file-index");

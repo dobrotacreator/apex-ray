@@ -10,7 +10,7 @@ import {
   collectIdentifierIndex,
   collectReceiverIndex,
   collectTypeAliasIndex,
-} from "../dist/indexes/semantic-file-index.js";
+} from "../dist/indexes/semantic-file.js";
 
 test("semantic file index captures identifiers, receivers, aliases, and heritage", () => {
   const repo = path.join(os.tmpdir(), "apex-ray-ts-semantic-file-index");

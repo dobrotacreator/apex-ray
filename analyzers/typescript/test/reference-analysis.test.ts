@@ -11,8 +11,8 @@ import {
   collectImplementedMemberUsageReferences,
   collectReferenceConsumerImpact,
   collectReferences,
-} from "../dist/references/reference-analysis.js";
-import { collectSymbols } from "../dist/symbols/symbol-collection.js";
+} from "../dist/references/analysis.js";
+import { collectSymbols } from "../dist/symbols/collection.js";
 import { writeFile } from "./helpers.js";
 
 test("reference analysis captures direct refs, implemented members, callees, and consumer impact", () => {

@@ -10,7 +10,7 @@ import {
   isMemberReferenceForTarget,
   memberIdentifierHasValidReceiver,
   memberReceiverTypeNames,
-} from "../dist/workspace/workspace-member-receivers.js";
+} from "../dist/workspace/member-receivers.js";
 import type {
   CollectedSymbol,
   IdentifierIndexEntry,

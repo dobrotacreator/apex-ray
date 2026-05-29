@@ -9,7 +9,7 @@ import ts from "typescript";
 import {
   addContractSymbolWithDependencies,
   isContractDependencyIdentifier,
-} from "../dist/contracts/contract-dependencies.js";
+} from "../dist/contracts/dependencies.js";
 import type { Reference } from "../dist/types.js";
 import { writeFile } from "./helpers.js";
 

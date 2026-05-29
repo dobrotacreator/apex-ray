@@ -13,7 +13,7 @@ import {
   collectEnumMemberSymbols,
   collectFactoryCallArrayEntrySymbols,
   preferSyntheticChildSymbols,
-} from "../dist/symbols/synthetic-symbols.js";
+} from "../dist/symbols/synthetic.js";
 import type { CollectedSymbol, SymbolKind } from "../dist/types.js";
 import { writeFile } from "./helpers.js";
 

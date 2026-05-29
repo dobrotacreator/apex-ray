@@ -12,7 +12,7 @@ import {
   collectImports,
   collectSymbols,
   preferSyntheticChildSymbols,
-} from "../dist/symbols/symbol-collection.js";
+} from "../dist/symbols/collection.js";
 import { writeFile } from "./helpers.js";
 
 test("symbol collection captures imports, exports, synthetic symbols, and deleted entries", () => {

@@ -5,7 +5,7 @@ import test from "node:test";
 
 import ts from "typescript";
 
-import { collectExportedSymbolInfo, collectExports, collectImports } from "../dist/symbols/symbol-export-info.js";
+import { collectExportedSymbolInfo, collectExports, collectImports } from "../dist/symbols/export-info.js";
 
 test("symbol export info captures summaries and local exported names", () => {
   const filePath = path.join(os.tmpdir(), "apex-ray-ts-symbol-export-info.ts");

@@ -5,7 +5,7 @@ import test from "node:test";
 
 import ts from "typescript";
 
-import { collectImportIndex } from "../dist/indexes/import-index.js";
+import { collectImportIndex } from "../dist/indexes/imports.js";
 
 test("import index unwraps awaited and asserted dynamic imports", () => {
   const repo = path.join(os.tmpdir(), "apex-ray-ts-import-index");

@@ -5,7 +5,7 @@ import test from "node:test";
 
 import ts from "typescript";
 
-import { collectDiInjectionIndex, collectDiProviderIndex } from "../dist/indexes/di-index.js";
+import { collectDiInjectionIndex, collectDiProviderIndex } from "../dist/indexes/di.js";
 
 test("DI index captures provider arrays, module providers, exports, and injections", () => {
   const repo = path.join(os.tmpdir(), "apex-ray-ts-di-index");

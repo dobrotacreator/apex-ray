@@ -1,7 +1,7 @@
 import ts from "typescript";
 
 import { moduleExportNameText } from "../ast-utils.js";
-import { commonJsExportEntries } from "../indexes/import-export-index.js";
+import { commonJsExportEntries } from "../indexes/import-export.js";
 import type { ExportedSymbolInfo } from "../types.js";
 
 export function collectImports(source: ts.SourceFile): string[] {

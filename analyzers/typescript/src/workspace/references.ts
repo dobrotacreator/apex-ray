@@ -4,19 +4,19 @@ import ts from "typescript";
 
 import { identifierFromExpression, propertyAssignmentNamed } from "../ast-utils.js";
 import { findIndexedPackageForFile } from "../module-resolution.js";
-import { addReference } from "../references/reference-merge.js";
+import { addReference } from "../references/merge.js";
 import {
   inferredMemberIdentifiers,
   isMemberReferenceForTarget,
   memberIdentifierHasValidReceiver,
   memberReceiverTypeNames,
-} from "./workspace-member-receivers.js";
+} from "./member-receivers.js";
 import {
   emptyImportedBindings,
   importedBindingsForTarget,
   isIdentifierMatchedByImportedBindings,
-} from "./workspace-import-bindings.js";
-import { exportedNamesForTarget } from "./workspace-export-names.js";
+} from "./import-bindings.js";
+import { exportedNamesForTarget } from "./export-names.js";
 import type { CollectedSymbol, Reference, RepoIndex } from "../types.js";
 
 export function collectWorkspaceImportReferences(repo: string, repoIndex: RepoIndex, target: CollectedSymbol, limit: number): Reference[] {

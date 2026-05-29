@@ -2,13 +2,13 @@ import ts from "typescript";
 
 import { decoratorsForNode } from "../ast-utils.js";
 import { canonicalSymbol } from "../checker-utils.js";
-import { collectExportedSymbolInfo } from "./symbol-export-info.js";
+import { collectExportedSymbolInfo } from "./export-info.js";
 import {
   collectConstArrayEntrySymbols,
   collectConstObjectMemberSymbols,
   collectEnumMemberSymbols,
   collectFactoryCallArrayEntrySymbols,
-} from "./synthetic-symbols.js";
+} from "./synthetic.js";
 import type {
   CollectedSymbol,
   ExportContainer,
@@ -16,8 +16,8 @@ import type {
   SymbolKind,
 } from "../types.js";
 
-export { collectExports, collectImports } from "./symbol-export-info.js";
-export { collectDeletedSymbols, preferSyntheticChildSymbols } from "./synthetic-symbols.js";
+export { collectExports, collectImports } from "./export-info.js";
+export { collectDeletedSymbols, preferSyntheticChildSymbols } from "./synthetic.js";
 
 export function collectSymbols(source: ts.SourceFile, checker: ts.TypeChecker): CollectedSymbol[] {
   const symbols: CollectedSymbol[] = [];

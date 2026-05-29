@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { addReference, mergeReferences } from "../dist/references/reference-merge.js";
+import { addReference, mergeReferences } from "../dist/references/merge.js";
 import type { Reference } from "../dist/types.js";
 
 test("reference merge prioritizes high signal refs and deduplicates", () => {

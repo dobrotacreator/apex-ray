@@ -2,14 +2,14 @@ import path from "node:path";
 
 import ts from "typescript";
 
-import { collectDiInjectionIndex, collectDiProviderIndex } from "./di-index.js";
-import { collectExportIndex, collectImportIndex } from "./import-export-index.js";
+import { collectDiInjectionIndex, collectDiProviderIndex } from "./di.js";
+import { collectExportIndex, collectImportIndex } from "./import-export.js";
 import {
   collectClassHeritageIndex,
   collectIdentifierIndex,
   collectReceiverIndex,
   collectTypeAliasIndex,
-} from "./semantic-file-index.js";
+} from "./semantic-file.js";
 import type { RepoFileIndexEntry } from "../types.js";
 import { normalizeRelPath, scriptKindForPath } from "../utils.js";
 

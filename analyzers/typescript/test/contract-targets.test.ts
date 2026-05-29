@@ -10,7 +10,7 @@ import {
   parametersForNode,
   returnTypeForNode,
   variableTypeNodesForTarget,
-} from "../dist/contracts/contract-targets.js";
+} from "../dist/contracts/targets.js";
 import type { CollectedSymbol, SymbolKind } from "../dist/types.js";
 
 test("contract target helpers expose parameters, return types, variable type context, and metadata nodes", () => {

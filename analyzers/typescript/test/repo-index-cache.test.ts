@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { readRepoIndexCache, repoIndexCachePath, writeRepoIndexCache } from "../dist/indexes/repo-index-cache.js";
+import { readRepoIndexCache, repoIndexCachePath, writeRepoIndexCache } from "../dist/indexes/repo-cache.js";
 import type { RepoFileIndexEntry } from "../dist/types.js";
 
 test("repo index cache writes valid payloads and rejects invalid payloads", () => {

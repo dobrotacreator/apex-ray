@@ -2,10 +2,10 @@ import ts from "typescript";
 
 import { moduleExportNameText, propertyNameText } from "../ast-utils.js";
 import { NAMESPACE_EXPORT_LOCAL_NAME, STAR_EXPORT_LOCAL_NAME } from "../constants.js";
-import { referenceForNode } from "../references/reference-utils.js";
+import { referenceForNode } from "../references/utils.js";
 import type { CommonJsExportEntry, ExportIndexEntry } from "../types.js";
 
-export { collectImportIndex } from "./import-index.js";
+export { collectImportIndex } from "./imports.js";
 
 export function collectExportIndex(repo: string, source: ts.SourceFile): ExportIndexEntry[] {
   const exports: ExportIndexEntry[] = [];

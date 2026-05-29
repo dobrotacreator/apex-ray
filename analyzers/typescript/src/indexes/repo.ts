@@ -1,12 +1,12 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import { readRepoIndexCache, repoIndexCachePath, writeRepoIndexCache } from "./repo-index-cache.js";
-import { indexSourceFile, isAnalyzableSourceFile } from "./source-file-index.js";
+import { readRepoIndexCache, repoIndexCachePath, writeRepoIndexCache } from "./repo-cache.js";
+import { indexSourceFile, isAnalyzableSourceFile } from "./source-file.js";
 import type { Args, RepoFileIndexEntry, RepoIndex } from "../types.js";
 import { normalizeRelPath, readUtf8, walk } from "../utils.js";
 
-export { commonJsExportEntries } from "./import-export-index.js";
+export { commonJsExportEntries } from "./import-export.js";
 
 export function buildRepoIndex(args: Args): RepoIndex {
   const repo = args.repo;

@@ -13,9 +13,9 @@ import {
   symbolHasDeclarationContainingNode,
 } from "../declaration-utils.js";
 import { implementedMemberSymbols } from "../symbols/implemented-members.js";
-import { addReference } from "./reference-merge.js";
-import { isPropertyAccessMemberName, isReferenceToTarget } from "./reference-target-match.js";
-import { isDeclarationNameIdentifier, referenceForNode, referenceKind } from "./reference-utils.js";
+import { addReference } from "./merge.js";
+import { isPropertyAccessMemberName, isReferenceToTarget } from "./target-match.js";
+import { isDeclarationNameIdentifier, referenceForNode, referenceKind } from "./utils.js";
 import type { CollectedSymbol, Reference } from "../types.js";
 import { isInsideRepo, isRepoRelativePath, normalizeRelPath, sourceFileName } from "../utils.js";
 

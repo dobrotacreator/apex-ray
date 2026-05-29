@@ -12,27 +12,27 @@ import { canonicalSymbol } from "../checker-utils.js";
 import { CLASS_HERITAGE_CONTRACT_DEPTH_LIMIT } from "../constants.js";
 import { isDeclarationInsideTarget } from "../declaration-utils.js";
 import { implementedMembers } from "../symbols/implemented-members.js";
-import { addReference } from "../references/reference-merge.js";
-import { referenceForNode } from "../references/reference-utils.js";
+import { addReference } from "../references/merge.js";
+import { referenceForNode } from "../references/utils.js";
 import {
   addContractDeclarationReferences,
   addContractSymbolWithDependencies,
-} from "./contract-dependencies.js";
+} from "./dependencies.js";
 import {
   collectDecoratorMetadataKeyConsumerContracts,
   decoratorArgumentExpressions,
   decoratorNameNode,
-} from "./contract-metadata.js";
+} from "./metadata.js";
 import {
   metadataNodesForTarget,
   parametersForNode,
   returnTypeForNode,
   variableTypeNodesForTarget,
-} from "./contract-targets.js";
+} from "./targets.js";
 import type { CollectedSymbol, Reference } from "../types.js";
 import { isInsideRepo, isRepoRelativePath, normalizeRelPath } from "../utils.js";
 
-export { collectFrameworkMetadata } from "./contract-metadata.js";
+export { collectFrameworkMetadata } from "./metadata.js";
 
 export function collectSchemaContracts(
   program: ts.Program,

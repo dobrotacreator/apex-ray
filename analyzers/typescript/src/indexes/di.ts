@@ -7,7 +7,7 @@ import {
   propertyAssignmentNamed,
   unwrapExpression,
 } from "../ast-utils.js";
-import { referenceForNode } from "../references/reference-utils.js";
+import { referenceForNode } from "../references/utils.js";
 import type { DiInjectionIndexEntry, DiProviderIndexEntry } from "../types.js";
 
 export function collectDiProviderIndex(repo: string, source: ts.SourceFile): DiProviderIndexEntry[] {

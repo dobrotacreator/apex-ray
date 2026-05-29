@@ -7,7 +7,7 @@ import {
   propertyNameText,
   unwrapExpression,
 } from "../ast-utils.js";
-import { hasAncestor, referenceForIdentifier, referenceForNode } from "../references/reference-utils.js";
+import { hasAncestor, referenceForIdentifier, referenceForNode } from "../references/utils.js";
 import type {
   ClassHeritageIndexEntry,
   IdentifierIndexEntry,

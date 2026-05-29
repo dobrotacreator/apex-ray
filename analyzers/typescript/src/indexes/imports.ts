@@ -1,7 +1,7 @@
 import ts from "typescript";
 
 import { moduleExportNameText, propertyNameText } from "../ast-utils.js";
-import { referenceForNode } from "../references/reference-utils.js";
+import { referenceForNode } from "../references/utils.js";
 import type {
   DefaultImportIndexEntry,
   ImportIndexEntry,
