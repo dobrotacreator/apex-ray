@@ -346,7 +346,7 @@ def test_eval_run_prs_cli_passes_options_to_runner(tmp_path: Path, monkeypatch) 
             failed=False,
         )
 
-    monkeypatch.setattr("apex_ray.cli.run_pr_eval_cases", fake_run_pr_eval_cases)
+    monkeypatch.setattr("apex_ray.cli_eval.run_pr_eval_cases", fake_run_pr_eval_cases)
 
     result = runner.invoke(
         app,
