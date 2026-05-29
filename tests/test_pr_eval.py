@@ -615,7 +615,9 @@ def test_run_pr_eval_cases_resolves_relative_cache_dir_against_source_repo(
 
     def fake_run(**kwargs: object) -> PullRequestEvalRunResult:
         nonlocal seen_cache_dir
-        seen_cache_dir = kwargs["cache_dir"]
+        cache_dir = kwargs["cache_dir"]
+        assert isinstance(cache_dir, Path)
+        seen_cache_dir = cache_dir
         case = kwargs["case"]
         assert isinstance(case, pr_eval.PullRequestEvalCase)
         return PullRequestEvalRunResult(
