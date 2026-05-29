@@ -10,6 +10,7 @@ from apex_ray.models import (
     FindingSeverity,
     LLMRun,
     MemoryCard,
+    MemoryKind,
     MemoryMatch,
     MemoryOmission,
     ProjectProfile,
@@ -194,7 +195,7 @@ def test_report_summarizes_repo_memory() -> None:
             MemoryCard(
                 id="cart-total",
                 title="Preserve cart totals",
-                kind="invariant",
+                kind=MemoryKind.INVARIANT,
                 body="Cart totals must include quantity.",
             )
         ]
@@ -211,8 +212,8 @@ def test_report_summarizes_repo_memory() -> None:
                     MemoryMatch(
                         id="cart-total",
                         title="Preserve cart totals",
-                        kind="invariant",
-                        severity="high",
+                        kind=MemoryKind.INVARIANT,
+                        severity=FindingSeverity.HIGH,
                         applies_to="both",
                         rendered="[memory:cart-total] Preserve cart totals\nCart totals must include quantity.",
                         prompt_chars=75,
@@ -222,7 +223,7 @@ def test_report_summarizes_repo_memory() -> None:
                     MemoryOmission(
                         id="cart-fp",
                         title="Cart FP",
-                        kind="false_positive",
+                        kind=MemoryKind.FALSE_POSITIVE,
                         reason="memory character budget exceeded",
                     )
                 ],
