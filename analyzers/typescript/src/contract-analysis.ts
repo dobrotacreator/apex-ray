@@ -6,7 +6,6 @@ import {
   calleeNameNode,
   decoratorsForNode,
   entityNameText,
-  isObjectFreezeCall,
   propertyNameText,
   unwrapExpression,
 } from "./ast-utils.js";
@@ -21,6 +20,12 @@ import { isDeclarationInsideTarget } from "./declaration-utils.js";
 import { implementedMembers } from "./implemented-members.js";
 import { addReference } from "./reference-merge.js";
 import { hasAncestor, referenceForNode } from "./reference-utils.js";
+import {
+  metadataNodesForTarget,
+  parametersForNode,
+  returnTypeForNode,
+  variableTypeNodesForTarget,
+} from "./contract-targets.js";
 import type { CollectedSymbol, MetadataKeyIdentity, Reference } from "./types.js";
 import { isInsideRepo, isRepoRelativePath, normalizeRelPath } from "./utils.js";
 
@@ -351,76 +356,6 @@ function collectDeclaredTypeContracts(
   }
 }
 
-function returnTypeForNode(node: ts.Node): ts.TypeNode | null {
-  if (
-    ts.isMethodDeclaration(node) ||
-    ts.isFunctionDeclaration(node) ||
-    ts.isFunctionExpression(node) ||
-    ts.isArrowFunction(node)
-  ) {
-    return node.type ?? null;
-  }
-  return null;
-}
-
-function variableTypeNodesForTarget(target: CollectedSymbol): ts.TypeNode[] {
-  const declaration = variableDeclarationForNode(target.node) ??
-    (target.containerNode ? variableDeclarationForNode(target.containerNode) : null);
-  if (!declaration) return [];
-
-  const typeNodes: ts.TypeNode[] = [];
-  if (declaration.type) {
-    typeNodes.push(declaration.type);
-  }
-  typeNodes.push(...expressionTypeContextNodes(declaration.initializer));
-  return typeNodes;
-}
-
-function variableDeclarationForNode(node: ts.Node): ts.VariableDeclaration | null {
-  let current: ts.Node | undefined = node;
-  while (current) {
-    if (ts.isVariableDeclaration(current)) return current;
-    if (ts.isVariableStatement(current)) return current.declarationList.declarations[0] ?? null;
-    if (ts.isSourceFile(current)) return null;
-    current = current.parent;
-  }
-  return null;
-}
-
-function expressionTypeContextNodes(expression: ts.Expression | undefined): ts.TypeNode[] {
-  if (!expression) return [];
-  const typeNodes: ts.TypeNode[] = [];
-  visit(expression);
-  return typeNodes;
-
-  function visit(node: ts.Expression): void {
-    let current = node;
-    while (true) {
-      if (ts.isParenthesizedExpression(current) || ts.isNonNullExpression(current)) {
-        current = current.expression;
-        continue;
-      }
-      if (ts.isAsExpression(current) || ts.isTypeAssertionExpression(current)) {
-        typeNodes.push(current.type);
-        current = current.expression;
-        continue;
-      }
-      if (ts.isSatisfiesExpression(current)) {
-        typeNodes.push(current.type);
-        current = current.expression;
-        continue;
-      }
-      break;
-    }
-
-    if (isObjectFreezeCall(current)) {
-      for (const argument of current.arguments) {
-        visit(argument);
-      }
-    }
-  }
-}
-
 function collectImplementedMemberContracts(
   refs: Reference[],
   seen: Set<string>,
@@ -445,27 +380,6 @@ function collectImplementedMemberContracts(
       addReference(refs, seen, referenceForNode(repo, source, declaration, "contract"), limit);
     }
   }
-}
-
-function parametersForNode(node: ts.Node): readonly ts.ParameterDeclaration[] {
-  if (ts.isClassDeclaration(node)) {
-    return constructorParametersForClass(node);
-  }
-  if (
-    ts.isMethodDeclaration(node) ||
-    ts.isFunctionDeclaration(node) ||
-    ts.isFunctionExpression(node) ||
-    ts.isArrowFunction(node) ||
-    ts.isConstructorDeclaration(node)
-  ) {
-    return node.parameters;
-  }
-  return [];
-}
-
-function constructorParametersForClass(node: ts.ClassDeclaration): readonly ts.ParameterDeclaration[] {
-  const constructor = node.members.find((member): member is ts.ConstructorDeclaration => ts.isConstructorDeclaration(member));
-  return constructor?.parameters ?? [];
 }
 
 function entityNameLeaf(name: ts.EntityName): ts.Identifier {
@@ -781,26 +695,4 @@ export function collectFrameworkMetadata(target: CollectedSymbol, repo: string, 
     }
   }
   return refs;
-}
-
-function metadataNodesForTarget(target: CollectedSymbol): ts.Node[] {
-  const nodes: ts.Node[] = [];
-  if (ts.isMethodDeclaration(target.node)) {
-    const parent = target.node.parent;
-    if (ts.isClassDeclaration(parent)) {
-      nodes.push(parent);
-    }
-    nodes.push(target.node);
-    nodes.push(...target.node.parameters);
-  } else if (ts.isClassDeclaration(target.node)) {
-    nodes.push(target.node);
-    nodes.push(...constructorParametersForClass(target.node));
-    for (const member of target.node.members) {
-      nodes.push(member);
-      if (ts.isMethodDeclaration(member) || ts.isConstructorDeclaration(member)) {
-        nodes.push(...member.parameters);
-      }
-    }
-  }
-  return nodes;
 }
