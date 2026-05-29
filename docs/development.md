@@ -16,6 +16,26 @@ npm --prefix analyzers/typescript ci
 npm --prefix analyzers/typescript run build
 ```
 
+## Architecture Map
+
+Python code lives under `src/apex_ray/`. Keep domain code in the existing packages:
+
+- `llm/`: provider calls, model routing, prompts, response parsing, cache, and usage accounting.
+- `context/`: context-pack construction, snippets, and prompt budget reduction.
+- `report/`: Markdown/HTML rendering and coverage breakdowns.
+- `benchmark/`: benchmark capture, matching, models, and reports.
+- `pr_eval/`: historical PR capture/replay, Greptile matching, run state, storage, and telemetry.
+
+The bundled TypeScript analyzer lives under `analyzers/typescript/src/`. Keep analyzer internals grouped by responsibility:
+
+- `contracts/`: contracts, DTOs, decorator metadata, schemas, and dependency expansion.
+- `references/`: reference collection, merging, and target matching.
+- `workspace/`: workspace package import/export/member references.
+- `indexes/`: repository, source-file, semantic-file, import/export, and DI indexes.
+- `symbols/`: symbol collection, export metadata, implemented members, and synthetic symbols.
+
+Avoid adding new flat prefix modules like `llm_*.py`, `report_*.py`, `contract-*.ts`, or `workspace-*.ts`; use package-local names inside the relevant directory.
+
 ## Checks
 
 Run from the repository root unless noted:
