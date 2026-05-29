@@ -37,6 +37,7 @@ import {
   referenceForNode,
   referenceKind,
 } from "./reference-utils.js";
+import { addReference, mergeReferences } from "./reference-merge.js";
 import { buildRepoIndex } from "./repo-index.js";
 import {
   collectDeletedSymbols,
@@ -1939,41 +1940,6 @@ function isIdentifierMatchedByImportedBindings(
     return false;
   }
   return bindings.namespaceExportNames.get(identifier.namespaceQualifier)?.has(identifier.name) ?? false;
-}
-
-function mergeReferences(references: Reference[], limit: number): Reference[] {
-  const merged: Reference[] = [];
-  const seen = new Set<string>();
-  const prioritized = [...references].sort((left, right) => referencePriority(left) - referencePriority(right));
-  for (const reference of prioritized) {
-    addReference(merged, seen, reference, limit);
-    if (merged.length >= limit) break;
-  }
-  return merged;
-}
-
-function referencePriority(reference: Reference): number {
-  const testPenalty = isTestPath(reference.file.toLowerCase()) ? 2 : 0;
-  return referenceKindPriority(reference.kind) + testPenalty;
-}
-
-function referenceKindPriority(kind: ReferenceKind): number {
-  if (kind === "call") return 0;
-  if (kind === "callee") return 0;
-  if (kind === "contract") return 0;
-  if (kind === "metadata") return 0;
-  if (kind === "write" || kind === "read") return 1;
-  if (kind === "type") return 2;
-  if (kind === "import") return 5;
-  return 3;
-}
-
-function addReference(refs: Reference[], seen: Set<string>, reference: Reference, limit: number): void {
-  if (refs.length >= limit) return;
-  const key = `${reference.file}:${reference.line}:${reference.kind}:${reference.text}`;
-  if (seen.has(key)) return;
-  seen.add(key);
-  refs.push(reference);
 }
 
 function isReferenceToTarget(node: ts.Identifier, checker: ts.TypeChecker, target: CollectedSymbol): boolean {
