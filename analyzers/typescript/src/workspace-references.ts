@@ -3,19 +3,18 @@ import path from "node:path";
 import ts from "typescript";
 
 import { expressionNameText, identifierFromExpression, propertyAssignmentNamed } from "./ast-utils.js";
-import {
-  findIndexedPackageForFile,
-  isModuleSpecifierRelatedToPath,
-  moduleSpecifierCandidatePaths,
-} from "./module-resolution.js";
+import { findIndexedPackageForFile } from "./module-resolution.js";
 import { addReference } from "./reference-merge.js";
+import {
+  emptyImportedBindings,
+  importedBindingsForTarget,
+  isIdentifierMatchedByImportedBindings,
+} from "./workspace-import-bindings.js";
 import { exportedNamesForTarget } from "./workspace-export-names.js";
 import type {
   CollectedSymbol,
-  ExportedNamesForTarget,
   IdentifierIndexEntry,
   ImportedBindingsForTarget,
-  PackageInfo,
   ReceiverIndexEntry,
   Reference,
   RepoFileIndexEntry,
@@ -164,14 +163,6 @@ export function filterInvalidWorkspaceMemberReferences(
       memberIdentifierHasValidReceiver(identifier, entry, importedBindings, validReceiverTypeNames, target.analysis.name),
     );
   });
-}
-
-function emptyImportedBindings(): ImportedBindingsForTarget {
-  return {
-    localNames: new Map(),
-    namespaceLocalNames: new Map(),
-    namespaceExportNames: new Map(),
-  };
 }
 
 function inferredMemberIdentifiers(reference: Reference, memberName: string): IdentifierIndexEntry[] {
@@ -455,116 +446,4 @@ function qualifiedNameMatchesImportedContainer(value: string, bindings: Imported
   const namespaceName = value.slice(0, dotIndex);
   const exportedName = value.slice(dotIndex + 1);
   return bindings.namespaceExportNames.get(namespaceName)?.has(exportedName) ?? false;
-}
-
-function importedBindingsForTarget(
-  entry: RepoFileIndexEntry,
-  repo: string,
-  target: CollectedSymbol,
-  targetPackage: PackageInfo,
-  exportedNames: ExportedNamesForTarget,
-): ImportedBindingsForTarget {
-  const bindings = {
-    localNames: new Map<string, Reference>(),
-    namespaceLocalNames: new Map<string, Reference>(),
-    namespaceExportNames: new Map<string, Set<string>>(),
-  };
-  for (const importEntry of entry.imports) {
-    const importExportNames = exportedNamesForImport(importEntry.moduleSpecifier, entry.absPath, repo, targetPackage, exportedNames);
-    const importNamespaceExportNames = exportedNamespaceNamesForImport(
-      importEntry.moduleSpecifier,
-      entry.absPath,
-      repo,
-      targetPackage,
-      exportedNames,
-    );
-    if (
-      isModuleSpecifierRelatedToPath(importEntry.moduleSpecifier, entry.absPath, target.node.getSourceFile().fileName, targetPackage)
-    ) {
-      for (const name of exportedNames.allNames) {
-        importExportNames.add(name);
-      }
-    }
-    if (importExportNames.size === 0 && importNamespaceExportNames.size === 0) {
-      continue;
-    }
-
-    if (importEntry.defaultImport && importExportNames.has("default")) {
-      bindings.localNames.set(importEntry.defaultImport.localName, importEntry.defaultImport.reference);
-    }
-
-    if (importEntry.namespaceImport) {
-      bindings.namespaceLocalNames.set(importEntry.namespaceImport.localName, importEntry.namespaceImport.reference);
-      bindings.namespaceExportNames.set(importEntry.namespaceImport.localName, importExportNames);
-      for (const [namespaceName, memberNames] of importNamespaceExportNames.entries()) {
-        const localNamespaceName = `${importEntry.namespaceImport.localName}.${namespaceName}`;
-        bindings.namespaceLocalNames.set(localNamespaceName, importEntry.namespaceImport.reference);
-        bindings.namespaceExportNames.set(localNamespaceName, memberNames);
-      }
-    }
-
-    for (const namedImport of importEntry.namedImports) {
-      const namespaceMemberNames = importNamespaceExportNames.get(namedImport.importedName);
-      if (namespaceMemberNames) {
-        bindings.namespaceLocalNames.set(namedImport.localName, namedImport.reference);
-        bindings.namespaceExportNames.set(namedImport.localName, namespaceMemberNames);
-        continue;
-      }
-      if (importExportNames.has(namedImport.importedName)) {
-        bindings.localNames.set(namedImport.localName, namedImport.reference);
-      }
-    }
-  }
-  return bindings;
-}
-
-function exportedNamesForImport(
-  specifier: string,
-  importerPath: string,
-  repo: string,
-  targetPackage: PackageInfo,
-  exportedNames: ExportedNamesForTarget,
-): Set<string> {
-  const names = new Set<string>();
-  for (const candidate of moduleSpecifierCandidatePaths(specifier, importerPath, repo, targetPackage)) {
-    const candidateNames = exportedNames.byFile.get(candidate);
-    if (!candidateNames) continue;
-    for (const name of candidateNames) {
-      names.add(name);
-    }
-  }
-  return names;
-}
-
-function exportedNamespaceNamesForImport(
-  specifier: string,
-  importerPath: string,
-  repo: string,
-  targetPackage: PackageInfo,
-  exportedNames: ExportedNamesForTarget,
-): Map<string, Set<string>> {
-  const namespaces = new Map<string, Set<string>>();
-  for (const candidate of moduleSpecifierCandidatePaths(specifier, importerPath, repo, targetPackage)) {
-    const candidateNamespaces = exportedNames.namespacesByFile.get(candidate);
-    if (!candidateNamespaces) continue;
-    for (const [namespaceName, memberNames] of candidateNamespaces.entries()) {
-      const names = namespaces.get(namespaceName) ?? new Set<string>();
-      for (const memberName of memberNames) {
-        names.add(memberName);
-      }
-      namespaces.set(namespaceName, names);
-    }
-  }
-  return namespaces;
-}
-
-function isIdentifierMatchedByImportedBindings(
-  identifier: IdentifierIndexEntry,
-  bindings: ImportedBindingsForTarget,
-): boolean {
-  if (bindings.localNames.has(identifier.name)) return true;
-  if (identifier.namespaceQualifier === null || !bindings.namespaceLocalNames.has(identifier.namespaceQualifier)) {
-    return false;
-  }
-  return bindings.namespaceExportNames.get(identifier.namespaceQualifier)?.has(identifier.name) ?? false;
 }
