@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from apex_ray.pr_eval_models import GreptileComment, GreptileFinding
+from apex_ray.pr_eval_text import clean_text
 
 GREPTILE_AUTHOR_PREFIXES = ("greptile", "greptile-apps")
 DEFAULT_GREPTILE_BODY_CHARS = 4000
@@ -197,7 +198,3 @@ def strip_prompt_details(body: str) -> str:
 
 def trim_body(body: str) -> str:
     return clean_text(body)[:DEFAULT_GREPTILE_BODY_CHARS]
-
-
-def clean_text(value: str) -> str:
-    return re.sub(r"\s+", " ", value.replace("\u00a0", " ")).strip()
