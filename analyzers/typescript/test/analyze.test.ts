@@ -15,7 +15,8 @@ import {
 import { findNearestConfig, normalizeTsConfigExtends } from "../dist/program.js";
 import { buildRepoIndex } from "../dist/repo-index.js";
 import { readRepoIndexCache, repoIndexCachePath, writeRepoIndexCache } from "../dist/repo-index-cache.js";
-import type { AnalyzerResult, PackageInfo, RepoFileIndexEntry } from "../dist/types.js";
+import { findRelatedTests, isTestPath } from "../dist/test-discovery.js";
+import type { AnalyzerResult, PackageInfo, Reference, RepoFileIndexEntry } from "../dist/types.js";
 
 const testDir = path.dirname(fileURLToPath(import.meta.url));
 const analyzerRoot = path.resolve(testDir, "..");
@@ -251,6 +252,52 @@ test("module resolution expands workspace package root, subpath, and wildcard ex
       findIndexedPackageForFile(repo, repoIndex, path.join(packageRoot, "src/index.ts")),
       indexedPackage,
     );
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("test discovery finds related runnable tests", () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "apex-ray-ts-test-discovery-"));
+  try {
+    writeFile(
+      repo,
+      "vitest.config.ts",
+      [
+        "export default {",
+        "  test: {",
+        "    include: ['src/**/*.test.ts', 'tests/**/*.spec.ts'],",
+        "    exclude: ['tests/excluded.spec.ts'],",
+        "  },",
+        "};",
+      ].join("\n"),
+    );
+    writeFile(repo, "src/cart.ts", "export class CartService {}\n");
+    writeFile(repo, "src/cart.test.ts", "import { CartService } from './cart.js';\nnew CartService();\n");
+    writeFile(
+      repo,
+      "src/checkout.ts",
+      "import { CartService } from './cart.js';\nexport function checkout() { return new CartService(); }\n",
+    );
+    writeFile(repo, "tests/checkout.spec.ts", "import { checkout } from '../src/checkout.js';\ncheckout();\n");
+    writeFile(repo, "tests/excluded.spec.ts", "import { checkout } from '../src/checkout.js';\ncheckout();\n");
+    writeFile(repo, "e2e/cart.spec.ts", "import { CartService } from '../src/cart.js';\nnew CartService();\n");
+
+    const repoIndex = buildRepoIndex(parseArgs(["--repo", repo, "--changed", "src/cart.ts", "--no-index-cache"]));
+    const references: Reference[] = [
+      { file: "src/checkout.ts", line: 2, text: "export function checkout() { return new CartService(); }", kind: "call" },
+      { file: "tests/checkout.spec.ts", line: 2, text: "checkout();", kind: "call" },
+      { file: "tests/excluded.spec.ts", line: 2, text: "checkout();", kind: "call" },
+    ];
+
+    const related = findRelatedTests(repo, repoIndex, "src/cart.ts", references);
+
+    assert.equal(isTestPath("src/cart.test.ts"), true);
+    assert.equal(isTestPath("src/contest.ts"), false);
+    assert.equal(related[0], "src/cart.test.ts");
+    assert.ok(related.includes("tests/checkout.spec.ts"));
+    assert.equal(related.includes("tests/excluded.spec.ts"), false);
+    assert.equal(related.includes("e2e/cart.spec.ts"), false);
   } finally {
     fs.rmSync(repo, { recursive: true, force: true });
   }
