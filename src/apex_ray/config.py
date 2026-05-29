@@ -48,25 +48,51 @@ ROOT_GITIGNORE_BLOCK = """# Apex Ray
 .apex-ray/eval/telemetry/
 .apex-ray/eval/runs/
 .apex-ray/evals/runs/
+.claude/settings.local.json
+.codex/config.local.toml
 /review*.md
 /review*.json
 /review*.html
 """
 
-AGENTS_TEMPLATE = """# Apex Ray
+APEX_RAY_AGENT_BLOCK_START = "<!-- APEX_RAY_START -->"
+APEX_RAY_AGENT_BLOCK_END = "<!-- APEX_RAY_END -->"
+APEX_RAY_AGENT_BLOCK = f"""{APEX_RAY_AGENT_BLOCK_START}
+## Apex Ray
 
-This project uses Apex Ray for local diff-aware code review.
+This project uses Apex Ray for local diff-aware review. Use the `$apex-ray` skill for Apex Ray review, configuration, telemetry, and eval workflows. Keep `.apex-ray/config.local.yml`, caches, telemetry, reports, and eval runs out of commits.
+{APEX_RAY_AGENT_BLOCK_END}
+"""
 
-## Commands
+APEX_RAY_SKILL_TEXT = """---
+name: apex-ray
+description: Use when running or configuring Apex Ray local code reviews, interpreting reports, continuing partial reviews, tuning rules, memory, telemetry, or historical PR evals.
+---
 
-```bash
-apex-ray doctor
-apex-ray review --base main --no-llm --output .apex-ray/reports/review.md --json .apex-ray/reports/review.json
-apex-ray review --continue-from .apex-ray/reports/review.json --residual-priority p0 --no-llm
-```
+# Apex Ray
 
-Add `--llm` only when the configured local provider is available and the cost is appropriate.
-Do not commit `.apex-ray/config.local.yml`, caches, telemetry, eval runs, or generated reports.
+## Purpose
+
+Apex Ray is the project's local diff-aware AI review tool. Use it to create deterministic local review reports, run configured LLM review, continue partial coverage, tune repo rules/memory, inspect telemetry, and replay historical PR evals.
+
+## Process
+
+- Run `apex-ray doctor` when setup, config, provider, or analyzer state is uncertain.
+- For deterministic local review, run `apex-ray review --base main --no-llm --output .apex-ray/reports/review.md --json .apex-ray/reports/review.json`.
+- Add `--llm` only when the configured local provider is available and cost is appropriate.
+- If a report has partial coverage, continue unreviewed work with `apex-ray review --continue-from .apex-ray/reports/review.json --residual-priority p0 --llm` or review a specific skipped pack with `--only-pack`.
+- Use `.apex-ray/config.yml` for shared team policy and `.apex-ray/config.local.yml` for personal provider/model/cost overrides.
+- Use `.apex-ray/rules/` for stable review rules and `.apex-ray/memory/` for curated team learning.
+- Use `apex-ray telemetry-summary --telemetry-path .apex-ray/telemetry/review-runs.jsonl` when tuning cost, latency, coverage, or model routing.
+- Use `apex-ray eval capture-prs` and `apex-ray eval run-prs` only for historical PR benchmark/eval work.
+
+## Outputs
+
+Prefer writing generated review artifacts under `.apex-ray/reports/`. Keep Markdown, JSON, and HTML reports together when possible so humans and automation can inspect the same run.
+
+## Boundaries
+
+Do not treat Apex Ray as a replacement for tests, linters, typecheck, CI, dependency scanners, SAST, or human review. Do not commit `.apex-ray/config.local.yml`, `.apex-ray/cache/`, `.apex-ray/telemetry/`, `.apex-ray/reports/`, eval run directories, or generated `review.*` files unless the team intentionally curates a specific artifact.
 """
 
 LEFTHOOK_APEX_RAY_COMMAND = (
@@ -112,6 +138,7 @@ def init_project(
     update_gitignore: bool = True,
     hooks: str = "lefthook",
     agent_files: str = "both",
+    agent_skill: bool = True,
 ) -> list[Path]:
     written: list[Path] = []
     config_path = init_config(root, overwrite=overwrite)
@@ -136,6 +163,8 @@ def init_project(
     elif hooks != "none":
         raise ConfigError("Unsupported hooks value. Use lefthook, git, or none.")
     written.extend(_write_agent_files(root, agent_files=agent_files, overwrite=overwrite))
+    if agent_skill and agent_files != "none":
+        written.extend(_write_agent_skill_files(root, agent_files=agent_files, overwrite=overwrite))
     return written
 
 
@@ -263,11 +292,40 @@ def _write_if_missing_or_overwrite(path: Path, text: str, *, overwrite: bool) ->
     return True
 
 
+def _append_marked_block(path: Path, block: str, *, overwrite: bool) -> bool:
+    start = APEX_RAY_AGENT_BLOCK_START
+    end = APEX_RAY_AGENT_BLOCK_END
+    existing = path.read_text(encoding="utf-8") if path.exists() else ""
+    if start in existing and end in existing:
+        if not overwrite:
+            return False
+        before, remainder = existing.split(start, 1)
+        _, after = remainder.split(end, 1)
+        replacement = block.rstrip("\n")
+        text = (
+            f"{before.rstrip()}\n\n{replacement}\n{after.lstrip()}"
+            if before.strip()
+            else f"{replacement}\n{after.lstrip()}"
+        )
+    else:
+        separator = "\n\n" if existing and not existing.endswith("\n\n") else ""
+        text = f"{existing}{separator}{block}"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    return True
+
+
 def _append_root_gitignore_block(path: Path) -> bool:
     marker = "# Apex Ray"
     text = path.read_text(encoding="utf-8") if path.exists() else ""
+    existing_lines = set(text.splitlines())
     if marker in text:
-        return False
+        missing_lines = [line for line in ROOT_GITIGNORE_BLOCK.splitlines()[1:] if line and line not in existing_lines]
+        if not missing_lines:
+            return False
+        separator = "\n" if text and not text.endswith("\n") else ""
+        path.write_text(f"{text}{separator}" + "\n".join(missing_lines) + "\n", encoding="utf-8")
+        return True
     separator = "\n" if text and not text.endswith("\n") else ""
     path.write_text(f"{text}{separator}{ROOT_GITIGNORE_BLOCK}", encoding="utf-8")
     return True
@@ -315,24 +373,70 @@ def _write_agent_files(root: Path, *, agent_files: str, overwrite: bool) -> list
     if agent_files not in {"none", "codex", "claude", "both"}:
         raise ConfigError("Unsupported agent-files value. Use none, codex, claude, or both.")
     written: list[Path] = []
-    if agent_files in {"codex", "both"} and _write_if_missing_or_overwrite(
-        root / "AGENTS.md", AGENTS_TEMPLATE, overwrite=overwrite
+    agents_path = root / "AGENTS.md"
+    if agent_files in {"codex", "both"} and _append_marked_block(
+        agents_path, APEX_RAY_AGENT_BLOCK, overwrite=overwrite
     ):
-        written.append(root / "AGENTS.md")
+        written.append(agents_path)
     if agent_files in {"claude", "both"}:
         claude_dir = root / ".claude"
         claude_dir.mkdir(parents=True, exist_ok=True)
         claude_file = claude_dir / "CLAUDE.md"
-        if claude_file.exists() and not overwrite:
-            return written
-        if claude_file.exists() or claude_file.is_symlink():
+        if claude_file.is_symlink() and overwrite:
             claude_file.unlink()
-        if (root / "AGENTS.md").exists():
+        if claude_file.exists() and claude_file.is_symlink() and not overwrite:
+            target = (claude_file.parent / claude_file.readlink()).resolve()
+            if target.exists() and _append_marked_block(target, APEX_RAY_AGENT_BLOCK, overwrite=overwrite):
+                written.append(target)
+            return written
+        if agent_files == "both" and not claude_file.exists() and agents_path.exists():
             try:
                 claude_file.symlink_to("../AGENTS.md")
+                written.append(claude_file)
+                return written
             except OSError:
                 claude_file.write_text("See [AGENTS.md](../AGENTS.md).\n", encoding="utf-8")
-        else:
-            claude_file.write_text(AGENTS_TEMPLATE, encoding="utf-8")
-        written.append(claude_file)
+                written.append(claude_file)
+                return written
+        if _append_marked_block(claude_file, APEX_RAY_AGENT_BLOCK, overwrite=overwrite):
+            written.append(claude_file)
     return written
+
+
+def _write_agent_skill_files(root: Path, *, agent_files: str, overwrite: bool) -> list[Path]:
+    if agent_files not in {"codex", "claude", "both"}:
+        raise ConfigError("Unsupported agent-files value. Use none, codex, claude, or both.")
+    written: list[Path] = []
+    canonical = root / ".apex-ray" / "skills" / "apex-ray" / "SKILL.md"
+    if _write_if_missing_or_overwrite(canonical, APEX_RAY_SKILL_TEXT, overwrite=overwrite):
+        written.append(canonical)
+    if agent_files in {"codex", "both"} and _write_skill_alias(
+        root / ".codex" / "skills" / "apex-ray" / "SKILL.md",
+        canonical,
+        overwrite=overwrite,
+    ):
+        written.append(root / ".codex" / "skills" / "apex-ray" / "SKILL.md")
+    if agent_files in {"claude", "both"} and _write_skill_alias(
+        root / ".claude" / "skills" / "apex-ray" / "SKILL.md",
+        canonical,
+        overwrite=overwrite,
+    ):
+        written.append(root / ".claude" / "skills" / "apex-ray" / "SKILL.md")
+    return written
+
+
+def _write_skill_alias(path: Path, target: Path, *, overwrite: bool) -> bool:
+    if path.exists() and not overwrite:
+        return False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists() or path.is_symlink():
+        path.unlink()
+    try:
+        path.symlink_to(_relative_symlink_target(path, target))
+    except OSError:
+        path.write_text(APEX_RAY_SKILL_TEXT, encoding="utf-8")
+    return True
+
+
+def _relative_symlink_target(link_path: Path, target: Path) -> str:
+    return str(target.relative_to(link_path.parent, walk_up=True))

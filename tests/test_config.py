@@ -142,23 +142,53 @@ def test_init_project_creates_team_setup_files(tmp_path: Path) -> None:
     assert (tmp_path / ".apex-ray" / "reports").is_dir()
     assert "config.local.yml" in (tmp_path / ".apex-ray" / ".gitignore").read_text(encoding="utf-8")
     assert ".apex-ray/reports/" in (tmp_path / ".gitignore").read_text(encoding="utf-8")
+    assert ".codex/config.local.toml" in (tmp_path / ".gitignore").read_text(encoding="utf-8")
     assert "apex-ray-review" in (tmp_path / "lefthook.yml").read_text(encoding="utf-8")
     assert (tmp_path / "AGENTS.md").exists()
     assert (tmp_path / ".claude" / "CLAUDE.md").exists()
+    assert (tmp_path / ".apex-ray" / "skills" / "apex-ray" / "SKILL.md").exists()
+    assert (tmp_path / ".codex" / "skills" / "apex-ray" / "SKILL.md").exists()
+    assert (tmp_path / ".claude" / "skills" / "apex-ray" / "SKILL.md").exists()
     assert "--no-llm" in (tmp_path / "lefthook.yml").read_text(encoding="utf-8")
     agents_text = (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
-    assert "review --continue-from .apex-ray/reports/review.json --residual-priority p0 --no-llm" in agents_text
-    assert "Add `--llm` only when" in agents_text
+    assert "APEX_RAY_START" in agents_text
+    assert "$apex-ray" in agents_text
+    skill_text = (tmp_path / ".apex-ray" / "skills" / "apex-ray" / "SKILL.md").read_text(encoding="utf-8")
+    assert "apex-ray review --continue-from .apex-ray/reports/review.json" in skill_text
+    assert "Add `--llm` only when" in skill_text
 
 
-def test_init_project_is_idempotent_for_existing_agent_files(tmp_path: Path) -> None:
+def test_init_project_appends_to_existing_agent_files(tmp_path: Path) -> None:
     init_project(tmp_path)
     agents = tmp_path / "AGENTS.md"
     agents.write_text("custom\n", encoding="utf-8")
 
     init_project(tmp_path)
 
-    assert agents.read_text(encoding="utf-8") == "custom\n"
+    text = agents.read_text(encoding="utf-8")
+    assert text.startswith("custom\n")
+    assert "APEX_RAY_START" in text
+    assert "$apex-ray" in text
+
+
+def test_init_project_updates_existing_apex_gitignore_block(tmp_path: Path) -> None:
+    (tmp_path / ".gitignore").write_text("# Apex Ray\n.apex-ray/reports/\n", encoding="utf-8")
+
+    init_project(tmp_path)
+
+    text = (tmp_path / ".gitignore").read_text(encoding="utf-8")
+    assert ".apex-ray/reports/" in text
+    assert ".codex/config.local.toml" in text
+    assert ".claude/settings.local.json" in text
+
+
+def test_init_project_can_skip_agent_skill_files(tmp_path: Path) -> None:
+    init_project(tmp_path, agent_skill=False)
+
+    assert (tmp_path / "AGENTS.md").exists()
+    assert not (tmp_path / ".apex-ray" / "skills").exists()
+    assert not (tmp_path / ".codex").exists()
+    assert not (tmp_path / ".claude" / "skills").exists()
 
 
 def test_init_project_refuses_to_replace_existing_git_hook_without_force(tmp_path: Path) -> None:

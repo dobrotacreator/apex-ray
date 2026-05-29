@@ -60,6 +60,10 @@ def init(
         str,
         typer.Option("--agent-files", help="Agent instruction files: both, codex, claude, or none."),
     ] = "both",
+    agent_skill: Annotated[
+        bool,
+        typer.Option("--agent-skill/--no-agent-skill", help="Add Apex Ray project skill files for selected agents."),
+    ] = True,
     update_gitignore: Annotated[
         bool,
         typer.Option("--update-gitignore/--no-update-gitignore", help="Add Apex Ray outputs to root .gitignore."),
@@ -74,6 +78,7 @@ def init(
             update_gitignore=update_gitignore,
             hooks=hooks,
             agent_files=agent_files,
+            agent_skill=agent_skill,
         )
     except ConfigError as exc:
         raise typer.BadParameter(str(exc)) from exc

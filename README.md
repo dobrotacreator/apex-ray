@@ -70,7 +70,7 @@ apex-ray doctor
 apex-ray review --worktree --no-llm --output review.md --json review.json
 ```
 
-`apex-ray init` creates `.apex-ray/config.yml`, rules/memory/report directories, gitignore entries, agent instruction files, and a no-LLM Lefthook pre-push review command. Use `--hooks none` or `--agent-files none` for exceptional repositories.
+`apex-ray init` creates `.apex-ray/config.yml`, rules/memory/report directories, gitignore entries, brief agent instruction pointers, project-local Apex Ray skills, and a no-LLM Lefthook pre-push review command. Use `--hooks none`, `--agent-files none`, or `--no-agent-skill` for exceptional repositories.
 
 Run LLM review when Codex CLI is configured:
 

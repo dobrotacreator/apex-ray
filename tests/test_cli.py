@@ -40,6 +40,9 @@ def test_init_creates_config(tmp_path: Path, monkeypatch) -> None:
     assert (tmp_path / "lefthook.yml").exists()
     assert (tmp_path / "AGENTS.md").exists()
     assert (tmp_path / ".claude" / "CLAUDE.md").exists()
+    assert (tmp_path / ".apex-ray" / "skills" / "apex-ray" / "SKILL.md").exists()
+    assert (tmp_path / ".codex" / "skills" / "apex-ray" / "SKILL.md").exists()
+    assert (tmp_path / ".claude" / "skills" / "apex-ray" / "SKILL.md").exists()
     assert "apex-ray-review" in (tmp_path / "lefthook.yml").read_text(encoding="utf-8")
     assert "--no-llm" in (tmp_path / "lefthook.yml").read_text(encoding="utf-8")
 
@@ -53,6 +56,17 @@ def test_init_can_skip_hooks_and_agent_files(tmp_path: Path, monkeypatch) -> Non
     assert (tmp_path / ".apex-ray" / "config.yml").exists()
     assert not (tmp_path / "lefthook.yml").exists()
     assert not (tmp_path / "AGENTS.md").exists()
+    assert not (tmp_path / ".apex-ray" / "skills").exists()
+
+
+def test_init_can_skip_agent_skill(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["init", "--no-agent-skill"], catch_exceptions=False)
+
+    assert result.exit_code == 0
+    assert (tmp_path / "AGENTS.md").exists()
+    assert not (tmp_path / ".apex-ray" / "skills").exists()
 
 
 def test_doctor_reports_local_config(tmp_path: Path, monkeypatch) -> None:
