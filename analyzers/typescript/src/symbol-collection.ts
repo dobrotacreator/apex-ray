@@ -11,7 +11,7 @@ import {
 } from "./ast-utils.js";
 import { canonicalSymbol } from "./checker-utils.js";
 import { ARRAY_OBJECT_ENTRY_ID_PROPERTY_NAMES } from "./constants.js";
-import { commonJsExportEntries } from "./source-file-index.js";
+import { commonJsExportEntries } from "./import-export-index.js";
 import type {
   CollectedSymbol,
   DeletedLine,

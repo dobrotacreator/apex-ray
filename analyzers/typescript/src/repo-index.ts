@@ -6,7 +6,7 @@ import { indexSourceFile, isAnalyzableSourceFile } from "./source-file-index.js"
 import type { Args, RepoFileIndexEntry, RepoIndex } from "./types.js";
 import { normalizeRelPath, readUtf8, walk } from "./utils.js";
 
-export { commonJsExportEntries } from "./source-file-index.js";
+export { commonJsExportEntries } from "./import-export-index.js";
 
 export function buildRepoIndex(args: Args): RepoIndex {
   const repo = args.repo;
