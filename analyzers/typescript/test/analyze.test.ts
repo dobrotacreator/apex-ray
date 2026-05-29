@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import ts from "typescript";
 import { analyze } from "../dist/analyzer.js";
 import { parseArgs } from "../dist/cli.js";
+import { collectFrameworkMetadata, collectSchemaContracts } from "../dist/contract-analysis.js";
 import {
   findIndexedPackageForFile,
   isModuleSpecifierRelatedToPath,
@@ -591,6 +592,99 @@ test("workspace references capture imports and filter unrelated member receivers
     assert.ok(memberRefs.some((reference) => reference.text.includes("service.total()")));
     assert.equal(filteredMemberRefs.some((reference) => reference.text.includes("service.total()")), true);
     assert.equal(filteredMemberRefs.some((reference) => reference.text.includes("other.total()")), false);
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("contract analysis captures declared types, schema receivers, and framework metadata", () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "apex-ray-ts-contract-analysis-"));
+  try {
+    const controllerPath = path.join(repo, "src/controller.ts");
+    const contractsPath = path.join(repo, "src/contracts.ts");
+    writeFile(
+      repo,
+      "tsconfig.json",
+      JSON.stringify({
+        compilerOptions: {
+          target: "ES2022",
+          module: "NodeNext",
+          moduleResolution: "NodeNext",
+          strict: true,
+          experimentalDecorators: true,
+        },
+        include: ["src/**/*.ts"],
+      }),
+    );
+    writeFile(
+      repo,
+      "src/contracts.ts",
+      [
+        "export interface CartItem {",
+        "  price: number;",
+        "}",
+        "",
+        "export const cartSchema = {",
+        "  parse(value: unknown): CartItem {",
+        "    return value as CartItem;",
+        "  },",
+        "};",
+        "",
+        "export function Controller(): ClassDecorator {",
+        "  return () => {};",
+        "}",
+      ].join("\n"),
+    );
+    writeFile(
+      repo,
+      "src/controller.ts",
+      [
+        "import { CartItem, Controller, cartSchema } from './contracts.js';",
+        "",
+        "@Controller()",
+        "export class CartController {",
+        "  checkout(item: CartItem): CartItem {",
+        "    return cartSchema.parse(item);",
+        "  }",
+        "}",
+      ].join("\n"),
+    );
+
+    const program = ts.createProgram({
+      rootNames: [controllerPath, contractsPath],
+      options: {
+        target: ts.ScriptTarget.ES2022,
+        module: ts.ModuleKind.NodeNext,
+        moduleResolution: ts.ModuleResolutionKind.NodeNext,
+        strict: true,
+        experimentalDecorators: true,
+      },
+    });
+    const source = program.getSourceFile(controllerPath);
+    assert.ok(source);
+    const target = collectSymbols(source, program.getTypeChecker()).find((symbol) => symbol.analysis.name === "checkout");
+    assert.ok(target);
+
+    const contracts = collectSchemaContracts(program, program.getTypeChecker(), target, repo, 20);
+    const metadata = collectFrameworkMetadata(target, repo, 20);
+
+    assert.ok(
+      contracts.some(
+        (reference) =>
+          reference.file === "src/contracts.ts" &&
+          reference.kind === "contract" &&
+          reference.text.includes("export interface CartItem"),
+      ),
+    );
+    assert.ok(
+      contracts.some(
+        (reference) =>
+          reference.file === "src/contracts.ts" &&
+          reference.kind === "contract" &&
+          reference.text.includes("export const cartSchema"),
+      ),
+    );
+    assert.ok(metadata.some((reference) => reference.kind === "metadata" && reference.text.includes("@Controller()")));
   } finally {
     fs.rmSync(repo, { recursive: true, force: true });
   }

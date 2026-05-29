@@ -20,6 +20,12 @@ export function expressionNameText(expression: ts.Expression): string | null {
   return null;
 }
 
+export function calleeNameNode(expression: ts.Expression): ts.Node | null {
+  if (ts.isIdentifier(expression)) return expression;
+  if (ts.isPropertyAccessExpression(expression)) return expression.name;
+  return null;
+}
+
 export function propertyAssignmentNamed(
   object: ts.ObjectLiteralExpression,
   name: string,
