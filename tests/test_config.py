@@ -171,6 +171,46 @@ def test_init_project_appends_to_existing_agent_files(tmp_path: Path) -> None:
     assert "$apex-ray" in text
 
 
+def test_init_project_updates_existing_claude_symlink_to_agents_once(tmp_path: Path) -> None:
+    agents = tmp_path / "AGENTS.md"
+    agents.write_text("custom\n", encoding="utf-8")
+    claude_dir = tmp_path / ".claude"
+    claude_dir.mkdir()
+    (claude_dir / "CLAUDE.md").symlink_to("../AGENTS.md")
+
+    init_project(tmp_path)
+
+    text = agents.read_text(encoding="utf-8")
+    assert text.startswith("custom\n")
+    assert text.count("APEX_RAY_START") == 1
+    assert (claude_dir / "CLAUDE.md").is_symlink()
+
+
+def test_init_project_prefers_existing_root_claude_file(tmp_path: Path) -> None:
+    (tmp_path / "CLAUDE.md").write_text("claude root\n", encoding="utf-8")
+
+    init_project(tmp_path)
+
+    text = (tmp_path / "CLAUDE.md").read_text(encoding="utf-8")
+    assert text.startswith("claude root\n")
+    assert "APEX_RAY_START" in text
+    assert not (tmp_path / ".claude" / "CLAUDE.md").exists()
+
+
+def test_init_project_updates_root_claude_symlink_to_agents(tmp_path: Path) -> None:
+    agents = tmp_path / "AGENTS.md"
+    agents.write_text("custom\n", encoding="utf-8")
+    (tmp_path / "CLAUDE.md").symlink_to("AGENTS.md")
+
+    init_project(tmp_path)
+
+    text = agents.read_text(encoding="utf-8")
+    assert text.startswith("custom\n")
+    assert text.count("APEX_RAY_START") == 1
+    assert (tmp_path / "CLAUDE.md").is_symlink()
+    assert not (tmp_path / ".claude" / "CLAUDE.md").exists()
+
+
 def test_init_project_updates_existing_apex_gitignore_block(tmp_path: Path) -> None:
     (tmp_path / ".gitignore").write_text("# Apex Ray\n.apex-ray/reports/\n", encoding="utf-8")
 

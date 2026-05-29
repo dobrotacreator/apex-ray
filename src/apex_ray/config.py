@@ -374,20 +374,24 @@ def _write_agent_files(root: Path, *, agent_files: str, overwrite: bool) -> list
         raise ConfigError("Unsupported agent-files value. Use none, codex, claude, or both.")
     written: list[Path] = []
     agents_path = root / "AGENTS.md"
-    if agent_files in {"codex", "both"} and _append_marked_block(
-        agents_path, APEX_RAY_AGENT_BLOCK, overwrite=overwrite
-    ):
-        written.append(agents_path)
+    if agent_files in {"codex", "both"}:
+        written_path = _append_agent_block(agents_path, overwrite=overwrite)
+        if written_path is not None:
+            written.append(written_path)
     if agent_files in {"claude", "both"}:
+        root_claude_file = root / "CLAUDE.md"
+        if root_claude_file.exists() or root_claude_file.is_symlink():
+            written_path = _append_agent_block(root_claude_file, overwrite=overwrite)
+            if written_path is not None:
+                written.append(written_path)
+            return written
         claude_dir = root / ".claude"
         claude_dir.mkdir(parents=True, exist_ok=True)
         claude_file = claude_dir / "CLAUDE.md"
-        if claude_file.is_symlink() and overwrite:
-            claude_file.unlink()
-        if claude_file.exists() and claude_file.is_symlink() and not overwrite:
-            target = (claude_file.parent / claude_file.readlink()).resolve()
-            if target.exists() and _append_marked_block(target, APEX_RAY_AGENT_BLOCK, overwrite=overwrite):
-                written.append(target)
+        if claude_file.exists() or claude_file.is_symlink():
+            written_path = _append_agent_block(claude_file, overwrite=overwrite)
+            if written_path is not None:
+                written.append(written_path)
             return written
         if agent_files == "both" and not claude_file.exists() and agents_path.exists():
             try:
@@ -401,6 +405,16 @@ def _write_agent_files(root: Path, *, agent_files: str, overwrite: bool) -> list
         if _append_marked_block(claude_file, APEX_RAY_AGENT_BLOCK, overwrite=overwrite):
             written.append(claude_file)
     return written
+
+
+def _append_agent_block(path: Path, *, overwrite: bool) -> Path | None:
+    if path.is_symlink():
+        if overwrite:
+            path.unlink()
+        else:
+            target = (path.parent / path.readlink()).resolve()
+            return target if _append_marked_block(target, APEX_RAY_AGENT_BLOCK, overwrite=overwrite) else None
+    return path if _append_marked_block(path, APEX_RAY_AGENT_BLOCK, overwrite=overwrite) else None
 
 
 def _write_agent_skill_files(root: Path, *, agent_files: str, overwrite: bool) -> list[Path]:
