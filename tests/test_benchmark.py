@@ -1,8 +1,7 @@
-from __future__ import annotations
-
 import json
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from apex_ray.benchmark import (
@@ -25,11 +24,15 @@ from apex_ray.benchmark import (
     run_benchmark_cases,
 )
 from apex_ray.cli import app
-from apex_ray.llm_cache import REVIEW_PROMPT_VERSION, VERIFIER_PROMPT_VERSION
+from apex_ray.llm.cache import REVIEW_PROMPT_VERSION, VERIFIER_PROMPT_VERSION
 from apex_ray.models import Finding, FindingConfidence, FindingSeverity, LLMRun
 
 ROOT = Path(__file__).resolve().parents[1]
 BENCHMARKS = ROOT / "tests" / "benchmarks"
+CONTEXT_BENCHMARK_CASES = [
+    *sorted(BENCHMARKS.glob("*_context.yml")),
+    BENCHMARKS / "routes_context_static.yml",
+]
 runner = CliRunner()
 
 
@@ -102,6 +105,15 @@ def test_run_benchmark_cases_with_fake_provider() -> None:
     assert report.expected_context_total == 1
     assert report.missed_context_total == 0
     assert report.extra_findings_total == 0
+
+
+@pytest.mark.parametrize("case_path", CONTEXT_BENCHMARK_CASES, ids=lambda path: path.stem)
+def test_context_benchmark_case_passes(case_path: Path, built_ts_analyzer: None) -> None:
+    report = run_benchmark_cases([case_path])
+
+    assert report.total == 1
+    assert report.failed == 0
+    assert report.missed_context_total == 0
 
 
 def test_benchmark_cache_telemetry_uses_batch_counters() -> None:
@@ -610,6 +622,52 @@ def test_capture_benchmark_cli_writes_self_contained_case(tmp_path: Path, built_
     assert case.expected_context[0].reference_file == "src/checkout.ts"
     assert case.expected_context[0].reference_kind == "call"
     assert case.expected_context[0].reference_text_contains == "calculateTotal"
+
+
+def test_capture_benchmark_overwrite_preserves_existing_output_on_capture_failure(tmp_path: Path) -> None:
+    from apex_ray.benchmark.capture import capture_benchmark_case
+    from apex_ray.models import TargetMode
+
+    repo = tmp_path / "source"
+    repo.mkdir()
+    _run(["git", "init"], repo)
+    _run(["git", "config", "user.email", "test@example.com"], repo)
+    _run(["git", "config", "user.name", "Test"], repo)
+    (repo / "src.ts").write_text("export const value = 1;\n", encoding="utf-8")
+    _run(["git", "add", "."], repo)
+    _run(["git", "commit", "-m", "initial"], repo)
+    output = tmp_path / "captured"
+    output.mkdir()
+    keep = output / "keep.txt"
+    keep.write_text("previous\n", encoding="utf-8")
+
+    with pytest.raises(BenchmarkError, match="No changed files"):
+        capture_benchmark_case(repo, output, "empty", TargetMode.WORKTREE, overwrite=True)
+
+    assert keep.read_text(encoding="utf-8") == "previous\n"
+
+
+def test_capture_benchmark_function_defaults_to_no_llm(
+    tmp_path: Path,
+    built_ts_analyzer: None,
+) -> None:
+    from apex_ray.benchmark.capture import capture_benchmark_case
+    from apex_ray.models import TargetMode
+
+    repo = tmp_path / "source"
+    repo.mkdir()
+    _run(["git", "init"], repo)
+    _run(["git", "config", "user.email", "test@example.com"], repo)
+    _run(["git", "config", "user.name", "Test"], repo)
+    (repo / "src.ts").write_text("export const value = 1;\n", encoding="utf-8")
+    _run(["git", "add", "."], repo)
+    _run(["git", "commit", "-m", "initial"], repo)
+    (repo / "src.ts").write_text("export const value = 2;\n", encoding="utf-8")
+    output = tmp_path / "captured"
+
+    capture_benchmark_case(repo, output, "default no llm", TargetMode.WORKTREE)
+
+    assert load_benchmark_case(output / "case.yml").llm is False
 
 
 def _run(command: list[str], cwd: Path) -> None:

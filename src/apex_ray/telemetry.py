@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import json
 import uuid
 from collections import Counter
@@ -29,6 +27,7 @@ def append_review_telemetry(
 ) -> Path:
     coverage = report.llm_coverage
     entry: dict[str, Any] = {
+        "schema_version": "review-telemetry/v1",
         "run_id": uuid.uuid4().hex,
         "created_at": _now_iso(),
         "version": __version__,
@@ -88,21 +87,21 @@ def append_review_telemetry(
 def load_review_telemetry(path: Path) -> list[dict[str, Any]]:
     if not path.exists():
         return []
+    entries: list[dict[str, Any]] = []
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        with path.open(encoding="utf-8") as handle:
+            for line_number, line in enumerate(handle, start=1):
+                if not line.strip():
+                    continue
+                try:
+                    raw = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    raise TelemetryError(f"Invalid telemetry entry {path}:{line_number}: {exc}") from exc
+                if not isinstance(raw, dict):
+                    raise TelemetryError(f"Invalid telemetry entry {path}:{line_number}: expected object")
+                entries.append(raw)
     except OSError as exc:
         raise TelemetryError(f"Unable to read review telemetry {path}: {exc}") from exc
-    entries: list[dict[str, Any]] = []
-    for line_number, line in enumerate(lines, start=1):
-        if not line.strip():
-            continue
-        try:
-            raw = json.loads(line)
-        except json.JSONDecodeError as exc:
-            raise TelemetryError(f"Invalid telemetry entry {path}:{line_number}: {exc}") from exc
-        if not isinstance(raw, dict):
-            raise TelemetryError(f"Invalid telemetry entry {path}:{line_number}: expected object")
-        entries.append(raw)
     return entries
 
 
@@ -133,7 +132,9 @@ def render_review_telemetry_summary(entries: list[dict[str, Any]]) -> str:
             f"- Latest high-risk coverage: `{_float(latest.get('high_risk_coverage_ratio')):.1%}`",
             f"- Latest LLM tokens: `~{latest.get('llm_estimated_input_tokens', 0)}`",
             f"- Total LLM tokens: `~{tokens}`",
+            f"- Average LLM tokens/run: `~{tokens // len(entries)}`",
             f"- Total wall time: `{duration_ms}ms`",
+            f"- Average wall time/run: `{duration_ms // len(entries)}ms`",
             f"- Total LLM duration: `{llm_duration_ms}ms`",
             f"- Failed LLM runs: `{failed_llm_runs}`",
             f"- Partial severity counts: `{dict(sorted(partial_counts.items()))}`",

@@ -25,7 +25,7 @@ Summarize entries:
 apex-ray telemetry-summary --telemetry-path .apex-ray/telemetry/review-runs.jsonl
 ```
 
-Entries include run duration, target mode, diff size, finding counts, context-pack counts, coverage ratios, partial severity, residual P0/P1 counts, token estimates, LLM duration, cache hit/miss counts, failed LLM runs, pack statuses, and model routes.
+Entries include a schema version, run duration, target mode, diff size, finding counts, context-pack counts, coverage ratios, partial severity, residual P0/P1 counts, token estimates, LLM duration, cache hit/miss counts, failed LLM runs, pack statuses, and model routes.
 
 ## PR Eval Telemetry
 

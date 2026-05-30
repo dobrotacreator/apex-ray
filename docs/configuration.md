@@ -29,7 +29,7 @@ review:
     paths:
       - .apex-ray/memory
   llm:
-    enabled: true
+    enabled: false
     provider: codex_cli
     coverage_mode: balanced
     max_input_tokens: 120000

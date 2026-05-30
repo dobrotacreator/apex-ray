@@ -36,4 +36,6 @@ apex-ray memory lint
 apex-ray memory suggest --from-report review.json --output memory-suggestions.md
 ```
 
+`memory suggest` uses approved verifier findings by default. Add `--include-unverified` only when you are manually triaging an unverified report.
+
 Commit curated memory cards and benchmark fixtures. Do not commit raw run artifacts; `.apex-ray/eval/runs/` and `.apex-ray/evals/runs/` are ignored by default.

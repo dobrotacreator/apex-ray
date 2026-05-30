@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from pathlib import Path
 
 from apex_ray.classify import classify_diff
@@ -396,6 +394,57 @@ def test_continue_review_from_report_reviews_residual_pack(tmp_path: Path) -> No
     assert continued.llm_coverage.reviewed_context_pack_ids == [reviewed.id, residual.id]
     assert continued.findings[0].context_pack_id == residual.id
     assert any(stage.stage == "continue_deep" for stage in continued.llm_selection.stages)
+
+
+def test_continue_review_from_report_does_not_enable_llm_implicitly(tmp_path: Path) -> None:
+    config = ReviewConfig()
+    reviewed = ContextPack(id="src/auth.ts#login:1", file="src/auth.ts", file_kind=FileKind.SOURCE)
+    residual = ContextPack(
+        id="src/payments.ts#capture:1",
+        file="src/payments.ts",
+        file_kind=FileKind.SOURCE,
+        risk_signals=[
+            RiskSignal(kind="persistence", severity=RiskSeverity.HIGH, reason="State changed.", file="src/payments.ts")
+        ],
+    )
+    initial = build_report(
+        ProjectProfile(root=str(tmp_path), is_git_repo=True),
+        config,
+        DiffSummary(target_mode=TargetMode.PATCH, stats=DiffStats(files_changed=2)),
+        context_packs=[reviewed, residual],
+        llm_runs=[
+            LLMRun(
+                provider="fake",
+                context_pack_id=reviewed.id,
+                status="ok",
+                duration_ms=1,
+            )
+        ],
+    )
+    finding = Finding(
+        title="Capture skips ledger lock",
+        severity=FindingSeverity.HIGH,
+        confidence=FindingConfidence.HIGH,
+        file="src/payments.ts",
+        line=10,
+        failure_mode="Concurrent capture can double-spend.",
+        evidence="The context pack changed capture.",
+        suggested_fix="Lock the ledger row before updating.",
+        suggested_test="Add a concurrent capture test.",
+    )
+
+    continued, selected = continue_review_from_report(
+        initial,
+        repo_root=tmp_path,
+        residual_priorities={"p0"},
+        provider=FakeLLMProvider([finding]),
+    )
+
+    assert [pack.id for pack in selected] == [residual.id]
+    assert continued.config.llm.enabled is False
+    assert continued.llm_runs == initial.llm_runs
+    assert continued.findings == []
+    assert "LLM review is disabled" in "\n".join(continued.diff.warnings)
 
 
 def test_run_review_pipeline_skips_over_budget_llm_packs(tmp_path: Path) -> None:

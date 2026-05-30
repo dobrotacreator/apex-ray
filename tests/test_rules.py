@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from apex_ray.models import AnalyzerReference, CodeSnippet, ContextPack, ReviewRule
 from apex_ray.rules import match_rules_for_pack
 

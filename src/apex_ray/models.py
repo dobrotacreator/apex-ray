@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from datetime import datetime
 from enum import StrEnum
 from typing import Literal
@@ -702,6 +700,7 @@ class LLMRun(ApexModel):
 
 
 class ReviewReport(ApexModel):
+    schema_version: str = "review-report/v1"
     project: ProjectProfile
     config: ReviewConfig
     diff: DiffSummary

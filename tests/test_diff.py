@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from pathlib import Path
 
 from apex_ray.diff import parse_unified_diff
@@ -60,3 +58,26 @@ index 1111111..2222222 100644
     assert hunk.lines[1].content == ""
     assert hunk.lines[1].old_line == 2
     assert hunk.lines[1].new_line == 2
+
+
+def test_parse_hunk_lines_that_look_like_diff_markers() -> None:
+    summary = parse_unified_diff(
+        """diff --git a/tests/example.py b/tests/example.py
+index 1111111..2222222 100644
+--- a/tests/example.py
++++ b/tests/example.py
+@@ -1,4 +1,4 @@
+ text = '''
+---- old marker
+++++ new marker
+ '''
+""",
+        target_mode=TargetMode.PATCH,
+    )
+
+    hunk = summary.files[0].hunks[0]
+    assert summary.warnings == []
+    assert hunk.lines[1].kind == DiffLineKind.DELETE
+    assert hunk.lines[1].content == "--- old marker"
+    assert hunk.lines[2].kind == DiffLineKind.ADD
+    assert hunk.lines[2].content == "+++ new marker"

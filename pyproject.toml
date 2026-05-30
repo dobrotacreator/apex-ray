@@ -37,6 +37,7 @@ apex-ray = "apex_ray.cli:app"
 
 [dependency-groups]
 dev = [
+    "coverage>=7.14.1",
     "pyright>=1.1",
     "pytest>=8.4",
     "ruff>=0.14",
@@ -48,7 +49,7 @@ requires = ["hatchling>=1.29.0"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel.force-include]
-"analyzers/typescript/dist/analyze.js" = "apex_ray/_bundled/typescript/analyze.js"
+"analyzers/typescript/dist" = "apex_ray/_bundled/typescript"
 "analyzers/typescript/package.json" = "apex_ray/_bundled/typescript/package.json"
 "analyzers/typescript/package-lock.json" = "apex_ray/_bundled/typescript/package-lock.json"
 "analyzers/typescript/node_modules/typescript" = "apex_ray/_bundled/typescript/node_modules/typescript"
@@ -59,7 +60,9 @@ include = [
     "/tests",
     "/docs",
     "/analyzers/typescript/src",
+    "/analyzers/typescript/test",
     "/analyzers/typescript/tsconfig.json",
+    "/analyzers/typescript/tsconfig.test.json",
     "/analyzers/typescript/package.json",
     "/analyzers/typescript/package-lock.json",
     "/README.md",
@@ -69,9 +72,17 @@ include = [
     "/pyproject.toml",
 ]
 artifacts = [
-    "/analyzers/typescript/dist/analyze.js",
+    "/analyzers/typescript/dist",
     "/analyzers/typescript/node_modules/typescript",
 ]
+
+[tool.coverage.run]
+source = ["apex_ray"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+fail_under = 80
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from apex_ray.models import (
     AnalyzerSymbol,
     ContextPack,
@@ -12,6 +10,7 @@ from apex_ray.models import (
     FindingSeverity,
     LLMRun,
     MemoryCard,
+    MemoryKind,
     MemoryMatch,
     MemoryOmission,
     ProjectProfile,
@@ -196,7 +195,7 @@ def test_report_summarizes_repo_memory() -> None:
             MemoryCard(
                 id="cart-total",
                 title="Preserve cart totals",
-                kind="invariant",
+                kind=MemoryKind.INVARIANT,
                 body="Cart totals must include quantity.",
             )
         ]
@@ -213,8 +212,8 @@ def test_report_summarizes_repo_memory() -> None:
                     MemoryMatch(
                         id="cart-total",
                         title="Preserve cart totals",
-                        kind="invariant",
-                        severity="high",
+                        kind=MemoryKind.INVARIANT,
+                        severity=FindingSeverity.HIGH,
                         applies_to="both",
                         rendered="[memory:cart-total] Preserve cart totals\nCart totals must include quantity.",
                         prompt_chars=75,
@@ -224,7 +223,7 @@ def test_report_summarizes_repo_memory() -> None:
                     MemoryOmission(
                         id="cart-fp",
                         title="Cart FP",
-                        kind="false_positive",
+                        kind=MemoryKind.FALSE_POSITIVE,
                         reason="memory character budget exceeded",
                     )
                 ],
@@ -308,7 +307,7 @@ def test_report_json_exposes_residual_risk_gate_and_file_coverage() -> None:
     assert data["llm_coverage"]["coverage_todos"][0]["context_pack_id"] == "src/payments.ts#file"
     assert data["llm_coverage"]["coverage_todos"][0]["priority"] == "p0"
     assert "Coverage todo:" in markdown
-    assert "apex-ray review --continue-from <report.json> --only-pack" in markdown
+    assert "apex-ray review --continue-from '<report.json>' --only-pack" in markdown
     assert data["llm_coverage"]["cluster_context_packs"] == 1
     assert data["llm_coverage"]["file_context_packs"] == 1
     assert data["llm_coverage"]["file_coverage"] == [

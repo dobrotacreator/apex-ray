@@ -24,10 +24,11 @@ dist/
 **/.apex-ray/eval/runs/
 .apex-ray/evals/runs/
 **/.apex-ray/evals/runs/
-review*.md
-review*.json
-review*.html
-benchmark*.md
-benchmark*.json
+/review*.md
+/review*.json
+/review*.html
+/benchmark*.md
+/benchmark*.json
 analyzers/typescript/node_modules/
 analyzers/typescript/dist/
+analyzers/typescript/dist-test/

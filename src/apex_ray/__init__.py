@@ -1,3 +1,8 @@
 """Apex Ray local code review engine."""
 
-__version__ = "0.1.0"
+from importlib.metadata import PackageNotFoundError, version
+
+try:
+    __version__ = version("apex-ray")
+except PackageNotFoundError:
+    __version__ = "0+unknown"

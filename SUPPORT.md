@@ -1,6 +1,6 @@
 # Support
 
-Use GitHub issues for bugs, feature requests, and documentation gaps once the repository is public.
+Use GitHub issues for bugs, feature requests, and documentation gaps.
 
 Before opening an issue:
 
