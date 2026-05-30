@@ -268,7 +268,7 @@ def test_review_continue_from_respects_configured_llm_default(tmp_path: Path, mo
         seen["llm_enabled"] = kwargs["config"].llm.enabled
         return report, [object()]
 
-    monkeypatch.setattr("apex_ray.cli.continue_review_from_report", fake_continue)
+    monkeypatch.setattr("apex_ray.cli.main.continue_review_from_report", fake_continue)
 
     result = runner.invoke(
         app,
@@ -296,7 +296,7 @@ def test_review_continue_from_can_enable_llm_explicitly(tmp_path: Path, monkeypa
         seen["llm_enabled"] = kwargs["config"].llm.enabled
         return report, [object()]
 
-    monkeypatch.setattr("apex_ray.cli.continue_review_from_report", fake_continue)
+    monkeypatch.setattr("apex_ray.cli.main.continue_review_from_report", fake_continue)
 
     result = runner.invoke(
         app,
@@ -370,7 +370,7 @@ def test_eval_run_prs_cli_passes_options_to_runner(tmp_path: Path, monkeypatch) 
             partial=0,
         )
 
-    monkeypatch.setattr("apex_ray.cli_eval.run_pr_eval_cases", fake_run_pr_eval_cases)
+    monkeypatch.setattr("apex_ray.cli.eval.run_pr_eval_cases", fake_run_pr_eval_cases)
 
     result = runner.invoke(
         app,
@@ -426,7 +426,7 @@ def test_eval_run_prs_cli_fails_on_partial_by_default(tmp_path: Path, monkeypatc
             partial=1,
         )
 
-    monkeypatch.setattr("apex_ray.cli_eval.run_pr_eval_cases", fake_run_pr_eval_cases)
+    monkeypatch.setattr("apex_ray.cli.eval.run_pr_eval_cases", fake_run_pr_eval_cases)
 
     result = runner.invoke(
         app,

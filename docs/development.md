@@ -18,8 +18,12 @@ npm --prefix analyzers/typescript run build
 
 ## Architecture Map
 
+See `docs/architecture.md` for the high-level product flow, init artifacts, telemetry/eval flow, and test fixture map.
+
 Python code lives under `src/apex_ray/`. Keep domain code in the existing packages:
 
+- `cli/`: Typer app wiring and command modules.
+- `pipeline/`: review orchestration, continuation, context-pack selection, and finding consolidation.
 - `llm/`: provider calls, model routing, prompts, response parsing, cache, and usage accounting.
 - `context/`: context-pack construction, snippets, and prompt budget reduction.
 - `report/`: Markdown/HTML rendering and coverage breakdowns.
@@ -34,7 +38,7 @@ The bundled TypeScript analyzer lives under `analyzers/typescript/src/`. Keep an
 - `indexes/`: repository, source-file, semantic-file, import/export, and DI indexes.
 - `symbols/`: symbol collection, export metadata, implemented members, and synthetic symbols.
 
-Avoid adding new flat prefix modules like `llm_*.py`, `report_*.py`, `contract-*.ts`, or `workspace-*.ts`; use package-local names inside the relevant directory.
+Avoid adding new flat prefix modules like `cli_*.py`, `pipeline_*.py`, `llm_*.py`, `report_*.py`, `contract-*.ts`, or `workspace-*.ts`; use package-local names inside the relevant directory. Keep Python package `__init__.py` files thin and focused on public re-exports.
 
 ## Checks
 

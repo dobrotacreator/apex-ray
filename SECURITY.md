@@ -6,7 +6,7 @@ Apex Ray is currently pre-1.0. Security fixes target the latest `main` branch un
 
 ## Reporting A Vulnerability
 
-Please do not open public issues for suspected vulnerabilities. Report them privately through GitHub security advisories once the repository is public, or contact the maintainers through the private channel listed in the GitHub repository.
+Please do not open public issues for suspected vulnerabilities. Report them privately through GitHub security advisories if enabled, or contact the maintainers through the private channel listed in the GitHub repository.
 
 Include:
 

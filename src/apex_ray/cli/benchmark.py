@@ -14,7 +14,7 @@ from apex_ray.benchmark import (
     render_benchmark_report,
     run_benchmark_cases,
 )
-from apex_ray.cli_common import ensure_distinct_outputs
+from apex_ray.cli.common import ensure_distinct_outputs
 from apex_ray.llm import LLMProviderError
 from apex_ray.models import LLMProviderName, TargetMode
 

@@ -9,10 +9,10 @@ from pydantic import ValidationError
 
 from apex_ray import __version__, git
 from apex_ray.analyzers import typescript_analyzer_script
-from apex_ray.cli_benchmark import register_benchmark_commands
-from apex_ray.cli_common import ensure_distinct_outputs
-from apex_ray.cli_eval import eval_app
-from apex_ray.cli_memory import memory_app
+from apex_ray.cli.benchmark import register_benchmark_commands
+from apex_ray.cli.common import ensure_distinct_outputs
+from apex_ray.cli.eval import eval_app
+from apex_ray.cli.memory import memory_app
 from apex_ray.config import ConfigError, find_local_config, init_project, load_config
 from apex_ray.discovery import discover_project
 from apex_ray.invocation import ReviewOverrides, apply_review_overrides

@@ -57,6 +57,8 @@ chore(ci): add wheel install smoke
 feat!: change review report schema
 ```
 
+Allowed commit types are `feat`, `fix`, `refactor`, `test`, `docs`, `infra`, `adr`, `migration`, and `chore`.
+
 Use `!` and a `BREAKING CHANGE:` footer for behavior or schema changes that can affect users, automation, or stored reports.
 
 ## Pull Requests

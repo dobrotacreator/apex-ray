@@ -1,67 +1,53 @@
 # Apex Ray Agent Guide
 
-This repository contains Apex Ray, a local CLI-first AI code review engine focused on TypeScript and JavaScript projects.
+Repo-local rules for coding agents working on Apex Ray. Use `README.md` for user-facing usage and `docs/development.md` / `docs/architecture.md` for fuller project context.
 
-## Project Shape
+## Purpose
 
-- `src/apex_ray/`: Python CLI, config loading, review pipeline, telemetry, and shared models.
-- `src/apex_ray/llm/`: provider orchestration, routing, prompts, response parsing, cache, and usage accounting.
-- `src/apex_ray/context/`: context-pack construction, snippet rendering, and prompt budget logic.
-- `src/apex_ray/report/`: Markdown/HTML report rendering and LLM coverage breakdowns.
-- `src/apex_ray/benchmark/`: benchmark capture, matching, models, and reporting.
-- `src/apex_ray/pr_eval/`: historical PR capture/replay, Greptile matching, state, storage, and telemetry.
-- `analyzers/typescript/src/`: bundled TypeScript/JavaScript analyzer entrypoints plus shared compiler utilities.
-- `analyzers/typescript/src/contracts/`: contract, DTO, decorator, schema, and metadata context collection.
-- `analyzers/typescript/src/references/`: symbol reference, callee, merge, and target-matching logic.
-- `analyzers/typescript/src/workspace/`: workspace package import/export/member reference resolution.
-- `analyzers/typescript/src/indexes/`: repo, source-file, semantic-file, import/export, and DI indexes.
-- `analyzers/typescript/src/symbols/`: symbol collection, export metadata, implemented members, and synthetic symbols.
-- `tests/`: Python tests plus TS/JS fixtures, benchmark specs, and historical PR eval coverage.
-- `docs/`: user-facing configuration, provider, memory, telemetry, eval, and development docs.
-- `.github/workflows/ci.yml`: source of truth for full CI parity.
+Apex Ray is a local CLI-first AI code review engine for TypeScript and JavaScript projects.
 
-Keep new modules inside the relevant package instead of adding flat prefix files such as `llm_*.py`, `report_*.py`, `contract-*.ts`, or `workspace-*.ts`.
+## Where Changes Go
 
-## Setup
+- Python package APIs use thin `__init__.py` files that re-export from implementation modules.
+- CLI commands live in `src/apex_ray/cli/`.
+- Review orchestration, LLM context selection, and finding consolidation lives in `src/apex_ray/pipeline/`.
+- Config, discovery, diff parsing, models, memory, rules, telemetry, and git helpers live in top-level `src/apex_ray/` modules.
+- LLM provider, routing, prompt, cache, response, and usage logic lives in `src/apex_ray/llm/`.
+- Context-pack construction and prompt budgeting lives in `src/apex_ray/context/`.
+- Report rendering and LLM coverage summarization lives in `src/apex_ray/report/`.
+- Benchmark capture/replay and comparison lives in `src/apex_ray/benchmark/`.
+- Historical PR capture/replay, Greptile matching, state, storage, and telemetry lives in `src/apex_ray/pr_eval/`.
+- The bundled TS/JS analyzer lives in `analyzers/typescript/src/`, grouped by `contracts/`, `references/`, `workspace/`, `indexes/`, and `symbols/`.
 
-Requires Python 3.14+, Node.js 24+, npm, uv, and git.
+Keep new modules inside the relevant package and keep package `__init__.py` files as public API re-export surfaces. Do not add new flat prefix files such as `cli_*.py`, `pipeline_*.py`, `llm_*.py`, `report_*.py`, `contract-*.ts`, or `workspace-*.ts`.
 
-```bash
-uv sync --all-groups
-npm --prefix analyzers/typescript ci
-npm --prefix analyzers/typescript run build
-uv run apex-ray doctor
-```
+## Command Conventions
+
+- Run repository commands from the repo root.
+- Use `uv run ...` for Python tools and the local `apex-ray` console script.
+- Use `npm --prefix analyzers/typescript ...` for analyzer commands.
+- Treat `.github/workflows/ci.yml` as CI parity source of truth before claiming a change is CI-ready.
 
 ## Verification
 
-Run the smallest relevant checks for the change, and match CI when touching shared behavior.
+Run the smallest relevant check for the changed surface:
+
+- Python code: `uv run ruff format --check .`, `uv run ruff check .`, `uv run pyright`, and focused or full `uv run pytest -q`.
+- TS analyzer code: `npm --prefix analyzers/typescript run typecheck`, `npm --prefix analyzers/typescript test`, and relevant Python context tests.
+- CLI/config/report behavior: focused tests plus `uv run apex-ray doctor`.
+- Packaging/release behavior: full CI-equivalent checks, `uv build --sdist --wheel`, `uv run twine check dist/*`, and installed-wheel smoke coverage from `.github/workflows/ci.yml`.
+
+Before saying work is complete, report the verification that actually ran.
+
+## Apex Ray Review Aid
+
+Use Apex Ray itself only as an additional local review signal; it does not replace tests, linters, typecheck, security scanners, or human review.
 
 ```bash
-uv run ruff format --check .
-uv run ruff check .
-uv run pyright
-uv run pytest -q
-npm --prefix analyzers/typescript run typecheck
-npm --prefix analyzers/typescript test
-uv build --sdist --wheel
-uv run twine check dist/*
-git diff --check
+uv run apex-ray review --worktree --no-llm --json review.json --output review.md
+uv run apex-ray review --worktree --llm --json review.json --output review.md
+uv run apex-ray review --continue-from review.json --llm
 ```
-
-Typical scope:
-
-- Python code: `ruff format --check`, `ruff check`, `pyright`, and focused or full `pytest`.
-- TypeScript analyzer: `npm run typecheck`, `npm test`, and relevant Python context tests.
-- CLI/config/report behavior: focused tests plus `uv run apex-ray doctor`.
-- Packaging/release changes: full CI-equivalent checks, `uv build --sdist --wheel`, and `twine check`.
-
-## Review Workflow
-
-- Use `uv run apex-ray review --worktree --no-llm --json review.json --output review.md` for deterministic local worktree review.
-- Add `--llm` only when the configured provider is available and the cost is appropriate.
-- Use `--continue-from review.json` when a report has partial coverage.
-- Do not treat Apex Ray as a replacement for project tests, linters, typecheck, or security scanners.
 
 ## Do Not Commit
 
@@ -73,8 +59,8 @@ Typical scope:
 - generated `review.*` reports
 - local provider, model, API, or cost settings
 
-## Project Rules
+## Git Rules
 
+- Do not commit unless explicitly asked.
 - Commit messages use Conventional Commits.
 - Mark breaking changes with `!` and a `BREAKING CHANGE:` footer.
-- Run the smallest relevant verification before reporting work as complete.

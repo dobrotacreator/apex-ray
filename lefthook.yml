@@ -12,22 +12,8 @@ pre-commit:
 
 commit-msg:
   commands:
-    conventional-commits:
-      run: |
-        uv run python - "{1}" <<'PY'
-        import re
-        import sys
-        from pathlib import Path
-
-        message = Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()[0]
-        pattern = re.compile(
-            r"^(build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test)"
-            r"(\([a-z0-9._-]+\))?!?: .+"
-        )
-        if not pattern.match(message):
-            print("Commit message must use Conventional Commits, e.g. feat(llm): add provider")
-            sys.exit(1)
-        PY
+    conventional:
+      run: 'head -n 1 "{1}" | grep -qE "^(feat|fix|refactor|test|docs|infra|adr|migration|chore)(\([^)]+\))?!?: .+" || (echo "Commit message must follow conventional format: type(scope): description" && exit 1)'
 
 pre-push:
   parallel: false

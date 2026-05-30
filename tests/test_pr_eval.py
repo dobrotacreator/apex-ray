@@ -28,6 +28,7 @@ from apex_ray.pr_eval import (
     render_pr_eval_telemetry_summary,
     write_pr_eval_label_templates,
 )
+from apex_ray.pr_eval import runner as pr_eval_runner
 
 
 def test_greptile_findings_keep_first_pass_inline_comments_and_ignore_edited_summary() -> None:
@@ -52,7 +53,7 @@ def test_greptile_findings_keep_first_pass_inline_comments_and_ignore_edited_sum
         ),
     ]
 
-    findings = pr_eval._greptile_findings_from_comments(comments, first_pass_window_minutes=15)
+    findings = pr_eval_runner._greptile_findings_from_comments(comments, first_pass_window_minutes=15)
 
     assert len(findings) == 2
     summary, inline = findings
@@ -76,7 +77,7 @@ def test_pr_diff_from_git_uses_clean_unified_diff(tmp_path: Path) -> None:
     _git(["commit", "-am", "head"], tmp_path)
     head_sha = _git(["rev-parse", "HEAD"], tmp_path).stdout.strip()
 
-    diff = pr_eval._pr_diff_from_git(tmp_path, "org/repo", 1, base_sha, head_sha)
+    diff = pr_eval_runner._pr_diff_from_git(tmp_path, "org/repo", 1, base_sha, head_sha)
 
     assert "diff --git a/cart.ts b/cart.ts" in diff
     assert "+export const total = item.price * item.quantity;" in diff
@@ -101,7 +102,7 @@ def test_overlay_current_apex_config_excludes_local_runtime_files(tmp_path: Path
     (apex / "reports" / "x").write_text("report\n", encoding="utf-8")
     (apex / "evals" / "runs" / "x").write_text("run\n", encoding="utf-8")
 
-    pr_eval._overlay_current_apex_config(source, worktree)
+    pr_eval_runner._overlay_current_apex_config(source, worktree)
 
     copied = worktree / ".apex-ray"
     assert (copied / "config.yml").exists()
@@ -122,11 +123,11 @@ def test_pr_diff_from_git_falls_back_to_clean_gh_diff(tmp_path: Path, monkeypatc
         assert cwd == tmp_path
         return "diff --git a/src/cart.ts b/src/cart.ts\n"
 
-    monkeypatch.setattr(pr_eval, "_ensure_commit_available", fail_commit_fetch)
-    monkeypatch.setattr(pr_eval, "_github_compare_diff", lambda *_args: "")
-    monkeypatch.setattr(pr_eval, "_run_gh_text", fake_gh_text)
+    monkeypatch.setattr(pr_eval_runner, "_ensure_commit_available", fail_commit_fetch)
+    monkeypatch.setattr(pr_eval_runner, "_github_compare_diff", lambda *_args: "")
+    monkeypatch.setattr(pr_eval_runner, "_run_gh_text", fake_gh_text)
 
-    assert pr_eval._pr_diff_from_git(
+    assert pr_eval_runner._pr_diff_from_git(
         tmp_path,
         "org/repo",
         735,
@@ -221,9 +222,9 @@ def test_capture_pr_eval_cases_writes_manifest_and_greptile_comments(
     _git(["init"], repo)
     output = tmp_path / "cases"
 
-    monkeypatch.setattr(pr_eval, "_github_name_with_owner", lambda _repo: "org/repo")
+    monkeypatch.setattr(pr_eval_runner, "_github_name_with_owner", lambda _repo: "org/repo")
     monkeypatch.setattr(
-        pr_eval,
+        pr_eval_runner,
         "_load_prs",
         lambda _repo, _numbers, _limit: [
             {
@@ -240,16 +241,16 @@ def test_capture_pr_eval_cases_writes_manifest_and_greptile_comments(
         ],
     )
     monkeypatch.setattr(
-        pr_eval,
+        pr_eval_runner,
         "_pr_diff_from_git",
         lambda _repo, _owner, _number, _base, _head, allow_pr_diff_fallback=False: (
             "diff --git a/src/cart.ts b/src/cart.ts\n"
         ),
     )
-    monkeypatch.setattr(pr_eval, "_load_pr_commit_oids", lambda _repo, _number: ["head-sha"])
-    monkeypatch.setattr(pr_eval, "_github_commit_first_parent", lambda _owner, _sha, _repo: "replay-base-sha")
+    monkeypatch.setattr(pr_eval_runner, "_load_pr_commit_oids", lambda _repo, _number: ["head-sha"])
+    monkeypatch.setattr(pr_eval_runner, "_github_commit_first_parent", lambda _owner, _sha, _repo: "replay-base-sha")
     monkeypatch.setattr(
-        pr_eval,
+        pr_eval_runner,
         "_load_greptile_comments",
         lambda _owner_repo, _number, _repo: [
             GreptileComment(
@@ -292,9 +293,9 @@ def test_capture_pr_eval_cases_overwrite_preserves_existing_output_on_capture_fa
     keep = output / "keep.txt"
     keep.write_text("previous\n", encoding="utf-8")
 
-    monkeypatch.setattr(pr_eval, "_github_name_with_owner", lambda _repo: "org/repo")
+    monkeypatch.setattr(pr_eval_runner, "_github_name_with_owner", lambda _repo: "org/repo")
     monkeypatch.setattr(
-        pr_eval,
+        pr_eval_runner,
         "_load_prs",
         lambda _repo, _numbers, _limit: [
             {
@@ -313,7 +314,7 @@ def test_capture_pr_eval_cases_overwrite_preserves_existing_output_on_capture_fa
     def fail_comments(_owner_repo: str, _number: int, _repo: Path) -> list[GreptileComment]:
         raise pr_eval.PrEvalError("comments failed")
 
-    monkeypatch.setattr(pr_eval, "_load_greptile_comments", fail_comments)
+    monkeypatch.setattr(pr_eval_runner, "_load_greptile_comments", fail_comments)
 
     with pytest.raises(pr_eval.PrEvalError, match="comments failed"):
         capture_pr_eval_cases(source_repo=repo, output_dir=output, pr_numbers=[12], overwrite=True)
@@ -327,9 +328,9 @@ def test_run_gh_api_paginated_array_flattens_slurped_pages(tmp_path: Path, monke
         assert cwd == tmp_path
         return [[{"id": 1}], [{"id": 2}, "ignored"]]
 
-    monkeypatch.setattr(pr_eval, "_run_gh_json", fake_run_gh_json)
+    monkeypatch.setattr(pr_eval_runner, "_run_gh_json", fake_run_gh_json)
 
-    assert pr_eval._run_gh_api_paginated_array("repos/org/repo/pulls/1/comments", tmp_path) == [
+    assert pr_eval_runner._run_gh_api_paginated_array("repos/org/repo/pulls/1/comments", tmp_path) == [
         {"id": 1},
         {"id": 2},
     ]
@@ -513,7 +514,7 @@ def test_run_pr_eval_cases_resume_skips_completed_case(tmp_path: Path, monkeypat
         markdown_path="",
     )
     case = load_pr_eval_case(case_dir / "manifest.yml")
-    run_fingerprint = pr_eval._pr_eval_case_run_fingerprint(case, _default_run_kwargs(repo))
+    run_fingerprint = pr_eval_runner._pr_eval_case_run_fingerprint(case, _default_run_kwargs(repo))
     existing.run_fingerprint = run_fingerprint
     (result_dir / "eval-result.json").write_text(existing.model_dump_json(), encoding="utf-8")
     status = PrEvalCaseStatus(
@@ -523,12 +524,12 @@ def test_run_pr_eval_cases_resume_skips_completed_case(tmp_path: Path, monkeypat
         phase="done",
         run_fingerprint=run_fingerprint,
     )
-    (result_dir / pr_eval.CASE_STATUS_FILENAME).write_text(status.model_dump_json(), encoding="utf-8")
+    (result_dir / pr_eval_runner.CASE_STATUS_FILENAME).write_text(status.model_dump_json(), encoding="utf-8")
 
     def fail_run(*_args: object, **_kwargs: object) -> PullRequestEvalRunResult:
         raise AssertionError("case should have been resumed")
 
-    monkeypatch.setattr(pr_eval, "_run_one_pr_eval_case", fail_run)
+    monkeypatch.setattr(pr_eval_runner, "_run_one_pr_eval_case", fail_run)
 
     report = pr_eval.run_pr_eval_cases(source_repo=repo, cases_dir=cases, output_dir=output, resume=True)
 
@@ -564,7 +565,7 @@ def test_run_pr_eval_cases_resume_reruns_when_run_fingerprint_changes(tmp_path: 
     )
     (result_dir / "eval-result.json").write_text(existing.model_dump_json(), encoding="utf-8")
     status = PrEvalCaseStatus(number=4, title="PR 4", status="succeeded", phase="done", run_fingerprint="old")
-    (result_dir / pr_eval.CASE_STATUS_FILENAME).write_text(status.model_dump_json(), encoding="utf-8")
+    (result_dir / pr_eval_runner.CASE_STATUS_FILENAME).write_text(status.model_dump_json(), encoding="utf-8")
     calls = 0
 
     def fake_run(**kwargs: object) -> PullRequestEvalRunResult:
@@ -588,7 +589,7 @@ def test_run_pr_eval_cases_resume_reruns_when_run_fingerprint_changes(tmp_path: 
             markdown_path="",
         )
 
-    monkeypatch.setattr(pr_eval, "_run_one_pr_eval_case", fake_run)
+    monkeypatch.setattr(pr_eval_runner, "_run_one_pr_eval_case", fake_run)
 
     report = pr_eval.run_pr_eval_cases(
         source_repo=repo,
@@ -612,7 +613,7 @@ def test_run_pr_eval_cases_stale_running_status_reruns_case(tmp_path: Path, monk
     result_dir = output / "pr-2"
     result_dir.mkdir(parents=True)
     stale = PrEvalCaseStatus(number=2, title="PR 2", status="running", phase="pipeline")
-    (result_dir / pr_eval.CASE_STATUS_FILENAME).write_text(stale.model_dump_json(), encoding="utf-8")
+    (result_dir / pr_eval_runner.CASE_STATUS_FILENAME).write_text(stale.model_dump_json(), encoding="utf-8")
     calls = 0
 
     def fake_run(**kwargs: object) -> PullRequestEvalRunResult:
@@ -636,7 +637,7 @@ def test_run_pr_eval_cases_stale_running_status_reruns_case(tmp_path: Path, monk
             markdown_path="",
         )
 
-    monkeypatch.setattr(pr_eval, "_run_one_pr_eval_case", fake_run)
+    monkeypatch.setattr(pr_eval_runner, "_run_one_pr_eval_case", fake_run)
 
     report = pr_eval.run_pr_eval_cases(source_repo=repo, cases_dir=cases, output_dir=output, resume=True)
 
@@ -678,7 +679,7 @@ def test_run_pr_eval_cases_resolves_relative_cache_dir_against_source_repo(
             markdown_path="",
         )
 
-    monkeypatch.setattr(pr_eval, "_run_one_pr_eval_case", fake_run)
+    monkeypatch.setattr(pr_eval_runner, "_run_one_pr_eval_case", fake_run)
 
     pr_eval.run_pr_eval_cases(
         source_repo=repo,
@@ -706,7 +707,7 @@ def test_quarantined_pr_eval_label_skips_pipeline(tmp_path: Path, monkeypatch) -
     def fail_pipeline(*_args: object, **_kwargs: object) -> None:
         raise AssertionError("quarantined case should not run pipeline")
 
-    monkeypatch.setattr(pr_eval, "run_review_pipeline", fail_pipeline)
+    monkeypatch.setattr(pr_eval_runner, "run_review_pipeline", fail_pipeline)
 
     report = pr_eval.run_pr_eval_cases(
         source_repo=repo,
@@ -756,7 +757,7 @@ def test_terminate_case_worker_kills_child_process_group(tmp_path: Path) -> None
     proc.start()
     time.sleep(0.5)
 
-    pr_eval._terminate_case_worker(proc, grace_seconds=0.2)
+    pr_eval_runner._terminate_case_worker(proc, grace_seconds=0.2)
     time.sleep(1.0)
 
     assert not proc.is_alive()
@@ -784,7 +785,7 @@ def _default_run_kwargs(repo: Path) -> dict[str, object]:
 
 
 def _spawn_child_marker_after_parent_timeout(marker: Path) -> None:
-    pr_eval._become_process_group_leader()
+    pr_eval_runner._become_process_group_leader()
     subprocess.Popen(
         [
             sys.executable,

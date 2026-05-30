@@ -167,6 +167,10 @@ Avoid near-sunset model IDs in shared defaults. Team members can use `.apex-ray/
 
 See [docs/providers.md](docs/providers.md).
 
+## Architecture
+
+For a high-level implementation map, review flow, init artifacts, telemetry/eval flow, and test fixture explanation, see [docs/architecture.md](docs/architecture.md).
+
 ## Coverage And Continuation
 
 LLM coverage modes:
