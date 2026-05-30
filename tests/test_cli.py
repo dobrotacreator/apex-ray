@@ -1,4 +1,5 @@
 import json
+import re
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -20,6 +21,12 @@ from apex_ray.report import build_report
 
 runner = CliRunner()
 FIXTURE_DIR = Path(__file__).parent / "fixtures"
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+_RICH_FRAME_CHARS = str.maketrans({ord(char): " " for char in "\u2500\u2502\u256d\u256e\u2570\u256f"})
+
+
+def _plain_cli_output(output: str) -> str:
+    return " ".join(_ANSI_RE.sub("", output).translate(_RICH_FRAME_CHARS).split())
 
 
 def test_version_option() -> None:
@@ -458,4 +465,4 @@ def test_eval_run_prs_cli_rejects_conflicting_llm_flags(tmp_path: Path) -> None:
     )
 
     assert result.exit_code != 0
-    assert "Use only one of --llm or --no-llm" in result.output
+    assert "Use only one of --llm or --no-llm" in _plain_cli_output(result.output)
