@@ -1,0 +1,74 @@
+name: Publish PyPI
+
+on:
+  release:
+    types:
+      - published
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.release.tag_name }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: startsWith(github.event.release.tag_name, 'v')
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/apex-ray
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.release.tag_name }}
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: analyzers/typescript/package-lock.json
+
+      - uses: astral-sh/setup-uv@v7
+
+      - name: Install TypeScript analyzer dependencies
+        working-directory: analyzers/typescript
+        run: npm ci
+
+      - name: Build bundled TypeScript analyzer
+        working-directory: analyzers/typescript
+        run: npm run build
+
+      - name: Install Python dependencies
+        run: uv sync --locked --all-groups
+
+      - name: Build distributions
+        run: uv build --sdist --wheel
+
+      - name: Check package metadata
+        run: uv run twine check dist/*
+
+      - name: Smoke test installed wheel
+        run: |
+          wheel="$(find dist -maxdepth 1 -name '*.whl' -print -quit)"
+          uv venv .publish-smoke-venv
+          uv pip install --python .publish-smoke-venv/bin/python "$wheel"
+          .publish-smoke-venv/bin/apex-ray --version
+          tmpdir="$(mktemp -d)"
+          doctor_output="$(cd "$tmpdir" && "$GITHUB_WORKSPACE/.publish-smoke-venv/bin/apex-ray" doctor)"
+          echo "$doctor_output"
+          grep -q "TypeScript analyzer built: true" <<<"$doctor_output"
+
+      - name: Publish package distributions to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          print-hash: true

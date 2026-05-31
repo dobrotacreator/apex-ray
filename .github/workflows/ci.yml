@@ -75,7 +75,7 @@ jobs:
 
       - name: Smoke test installed wheel
         run: |
-          wheel="$(ls dist/*.whl | head -n 1)"
+          wheel="$(find dist -maxdepth 1 -name '*.whl' -print -quit)"
           uv venv .ci-smoke-venv
           uv pip install --python .ci-smoke-venv/bin/python "$wheel"
           .ci-smoke-venv/bin/apex-ray --version
