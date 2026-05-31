@@ -218,10 +218,10 @@ class LLMConfig(StrictApexModel):
     model: str | None = None
     timeout_seconds: int = Field(default=300, gt=0)
     jobs: int = Field(default=1, ge=1)
-    max_packs: int = Field(default=32, gt=0)
+    max_packs: int = Field(default=64, gt=0)
     coverage_mode: LLMCoverageMode = LLMCoverageMode.BALANCED
-    max_deep_packs: int | None = Field(default=None, gt=0)
-    max_input_tokens: int | None = Field(default=120_000, gt=0)
+    max_deep_packs: int | None = Field(default=48, gt=0)
+    max_input_tokens: int | None = Field(default=300_000, gt=0)
     min_source_line_coverage: float = Field(default=0.0, ge=0.0, le=1.0)
     min_high_risk_coverage: float = Field(default=0.0, ge=0.0, le=1.0)
     review_depth: Literal["deep", "shallow"] = "deep"
@@ -252,6 +252,21 @@ class TelemetryConfig(StrictApexModel):
     path: str = ".apex-ray/telemetry/review-runs.jsonl"
 
 
+class PrePushGateConfig(StrictApexModel):
+    enabled: bool = True
+    min_finding_severity: FindingSeverity | None = FindingSeverity.HIGH
+    require_verified_findings: bool = True
+    fail_on_quality_gate: bool = True
+    fail_on_partial_severity: Literal["none", "minor", "major", "critical"] | None = "critical"
+    max_stdout_findings: int = Field(default=10, ge=0)
+    stdout_format: Literal["agent", "compact"] = "agent"
+    auto_followup_p0: bool = True
+
+
+class GatesConfig(StrictApexModel):
+    pre_push: PrePushGateConfig = Field(default_factory=PrePushGateConfig)
+
+
 class ReviewConfig(StrictApexModel):
     base: str = "main"
     ignore: list[str] = Field(default_factory=lambda: ["**/*.lock", "**/generated/**"])
@@ -265,6 +280,7 @@ class ReviewConfig(StrictApexModel):
     context: ContextConfig = Field(default_factory=ContextConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
     telemetry: TelemetryConfig = Field(default_factory=TelemetryConfig)
+    gates: GatesConfig = Field(default_factory=GatesConfig)
 
 
 class ProjectProfile(ApexModel):

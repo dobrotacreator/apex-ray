@@ -34,7 +34,10 @@ def test_init_config_creates_default_file(tmp_path: Path) -> None:
     assert config.memory.paths == [".apex-ray/memory"]
     assert config.memory.max_cards_per_pack == 4
     assert config.llm.profiles == {}
-    assert config.llm.enabled is False
+    assert config.llm.enabled is True
+    assert config.llm.max_packs == 64
+    assert config.llm.max_deep_packs == 48
+    assert config.llm.max_input_tokens == 300_000
     assert config.telemetry.enabled is False
     assert config.telemetry.path == ".apex-ray/telemetry/review-runs.jsonl"
 
@@ -148,17 +151,27 @@ def test_init_project_creates_team_setup_files(tmp_path: Path) -> None:
     assert (tmp_path / "AGENTS.md").exists()
     assert (tmp_path / ".claude" / "CLAUDE.md").exists()
     assert (tmp_path / ".apex-ray" / "skills" / "apex-ray" / "SKILL.md").exists()
+    assert (tmp_path / ".apex-ray" / "skills" / "apex-ray-improve" / "SKILL.md").exists()
     assert (tmp_path / ".codex" / "skills" / "apex-ray" / "SKILL.md").exists()
+    assert (tmp_path / ".codex" / "skills" / "apex-ray-improve" / "SKILL.md").exists()
     assert (tmp_path / ".claude" / "skills" / "apex-ray" / "SKILL.md").exists()
+    assert (tmp_path / ".claude" / "skills" / "apex-ray-improve" / "SKILL.md").exists()
     lefthook_text = (tmp_path / "lefthook.yml").read_text(encoding="utf-8")
+    assert "apex-ray gate pre-push" in lefthook_text
     assert "--base" not in lefthook_text
     assert "--no-llm" not in lefthook_text
     agents_text = (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
     assert "APEX_RAY_START" in agents_text
     assert "$apex-ray" in agents_text
+    assert "$apex-ray-improve" in agents_text
     skill_text = (tmp_path / ".apex-ray" / "skills" / "apex-ray" / "SKILL.md").read_text(encoding="utf-8")
     assert "apex-ray review --continue-from .apex-ray/reports/review.json" in skill_text
-    assert "Add `--llm` only when" in skill_text
+    assert "Use `--no-llm` or `.apex-ray/config.local.yml`" in skill_text
+    improve_skill_text = (tmp_path / ".apex-ray" / "skills" / "apex-ray-improve" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
+    assert "recommendation-only improvements" in improve_skill_text
+    assert "Greptile comments" in improve_skill_text
 
 
 def test_init_project_appends_to_existing_agent_files(tmp_path: Path) -> None:
@@ -172,6 +185,7 @@ def test_init_project_appends_to_existing_agent_files(tmp_path: Path) -> None:
     assert text.startswith("custom\n")
     assert "APEX_RAY_START" in text
     assert "$apex-ray" in text
+    assert "$apex-ray-improve" in text
 
 
 def test_init_project_updates_existing_claude_symlink_to_agents_once(tmp_path: Path) -> None:
@@ -293,7 +307,7 @@ def test_init_project_can_replace_existing_git_hook_with_force(tmp_path: Path) -
 
     init_project(tmp_path, hooks="git", overwrite=True)
 
-    assert "apex-ray review" in hook.read_text(encoding="utf-8")
+    assert "apex-ray gate pre-push" in hook.read_text(encoding="utf-8")
 
 
 def test_init_project_refuses_to_rewrite_existing_lefthook_without_force(tmp_path: Path) -> None:

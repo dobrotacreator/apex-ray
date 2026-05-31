@@ -45,6 +45,7 @@ flowchart LR
 The `src/apex_ray/cli/` package owns the user-facing command surface:
 
 - `review`: run local review for worktree, staged, diff file, base branch, or continuation report.
+- `gate pre-push`: run the configured pre-push review gate and return a blocking exit code when policy fails.
 - `init`: create project setup files.
 - `doctor`: check local setup and analyzer availability.
 - `memory`: lint and suggest repo memory cards.
@@ -52,7 +53,7 @@ The `src/apex_ray/cli/` package owns the user-facing command surface:
 - `eval`: capture and replay historical GitHub PR review cases.
 - `telemetry-summary`: summarize local review run telemetry.
 
-The package root `apex_ray.cli` re-exports the Typer `app` for the console script. Command implementation lives in package-local modules instead of flat `cli_*.py` files.
+The package root `apex_ray.cli` re-exports the Typer `app` for the console script.
 
 ### Review Pipeline
 
@@ -168,11 +169,17 @@ It creates or updates:
 - `.apex-ray/memory/`: committed team learning cards.
 - `.apex-ray/reports/`: ignored local report output.
 - `.apex-ray/eval/`: eval support directories; run outputs are ignored.
-- `lefthook.yml`: optional local hook config with an Apex Ray pre-push review command.
+- `lefthook.yml`: optional local hook config with an Apex Ray pre-push gate command.
 - `AGENTS.md` / Claude agent files: short pointers for coding agents.
-- `.apex-ray/skills/apex-ray/SKILL.md` plus Codex/Claude skill copies when enabled.
+- `.apex-ray/skills/apex-ray/SKILL.md` for review workflows and `.apex-ray/skills/apex-ray-improve/SKILL.md` for post-merge learning recommendations, plus Codex/Claude skill copies when enabled.
 
 The init command is intentionally conservative: shared config is commit-friendly, local provider/model/cost settings go into `.apex-ray/config.local.yml`, and generated outputs stay ignored.
+
+## Pre-Push Gate Flow
+
+`apex-ray gate pre-push` is the hook-friendly wrapper around the review pipeline. It reviews the configured base branch diff, writes the same Markdown/JSON report artifacts as normal review, evaluates `review.gates.pre_push`, prints a short blocking summary to stdout, and exits `1` when the gate blocks.
+
+The gate does not narrow the diff after a failed push. It keeps reviewing `base...HEAD` for correctness and relies on the LLM response cache plus the TypeScript analyzer index cache to make repeated fix-and-push attempts cheaper. When a previous pre-push JSON report exists, stdout includes a small delta for new, still blocking, and resolved blocking findings.
 
 ## Configuration Flow
 

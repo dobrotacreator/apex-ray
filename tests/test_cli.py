@@ -13,6 +13,7 @@ from apex_ray.models import (
     Finding,
     FindingConfidence,
     FindingSeverity,
+    FindingVerification,
     ProjectProfile,
     ReviewConfig,
     TargetMode,
@@ -48,10 +49,18 @@ def test_init_creates_config(tmp_path: Path, monkeypatch) -> None:
     assert (tmp_path / "AGENTS.md").exists()
     assert (tmp_path / ".claude" / "CLAUDE.md").exists()
     assert (tmp_path / ".apex-ray" / "skills" / "apex-ray" / "SKILL.md").exists()
+    assert (tmp_path / ".apex-ray" / "skills" / "apex-ray-improve" / "SKILL.md").exists()
     assert (tmp_path / ".codex" / "skills" / "apex-ray" / "SKILL.md").exists()
+    assert (tmp_path / ".codex" / "skills" / "apex-ray-improve" / "SKILL.md").exists()
     assert (tmp_path / ".claude" / "skills" / "apex-ray" / "SKILL.md").exists()
+    assert (tmp_path / ".claude" / "skills" / "apex-ray-improve" / "SKILL.md").exists()
     assert "apex-ray-review" in (tmp_path / "lefthook.yml").read_text(encoding="utf-8")
+    assert "apex-ray gate pre-push" in (tmp_path / "lefthook.yml").read_text(encoding="utf-8")
     assert "--no-llm" not in (tmp_path / "lefthook.yml").read_text(encoding="utf-8")
+    config_text = (tmp_path / ".apex-ray" / "config.yml").read_text(encoding="utf-8")
+    assert "max_packs: 64" in config_text
+    assert "max_deep_packs: 48" in config_text
+    assert "max_input_tokens: 300000" in config_text
     assert "Next: inspect and commit Apex Ray setup files" in result.stdout
 
 
@@ -171,6 +180,120 @@ def test_review_patch_writes_markdown_and_json(tmp_path: Path, monkeypatch) -> N
     assert "# Apex Ray Review" in output.read_text(encoding="utf-8")
     assert '"files_changed": 3' in json_output.read_text(encoding="utf-8")
     assert "<h1>Apex Ray Review</h1>" in html_output.read_text(encoding="utf-8")
+
+
+def test_gate_pre_push_blocks_high_verified_finding(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    finding = Finding(
+        title="Missing tenant predicate",
+        severity=FindingSeverity.HIGH,
+        confidence=FindingConfidence.HIGH,
+        file="src/orders.ts",
+        line=84,
+        failure_mode="The changed query can return another tenant's order.",
+        evidence="The diff removes tenantId from the lookup predicate.",
+        suggested_fix="Restore the tenantId predicate.",
+        suggested_test="Add a cross-tenant lookup regression test.",
+        context_pack_id="src/orders.ts#getOrder:1",
+    )
+
+    def fake_run_review_pipeline(*args, **kwargs):
+        config = args[3]
+        return build_report(
+            ProjectProfile(root=str(tmp_path), is_git_repo=True),
+            config,
+            DiffSummary(target_mode=TargetMode.BASE, base="main", stats=DiffStats(files_changed=1)),
+            findings=[finding],
+            verifications=[
+                FindingVerification(
+                    finding=finding,
+                    approved=True,
+                    confidence=FindingConfidence.HIGH,
+                    reason="Concrete diff-caused issue.",
+                )
+            ],
+        )
+
+    monkeypatch.setattr("apex_ray.cli.gate.git.repo_root", lambda _cwd: tmp_path)
+    monkeypatch.setattr("apex_ray.cli.gate.git.is_git_repo", lambda _root: True)
+    monkeypatch.setattr(
+        "apex_ray.cli.gate.git.diff_base", lambda _root, _base: "diff --git a/src/orders.ts b/src/orders.ts\n"
+    )
+    monkeypatch.setattr("apex_ray.cli.gate.run_review_pipeline", fake_run_review_pipeline)
+    monkeypatch.setattr("apex_ray.cli.gate.continue_review_from_report", lambda report, **_kwargs: (report, []))
+
+    result = runner.invoke(app, ["gate", "pre-push"])
+
+    assert result.exit_code == 1
+    assert "APEX RAY GATE: BLOCKED" in result.stdout
+    assert "Missing tenant predicate" in result.stdout
+    assert "After fixing, commit the changes and run git push again." in result.stdout
+    assert (tmp_path / ".apex-ray" / "reports" / "pre-push.json").exists()
+
+
+def test_gate_pre_push_does_not_block_unverified_finding_by_default(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    finding = Finding(
+        title="Unverified high issue",
+        severity=FindingSeverity.HIGH,
+        confidence=FindingConfidence.MEDIUM,
+        file="src/orders.ts",
+        failure_mode="Potential issue.",
+        evidence="Candidate evidence.",
+        suggested_fix="Investigate.",
+        suggested_test="Add a regression test.",
+    )
+
+    def fake_run_review_pipeline(*args, **kwargs):
+        config = args[3]
+        return build_report(
+            ProjectProfile(root=str(tmp_path), is_git_repo=True),
+            config,
+            DiffSummary(target_mode=TargetMode.BASE, base="main", stats=DiffStats(files_changed=1)),
+            findings=[finding],
+        )
+
+    monkeypatch.setattr("apex_ray.cli.gate.git.repo_root", lambda _cwd: tmp_path)
+    monkeypatch.setattr("apex_ray.cli.gate.git.is_git_repo", lambda _root: True)
+    monkeypatch.setattr(
+        "apex_ray.cli.gate.git.diff_base", lambda _root, _base: "diff --git a/src/orders.ts b/src/orders.ts\n"
+    )
+    monkeypatch.setattr("apex_ray.cli.gate.run_review_pipeline", fake_run_review_pipeline)
+    monkeypatch.setattr("apex_ray.cli.gate.continue_review_from_report", lambda report, **_kwargs: (report, []))
+
+    result = runner.invoke(app, ["gate", "pre-push"])
+
+    assert result.exit_code == 0
+    assert "APEX RAY GATE: PASSED" in result.stdout
+    assert "Findings: 1" in result.stdout
+
+
+def test_gate_pre_push_blocks_critical_partial_coverage(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    def fake_run_review_pipeline(*args, **kwargs):
+        config = args[3]
+        report = build_report(
+            ProjectProfile(root=str(tmp_path), is_git_repo=True),
+            config,
+            DiffSummary(target_mode=TargetMode.BASE, base="main", stats=DiffStats(files_changed=1)),
+        )
+        report.llm_coverage.partial_severity = "critical"
+        report.llm_coverage.partial_reasons = ["1 unreviewed P0 context pack(s)"]
+        return report
+
+    monkeypatch.setattr("apex_ray.cli.gate.git.repo_root", lambda _cwd: tmp_path)
+    monkeypatch.setattr("apex_ray.cli.gate.git.is_git_repo", lambda _root: True)
+    monkeypatch.setattr(
+        "apex_ray.cli.gate.git.diff_base", lambda _root, _base: "diff --git a/src/orders.ts b/src/orders.ts\n"
+    )
+    monkeypatch.setattr("apex_ray.cli.gate.run_review_pipeline", fake_run_review_pipeline)
+    monkeypatch.setattr("apex_ray.cli.gate.continue_review_from_report", lambda report, **_kwargs: (report, []))
+
+    result = runner.invoke(app, ["gate", "pre-push"])
+
+    assert result.exit_code == 1
+    assert "Partial coverage is critical" in result.stdout
 
 
 def test_review_patch_reports_explicit_config_path(tmp_path: Path, monkeypatch) -> None:

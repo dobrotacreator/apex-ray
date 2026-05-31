@@ -72,7 +72,7 @@ git status --short
 
 Inspect and commit the setup files before using the first worktree review for application changes.
 
-`apex-ray init` creates `.apex-ray/config.yml`, rules/memory/report directories, gitignore entries, brief agent instruction pointers, project-local Apex Ray skills, and a Lefthook pre-push review command that follows shared and local config. Use `--hooks none`, `--agent-files none`, or `--no-agent-skill` for exceptional repositories.
+`apex-ray init` creates `.apex-ray/config.yml`, rules/memory/report directories, gitignore entries, brief agent instruction pointers, project-local Apex Ray skills (`$apex-ray` and `$apex-ray-improve`), and a Lefthook pre-push gate command that follows shared and local config. Use `--hooks none`, `--agent-files none`, or `--no-agent-skill` for exceptional repositories.
 
 After the setup commit, run a deterministic local review:
 
@@ -80,7 +80,7 @@ After the setup commit, run a deterministic local review:
 apex-ray review --worktree --no-llm --output .apex-ray/reports/review.md --json .apex-ray/reports/review.json
 ```
 
-Run LLM review when Codex CLI is configured:
+Run the configured LLM review explicitly:
 
 ```bash
 apex-ray review --worktree --llm --output .apex-ray/reports/review.md --json .apex-ray/reports/review.json --html .apex-ray/reports/review.html
@@ -99,6 +99,14 @@ apex-ray review --continue-from .apex-ray/reports/review.json --residual-priorit
 apex-ray review --continue-from .apex-ray/reports/review.json --only-pack 'apps/api/src/payments.ts#capture:1' --llm
 ```
 
+Run the same gate that `apex-ray init` wires into pre-push:
+
+```bash
+apex-ray gate pre-push
+```
+
+The gate reviews `review.base...HEAD`, writes `.apex-ray/reports/pre-push.md` and `.apex-ray/reports/pre-push.json`, prints an agent-friendly blocking summary, and exits non-zero when the configured policy fails.
+
 ## Configuration
 
 Project configuration lives in `.apex-ray/config.yml`:
@@ -116,14 +124,23 @@ review:
     paths:
       - .apex-ray/memory
   llm:
-    enabled: false
+    enabled: true
     provider: codex_cli
     coverage_mode: balanced
-    max_input_tokens: 120000
+    max_packs: 64
+    max_deep_packs: 48
+    max_input_tokens: 300000
     verify: true
   telemetry:
     enabled: false
     path: .apex-ray/telemetry/review-runs.jsonl
+  gates:
+    pre_push:
+      enabled: true
+      min_finding_severity: high
+      require_verified_findings: true
+      fail_on_quality_gate: true
+      fail_on_partial_severity: critical
 ```
 
 Machine-specific overrides can live in `.apex-ray/config.local.yml`. Apex Ray merges built-in defaults, shared config, local config, and CLI flags in that order. Local config is gitignored by default and is intended for provider/model/cost differences between contributors.

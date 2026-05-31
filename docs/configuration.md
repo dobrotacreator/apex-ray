@@ -29,14 +29,26 @@ review:
     paths:
       - .apex-ray/memory
   llm:
-    enabled: false
+    enabled: true
     provider: codex_cli
     coverage_mode: balanced
-    max_input_tokens: 120000
+    max_packs: 64
+    max_deep_packs: 48
+    max_input_tokens: 300000
     verify: true
   telemetry:
     enabled: false
     path: .apex-ray/telemetry/review-runs.jsonl
+  gates:
+    pre_push:
+      enabled: true
+      min_finding_severity: high
+      require_verified_findings: true
+      fail_on_quality_gate: true
+      fail_on_partial_severity: critical
+      max_stdout_findings: 10
+      stdout_format: agent
+      auto_followup_p0: true
 ```
 
 ## Local Override Example
@@ -75,3 +87,20 @@ Use memory for known false positives, recurring review patterns, severity calibr
 - `exhaustive`: review every reviewable pack when budget allows.
 
 Reports show partial severity, reviewed/unreviewed packs, residual P0/P1 work, and continuation commands.
+
+## Pre-Push Gate
+
+`apex-ray gate pre-push` runs a base-branch review and applies `review.gates.pre_push`.
+
+Default behavior:
+
+- compare `review.base...HEAD`;
+- write `.apex-ray/reports/pre-push.md` and `.apex-ray/reports/pre-push.json`;
+- block on verified `high` or `critical` findings;
+- block on failed LLM coverage quality gate;
+- block on `critical` partial coverage;
+- print a compact, agent-readable summary to stdout.
+
+Set `review.gates.pre_push.enabled: false` in local config to skip the hook gate. Prefer local config for personal cost/model/provider differences instead of editing the shared hook command.
+
+Set `review.llm.enabled: false` in local config when a machine should keep normal review and pre-push gate runs deterministic and offline.

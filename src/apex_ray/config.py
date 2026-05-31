@@ -27,14 +27,26 @@ def default_config_text(base: str = DEFAULT_BASE_BRANCH) -> str:
     paths:
       - .apex-ray/memory
   llm:
-    enabled: false
+    enabled: true
     provider: codex_cli
     coverage_mode: balanced
-    max_input_tokens: 120000
+    max_packs: 64
+    max_deep_packs: 48
+    max_input_tokens: 300000
     verify: true
   telemetry:
     enabled: false
     path: .apex-ray/telemetry/review-runs.jsonl
+  gates:
+    pre_push:
+      enabled: true
+      min_finding_severity: high
+      require_verified_findings: true
+      fail_on_quality_gate: true
+      fail_on_partial_severity: critical
+      max_stdout_findings: 10
+      stdout_format: agent
+      auto_followup_p0: true
 """
 
 
@@ -73,13 +85,13 @@ APEX_RAY_AGENT_BLOCK_END = "<!-- APEX_RAY_END -->"
 APEX_RAY_AGENT_BLOCK = f"""{APEX_RAY_AGENT_BLOCK_START}
 ## Apex Ray
 
-This project uses Apex Ray for local diff-aware review. Use the `$apex-ray` skill for Apex Ray review, configuration, telemetry, and eval workflows. Keep `.apex-ray/config.local.yml`, caches, telemetry, reports, and eval runs out of commits.
+This project uses Apex Ray for local diff-aware review. Use the `$apex-ray` skill for review, gate, report, telemetry, and eval workflows. Use `$apex-ray-improve` after merged PRs or review feedback to produce recommendation-only improvements for Apex Ray memory, rules, eval labels, telemetry, and config. Keep `.apex-ray/config.local.yml`, caches, telemetry, reports, and eval runs out of commits.
 {APEX_RAY_AGENT_BLOCK_END}
 """
 APEX_RAY_AGENT_BLOCK_NO_SKILL = f"""{APEX_RAY_AGENT_BLOCK_START}
 ## Apex Ray
 
-This project uses Apex Ray for local diff-aware review. Run `apex-ray doctor` to check setup and `apex-ray review --output .apex-ray/reports/review.md --json .apex-ray/reports/review.json` for local reports. Keep `.apex-ray/config.local.yml`, caches, telemetry, reports, and eval runs out of commits.
+This project uses Apex Ray for local diff-aware review. Run `apex-ray doctor` to check setup, `apex-ray review --output .apex-ray/reports/review.md --json .apex-ray/reports/review.json` for local reports, and `apex-ray gate pre-push` for the hook-equivalent gate. Keep `.apex-ray/config.local.yml`, caches, telemetry, reports, and eval runs out of commits.
 {APEX_RAY_AGENT_BLOCK_END}
 """
 
@@ -98,7 +110,8 @@ Apex Ray is the project's local diff-aware AI review tool. Use it to create dete
 
 - Run `apex-ray doctor` when setup, config, provider, or analyzer state is uncertain.
 - For deterministic local review, run `apex-ray review --no-llm --output .apex-ray/reports/review.md --json .apex-ray/reports/review.json`.
-- Add `--llm` only when the configured local provider is available and cost is appropriate.
+- For pre-push gate parity, run `apex-ray gate pre-push`; blocking findings and critical partial coverage are printed to stdout and the full report is written under `.apex-ray/reports/`.
+- Use `--no-llm` or `.apex-ray/config.local.yml` when the configured local provider is unavailable or LLM cost is not appropriate.
 - If a report has partial coverage, continue unreviewed work with `apex-ray review --continue-from .apex-ray/reports/review.json --residual-priority p0 --llm` or review a specific skipped pack with `--only-pack`.
 - Use `.apex-ray/config.yml` for shared team policy and `.apex-ray/config.local.yml` for personal provider/model/cost overrides.
 - Use `.apex-ray/rules/` for stable review rules and `.apex-ray/memory/` for curated team learning.
@@ -114,9 +127,47 @@ Prefer writing generated review artifacts under `.apex-ray/reports/`. Keep Markd
 Do not treat Apex Ray as a replacement for tests, linters, typecheck, CI, dependency scanners, SAST, or human review. Do not commit `.apex-ray/config.local.yml`, `.apex-ray/cache/`, `.apex-ray/telemetry/`, `.apex-ray/reports/`, eval run directories, or generated `review.*` files unless the team intentionally curates a specific artifact.
 """
 
-LEFTHOOK_APEX_RAY_COMMAND = (
-    "apex-ray review --output .apex-ray/reports/pre-push.md --json .apex-ray/reports/pre-push.json"
-)
+APEX_RAY_IMPROVE_SKILL_TEXT = """---
+name: apex-ray-improve
+description: Use after merged PRs or review feedback to produce recommendation-only improvements for Apex Ray memory, rules, eval labels, telemetry, coverage, model routing, or config from PR comments, Greptile findings, Apex reports, and telemetry.
+---
+
+# Apex Ray Improve
+
+## Purpose
+
+Run a post-merge learning pass. The goal is not to review the PR again; it is to decide whether Apex Ray should learn from what happened through repo memory, rules, eval labels, telemetry interpretation, coverage tuning, or config changes.
+
+## Process
+
+- Identify the PR number, repository root, base branch, merge commit, and whether the PR is merged. If the PR is not merged, label the output as a review-feedback learning pass instead of a post-merge pass.
+- Collect PR signals with GitHub CLI when available: `gh pr view <number> --json number,title,state,mergedAt,mergeCommit,baseRefName,headRefName,author,comments,reviews,files,url` and review-thread comments from `gh api repos/<owner>/<repo>/pulls/<number>/comments --paginate`.
+- Separate Greptile comments, human comments, CI/bot comments, and author follow-up commits. Treat comments as evidence, not ground truth.
+- Inspect Apex Ray artifacts when present: `.apex-ray/reports/`, `.apex-ray/evals/cases/pr-<number>/`, `.apex-ray/evals/runs/*/pr-<number>/`, `.apex-ray/eval/labels/`, local review telemetry, and PR eval telemetry.
+- If a comparable eval case is missing and the user asked for a fresh analysis, capture or replay narrowly with `apex-ray eval capture-prs --pr <number>` and `apex-ray eval run-prs` rather than running a broad historical benchmark.
+- Compare external findings with Apex Ray findings. Call out missed issues, duplicate findings, false positives, findings outside scope, and true positives that Apex Ray found first.
+- Look for durable learning candidates: recurring domain invariants, security or money-movement bug patterns, known false positives, severity calibration, rule gaps, coverage gaps, oversized packs, token budget pressure, timeout/provider failures, and poor model routing.
+- Prefer small, reviewable suggestions. Draft memory/rule/config changes as proposals only; do not edit `.apex-ray/memory/`, `.apex-ray/rules/`, labels, or config unless the user explicitly asks to apply them.
+
+## Output
+
+Produce a concise recommendation report with these sections when relevant:
+
+- `Summary`: whether Apex Ray needs tuning for this PR.
+- `Missed Or Weak Signals`: external findings Apex Ray missed or under-ranked, with evidence.
+- `False Positives Or Noise`: Apex Ray findings that appear wrong, duplicated, or not actionable.
+- `Coverage And Cost`: partial severity, unreviewed P0/P1 packs, token estimates, duration, cache behavior, provider failures, and model route observations.
+- `Recommended Memory`: draft card intent, paths/triggers, and why it is stable enough to consider.
+- `Recommended Rules`: rule intent, matching scope, severity, and examples.
+- `Recommended Config Or Eval Changes`: concrete tuning or label suggestions.
+- `No Action`: items reviewed but intentionally not recommended.
+
+## Boundaries
+
+Keep this workflow recommendation-only by default. Do not commit raw comments, raw telemetry, eval run directories, reports, provider settings, or private identifiers. Do not turn one-off PR feedback into repo memory unless it generalizes beyond that PR. Do not use Apex Ray learning as a substitute for fixing the product code, tests, CI, or human review process.
+"""
+
+LEFTHOOK_APEX_RAY_COMMAND = "apex-ray gate pre-push"
 
 
 class ConfigError(RuntimeError):
@@ -290,6 +341,7 @@ def _read_review_config(config_path: Path) -> dict[str, Any]:
             "context",
             "llm",
             "telemetry",
+            "gates",
         },
         f"{config_path}:review",
     )
@@ -319,6 +371,7 @@ def _normalize_review_config(review: dict[str, Any]) -> dict[str, Any]:
         "context": review.get("context", {}),
         "llm": review.get("llm", {}),
         "telemetry": review.get("telemetry", {}),
+        "gates": review.get("gates", {}),
     }
 
 
@@ -461,7 +514,7 @@ def _write_git_pre_push_hook(root: Path, *, overwrite: bool) -> Path | None:
     hook.parent.mkdir(parents=True, exist_ok=True)
     if hook.exists():
         existing = hook.read_text(encoding="utf-8", errors="ignore")
-        if "apex-ray review" in existing:
+        if ("apex-ray gate pre-push" in existing or "apex-ray review" in existing) and not overwrite:
             return None
         if not overwrite:
             raise ConfigError("Git pre-push hook already exists. Use --force to replace it or --hooks lefthook.")
@@ -474,7 +527,7 @@ def _validate_git_hook_target(root: Path, *, overwrite: bool) -> None:
     hook = _git_pre_push_hook_path(root)
     if hook.exists():
         existing = hook.read_text(encoding="utf-8", errors="ignore")
-        if "apex-ray review" not in existing and not overwrite:
+        if "apex-ray gate pre-push" not in existing and "apex-ray review" not in existing and not overwrite:
             raise ConfigError("Git pre-push hook already exists. Use --force to replace it or --hooks lefthook.")
 
 
@@ -551,25 +604,44 @@ def _write_agent_skill_files(root: Path, *, agent_files: str, overwrite: bool) -
     if agent_files not in {"codex", "claude", "both"}:
         raise ConfigError("Unsupported agent-files value. Use none, codex, claude, or both.")
     written: list[Path] = []
-    canonical = root / ".apex-ray" / "skills" / "apex-ray" / "SKILL.md"
-    if _write_if_missing_or_overwrite(canonical, APEX_RAY_SKILL_TEXT, overwrite=overwrite):
-        written.append(canonical)
-    if agent_files in {"codex", "both"} and _write_skill_alias(
-        root / ".codex" / "skills" / "apex-ray" / "SKILL.md",
-        canonical,
-        overwrite=overwrite,
+    for skill_name, skill_text in (
+        ("apex-ray", APEX_RAY_SKILL_TEXT),
+        ("apex-ray-improve", APEX_RAY_IMPROVE_SKILL_TEXT),
     ):
-        written.append(root / ".codex" / "skills" / "apex-ray" / "SKILL.md")
-    if agent_files in {"claude", "both"} and _write_skill_alias(
-        root / ".claude" / "skills" / "apex-ray" / "SKILL.md",
-        canonical,
-        overwrite=overwrite,
-    ):
-        written.append(root / ".claude" / "skills" / "apex-ray" / "SKILL.md")
+        written.extend(_write_agent_skill(root, skill_name, skill_text, agent_files=agent_files, overwrite=overwrite))
     return written
 
 
-def _write_skill_alias(path: Path, target: Path, *, overwrite: bool) -> bool:
+def _write_agent_skill(
+    root: Path,
+    skill_name: str,
+    skill_text: str,
+    *,
+    agent_files: str,
+    overwrite: bool,
+) -> list[Path]:
+    written: list[Path] = []
+    canonical = root / ".apex-ray" / "skills" / skill_name / "SKILL.md"
+    if _write_if_missing_or_overwrite(canonical, skill_text, overwrite=overwrite):
+        written.append(canonical)
+    if agent_files in {"codex", "both"} and _write_skill_alias(
+        root / ".codex" / "skills" / skill_name / "SKILL.md",
+        canonical,
+        skill_text,
+        overwrite=overwrite,
+    ):
+        written.append(root / ".codex" / "skills" / skill_name / "SKILL.md")
+    if agent_files in {"claude", "both"} and _write_skill_alias(
+        root / ".claude" / "skills" / skill_name / "SKILL.md",
+        canonical,
+        skill_text,
+        overwrite=overwrite,
+    ):
+        written.append(root / ".claude" / "skills" / skill_name / "SKILL.md")
+    return written
+
+
+def _write_skill_alias(path: Path, target: Path, fallback_text: str, *, overwrite: bool) -> bool:
     if path.exists() and not overwrite:
         return False
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -578,7 +650,7 @@ def _write_skill_alias(path: Path, target: Path, *, overwrite: bool) -> bool:
     try:
         path.symlink_to(_relative_symlink_target(path, target))
     except OSError:
-        path.write_text(APEX_RAY_SKILL_TEXT, encoding="utf-8")
+        path.write_text(fallback_text, encoding="utf-8")
     return True
 
 
