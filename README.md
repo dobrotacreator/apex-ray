@@ -263,7 +263,7 @@ git diff --check
 
 See [docs/development.md](docs/development.md) and [CONTRIBUTING.md](CONTRIBUTING.md).
 
-Maintainers: release automation is documented in [docs/releasing.md](docs/releasing.md).
+Maintainers: release automation is documented in [docs/development.md](docs/development.md#release-hygiene).
 
 ## License
 
