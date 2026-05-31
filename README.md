@@ -4,6 +4,11 @@
 
 # Apex Ray
 
+[![CI](https://github.com/dobrotacreator/apex-ray/actions/workflows/ci.yml/badge.svg)](https://github.com/dobrotacreator/apex-ray/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/apex-ray.svg)](https://pypi.org/project/apex-ray/)
+[![Python 3.14+](https://img.shields.io/badge/python-3.14%2B-blue.svg)](https://github.com/dobrotacreator/apex-ray/blob/main/pyproject.toml)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+
 Local CLI-first AI code review for TypeScript and JavaScript projects.
 
 Apex Ray reads a git diff, builds compact context packs around changed code, runs optional LLM review through a local CLI provider, verifies findings, and writes Markdown/JSON/HTML reports. It is designed for teams that want review intelligence locally, without depending on a hosted PR-review product.
