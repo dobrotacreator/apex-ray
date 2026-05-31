@@ -74,4 +74,6 @@ For review-quality changes, prefer executable fixtures or historical PR replay e
 
 ## Release Notes
 
-Update `CHANGELOG.md` for user-visible changes. Group entries under Added, Changed, Fixed, and Removed.
+Do not manually bump `pyproject.toml` or edit release sections in `CHANGELOG.md` for normal releases. Release Please reads Conventional Commits on `main`, opens a release PR, updates `pyproject.toml`, updates `CHANGELOG.md`, and creates the release tag after that PR is merged.
+
+Use clear commit types and scopes so generated release notes are useful. See [docs/releasing.md](docs/releasing.md) for the maintainer release flow and PyPI setup.

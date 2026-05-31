@@ -36,7 +36,26 @@ Apex Ray does not replace CI, tests, linters, typecheck, dependency scanners, SA
 
 ## Install
 
-The project is not published yet. For local development:
+For published releases:
+
+One-off run without a persistent install:
+
+```bash
+uvx apex-ray --help
+uvx apex-ray doctor
+```
+
+User-level CLI install:
+
+```bash
+uv tool install apex-ray
+apex-ray --version
+apex-ray doctor
+```
+
+`pipx install apex-ray` is also supported if you use pipx for isolated Python CLI tools.
+
+For local development from source:
 
 ```bash
 git clone git@github.com:dobrotacreator/apex-ray.git
@@ -53,7 +72,7 @@ uv run apex-ray --version
 uv run apex-ray doctor
 ```
 
-The shorter `apex-ray ...` commands below assume the console script is installed on your `PATH`. When working from a source checkout, either prefix commands with `uv run` or install the local checkout as a user tool:
+The shorter `apex-ray ...` commands below assume the console script is installed on your `PATH`. When working from a source checkout, either prefix commands with `uv run` or install the local checkout as an editable user tool:
 
 ```bash
 uv tool install --editable .
@@ -238,6 +257,8 @@ git diff --check
 ```
 
 See [docs/development.md](docs/development.md) and [CONTRIBUTING.md](CONTRIBUTING.md).
+
+Maintainers: release automation is documented in [docs/releasing.md](docs/releasing.md).
 
 ## License
 

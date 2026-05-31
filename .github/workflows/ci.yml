@@ -9,6 +9,8 @@ on:
 permissions:
   contents: read
 
+# CI opts into the upcoming GitHub Actions Node 24 runtime early so third-party
+# JavaScript actions break here before GitHub changes the default runner runtime.
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 

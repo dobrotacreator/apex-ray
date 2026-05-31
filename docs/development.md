@@ -78,22 +78,6 @@ Do not commit:
 
 ## Release Hygiene
 
-Release Please owns version bumps, changelog updates, tags, and GitHub Releases. It reads Conventional Commits on `main` and opens a release PR that updates `pyproject.toml`, `CHANGELOG.md`, and `.release-please-manifest.json`.
-
-The manifest starts at `0.0.0` intentionally because Apex Ray has not had a published release yet. The first Release Please PR should cut `v0.1.0`; after that, the manifest records the latest released version.
-
-Pre-1.0 versioning is conservative:
-
-- breaking changes bump the minor version;
-- features and fixes bump the patch version.
-
-Merging a Release Please PR creates the GitHub Release. The `Publish PyPI` workflow then builds from that release tag and publishes with PyPI Trusted Publishing from the `pypi` environment.
-
-Before the first PyPI publish, configure a PyPI Trusted Publisher for:
-
-- owner: `dobrotacreator`
-- repository: `apex-ray`
-- workflow: `publish-pypi.yml`
-- environment: `pypi`
+Release automation and PyPI publishing are documented in `docs/releasing.md`.
 
 Release artifacts must be built from a clean tag. Before publishing, verify that the wheel and sdist include the expected source files, bundled analyzer files, metadata, and license.
