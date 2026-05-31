@@ -78,4 +78,14 @@ Do not commit:
 
 ## Release Hygiene
 
+Release Please owns version bumps, changelog updates, tags, and GitHub Releases. It reads Conventional Commits on `main` and opens a release PR that updates `pyproject.toml`, `CHANGELOG.md`, and `.release-please-manifest.json`.
+
+Do not manually bump the package version for normal releases. Review and merge the Release Please PR when the generated version and changelog are correct.
+
+Merging a Release Please PR creates the GitHub Release and tag. The `Publish PyPI` workflow then builds from that release tag and publishes with PyPI Trusted Publishing through the `pypi` environment.
+
+Pre-1.0 versioning is conservative: breaking changes bump the minor version; features and fixes bump the patch version.
+
+PyPI publishing uses Trusted Publishing from `.github/workflows/publish-pypi.yml` and the GitHub environment `pypi`. Configure those once before the first release; do not add a long-lived PyPI API token unless Trusted Publishing is unavailable.
+
 Release artifacts must be built from a clean tag. Before publishing, verify that the wheel and sdist include the expected source files, bundled analyzer files, metadata, and license.
