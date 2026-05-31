@@ -1,9 +1,8 @@
-from __future__ import annotations
-
 from pathlib import Path
 
 import pytest
 
+from apex_ray import git
 from apex_ray.config import ConfigError, find_local_config, init_config, init_project, load_config
 
 
@@ -36,6 +35,9 @@ def test_init_config_creates_default_file(tmp_path: Path) -> None:
     assert config.memory.max_cards_per_pack == 4
     assert config.llm.profiles == {}
     assert config.llm.enabled is True
+    assert config.llm.max_packs == 64
+    assert config.llm.max_deep_packs == 48
+    assert config.llm.max_input_tokens == 300_000
     assert config.telemetry.enabled is False
     assert config.telemetry.path == ".apex-ray/telemetry/review-runs.jsonl"
 
@@ -144,24 +146,152 @@ def test_init_project_creates_team_setup_files(tmp_path: Path) -> None:
     assert (tmp_path / ".apex-ray" / "reports").is_dir()
     assert "config.local.yml" in (tmp_path / ".apex-ray" / ".gitignore").read_text(encoding="utf-8")
     assert ".apex-ray/reports/" in (tmp_path / ".gitignore").read_text(encoding="utf-8")
+    assert ".codex/config.local.toml" in (tmp_path / ".gitignore").read_text(encoding="utf-8")
     assert "apex-ray-review" in (tmp_path / "lefthook.yml").read_text(encoding="utf-8")
     assert (tmp_path / "AGENTS.md").exists()
     assert (tmp_path / ".claude" / "CLAUDE.md").exists()
+    assert (tmp_path / ".apex-ray" / "skills" / "apex-ray" / "SKILL.md").exists()
+    assert (tmp_path / ".apex-ray" / "skills" / "apex-ray-improve" / "SKILL.md").exists()
+    assert (tmp_path / ".codex" / "skills" / "apex-ray" / "SKILL.md").exists()
+    assert (tmp_path / ".codex" / "skills" / "apex-ray-improve" / "SKILL.md").exists()
+    assert (tmp_path / ".claude" / "skills" / "apex-ray" / "SKILL.md").exists()
+    assert (tmp_path / ".claude" / "skills" / "apex-ray-improve" / "SKILL.md").exists()
+    lefthook_text = (tmp_path / "lefthook.yml").read_text(encoding="utf-8")
+    assert "apex-ray gate pre-push" in lefthook_text
+    assert "--base" not in lefthook_text
+    assert "--no-llm" not in lefthook_text
+    agents_text = (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
+    assert "APEX_RAY_START" in agents_text
+    assert "$apex-ray" in agents_text
+    assert "$apex-ray-improve" in agents_text
+    skill_text = (tmp_path / ".apex-ray" / "skills" / "apex-ray" / "SKILL.md").read_text(encoding="utf-8")
+    assert "apex-ray review --continue-from .apex-ray/reports/review.json" in skill_text
+    assert "Use `--no-llm` or `.apex-ray/config.local.yml`" in skill_text
+    improve_skill_text = (tmp_path / ".apex-ray" / "skills" / "apex-ray-improve" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
+    assert "recommendation-only improvements" in improve_skill_text
+    assert "Greptile comments" in improve_skill_text
 
 
-def test_init_project_is_idempotent_for_existing_agent_files(tmp_path: Path) -> None:
+def test_init_project_appends_to_existing_agent_files(tmp_path: Path) -> None:
     init_project(tmp_path)
     agents = tmp_path / "AGENTS.md"
     agents.write_text("custom\n", encoding="utf-8")
 
     init_project(tmp_path)
 
-    assert agents.read_text(encoding="utf-8") == "custom\n"
+    text = agents.read_text(encoding="utf-8")
+    assert text.startswith("custom\n")
+    assert "APEX_RAY_START" in text
+    assert "$apex-ray" in text
+    assert "$apex-ray-improve" in text
+
+
+def test_init_project_updates_existing_claude_symlink_to_agents_once(tmp_path: Path) -> None:
+    agents = tmp_path / "AGENTS.md"
+    agents.write_text("custom\n", encoding="utf-8")
+    claude_dir = tmp_path / ".claude"
+    claude_dir.mkdir()
+    (claude_dir / "CLAUDE.md").symlink_to("../AGENTS.md")
+
+    init_project(tmp_path)
+
+    text = agents.read_text(encoding="utf-8")
+    assert text.startswith("custom\n")
+    assert text.count("APEX_RAY_START") == 1
+    assert (claude_dir / "CLAUDE.md").is_symlink()
+
+
+def test_init_project_prefers_existing_root_claude_file(tmp_path: Path) -> None:
+    (tmp_path / "CLAUDE.md").write_text("claude root\n", encoding="utf-8")
+
+    init_project(tmp_path)
+
+    text = (tmp_path / "CLAUDE.md").read_text(encoding="utf-8")
+    assert text.startswith("claude root\n")
+    assert "APEX_RAY_START" in text
+    assert not (tmp_path / ".claude" / "CLAUDE.md").exists()
+
+
+def test_init_project_updates_root_claude_symlink_to_agents(tmp_path: Path) -> None:
+    agents = tmp_path / "AGENTS.md"
+    agents.write_text("custom\n", encoding="utf-8")
+    (tmp_path / "CLAUDE.md").symlink_to("AGENTS.md")
+
+    init_project(tmp_path)
+
+    text = agents.read_text(encoding="utf-8")
+    assert text.startswith("custom\n")
+    assert text.count("APEX_RAY_START") == 1
+    assert (tmp_path / "CLAUDE.md").is_symlink()
+    assert not (tmp_path / ".claude" / "CLAUDE.md").exists()
+
+
+def test_init_project_reports_only_changed_files_on_second_run(tmp_path: Path) -> None:
+    init_project(tmp_path)
+
+    written = init_project(tmp_path)
+
+    assert written == []
+
+
+def test_init_project_validates_options_before_writing(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError, match="Unsupported hooks value"):
+        init_project(tmp_path, hooks="banana")
+
+    assert not (tmp_path / ".apex-ray").exists()
+    assert not (tmp_path / ".gitignore").exists()
+
+
+def test_init_project_detects_current_branch_as_default_base(tmp_path: Path) -> None:
+    git.run_git(["init", "--initial-branch=master"], cwd=tmp_path)
+
+    init_project(tmp_path)
+
+    assert "base: master" in (tmp_path / ".apex-ray" / "config.yml").read_text(encoding="utf-8")
+
+
+def test_init_project_does_not_use_feature_branch_as_default_base(tmp_path: Path) -> None:
+    git.run_git(["init", "--initial-branch=develop"], cwd=tmp_path)
+    git.run_git(["config", "user.email", "test@example.com"], cwd=tmp_path)
+    git.run_git(["config", "user.name", "Test"], cwd=tmp_path)
+    (tmp_path / "README.md").write_text("# Test\n", encoding="utf-8")
+    git.run_git(["add", "README.md"], cwd=tmp_path)
+    git.run_git(["commit", "-m", "initial"], cwd=tmp_path)
+    git.run_git(["checkout", "-b", "feature/review"], cwd=tmp_path)
+
+    init_project(tmp_path)
+
+    assert "base: main" in (tmp_path / ".apex-ray" / "config.yml").read_text(encoding="utf-8")
+    assert "base: feature/review" not in (tmp_path / ".apex-ray" / "config.yml").read_text(encoding="utf-8")
+
+
+def test_init_project_updates_existing_apex_gitignore_block(tmp_path: Path) -> None:
+    (tmp_path / ".gitignore").write_text("# Apex Ray\n.apex-ray/reports/\n", encoding="utf-8")
+
+    init_project(tmp_path)
+
+    text = (tmp_path / ".gitignore").read_text(encoding="utf-8")
+    assert "# Apex Ray start" in text
+    assert "# Apex Ray end" in text
+    assert ".apex-ray/reports/" in text
+    assert ".codex/config.local.toml" in text
+    assert ".claude/settings.local.json" in text
+
+
+def test_init_project_can_skip_agent_skill_files(tmp_path: Path) -> None:
+    init_project(tmp_path, agent_skill=False)
+
+    assert (tmp_path / "AGENTS.md").exists()
+    assert not (tmp_path / ".apex-ray" / "skills").exists()
+    assert not (tmp_path / ".codex").exists()
+    assert not (tmp_path / ".claude" / "skills").exists()
 
 
 def test_init_project_refuses_to_replace_existing_git_hook_without_force(tmp_path: Path) -> None:
+    git.run_git(["init"], cwd=tmp_path)
     hook = tmp_path / ".git" / "hooks" / "pre-push"
-    hook.parent.mkdir(parents=True)
     hook.write_text("#!/bin/sh\necho existing\n", encoding="utf-8")
 
     with pytest.raises(ConfigError, match="pre-push hook already exists"):
@@ -171,13 +301,49 @@ def test_init_project_refuses_to_replace_existing_git_hook_without_force(tmp_pat
 
 
 def test_init_project_can_replace_existing_git_hook_with_force(tmp_path: Path) -> None:
+    git.run_git(["init"], cwd=tmp_path)
     hook = tmp_path / ".git" / "hooks" / "pre-push"
-    hook.parent.mkdir(parents=True)
     hook.write_text("#!/bin/sh\necho existing\n", encoding="utf-8")
 
     init_project(tmp_path, hooks="git", overwrite=True)
 
-    assert "apex-ray review" in hook.read_text(encoding="utf-8")
+    assert "apex-ray gate pre-push" in hook.read_text(encoding="utf-8")
+
+
+def test_init_project_refuses_to_rewrite_existing_lefthook_without_force(tmp_path: Path) -> None:
+    (tmp_path / "lefthook.yml").write_text(
+        "pre-push:\n  commands:\n    test:\n      run: |\n        npm test\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match="Lefthook config already exists"):
+        init_project(tmp_path)
+
+    assert "run: |\n        npm test" in (tmp_path / "lefthook.yml").read_text(encoding="utf-8")
+    assert not (tmp_path / ".apex-ray").exists()
+
+
+def test_init_project_preserves_agent_symlink_on_force(tmp_path: Path) -> None:
+    target = tmp_path / "AGENTS.md"
+    target.write_text("custom\n", encoding="utf-8")
+    (tmp_path / "CLAUDE.md").symlink_to("AGENTS.md")
+
+    init_project(tmp_path, overwrite=True)
+
+    assert (tmp_path / "CLAUDE.md").is_symlink()
+    assert "APEX_RAY_START" in target.read_text(encoding="utf-8")
+
+
+def test_init_project_rejects_agent_symlink_outside_repo(tmp_path: Path) -> None:
+    outside = tmp_path.with_name(f"{tmp_path.name}-outside-agents.md")
+    outside.write_text("external\n", encoding="utf-8")
+    (tmp_path / "AGENTS.md").symlink_to(outside)
+
+    with pytest.raises(ConfigError, match="outside the repository"):
+        init_project(tmp_path)
+
+    assert outside.read_text(encoding="utf-8") == "external\n"
+    assert not (tmp_path / ".apex-ray").exists()
 
 
 def test_load_config_loads_markdown_rule_files(tmp_path: Path) -> None:

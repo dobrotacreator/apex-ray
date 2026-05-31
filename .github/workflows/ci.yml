@@ -42,9 +42,13 @@ jobs:
         working-directory: analyzers/typescript
         run: npm run typecheck
 
-      - name: Build TypeScript analyzer
+      - name: Test TypeScript analyzer
         working-directory: analyzers/typescript
-        run: npm run build
+        run: npm test
+
+      - name: Measure TypeScript analyzer coverage
+        working-directory: analyzers/typescript
+        run: npm run coverage
 
       - name: Install Python dependencies
         run: uv sync --locked --all-groups
@@ -58,8 +62,10 @@ jobs:
       - name: Typecheck Python
         run: uv run pyright
 
-      - name: Run Python tests
-        run: uv run pytest -q
+      - name: Run Python tests with coverage
+        run: |
+          uv run coverage run -m pytest -q
+          uv run coverage report -m
 
       - name: Build package
         run: uv build --sdist --wheel
@@ -74,4 +80,38 @@ jobs:
           uv pip install --python .ci-smoke-venv/bin/python "$wheel"
           .ci-smoke-venv/bin/apex-ray --version
           tmpdir="$(mktemp -d)"
-          (cd "$tmpdir" && "$GITHUB_WORKSPACE/.ci-smoke-venv/bin/apex-ray" doctor)
+          doctor_output="$(cd "$tmpdir" && "$GITHUB_WORKSPACE/.ci-smoke-venv/bin/apex-ray" doctor)"
+          echo "$doctor_output"
+          grep -q "TypeScript analyzer built: true" <<<"$doctor_output"
+          reviewdir="$(mktemp -d)"
+          cd "$reviewdir"
+          git init
+          git config user.email "apex@example.test"
+          git config user.name "Apex Test"
+          mkdir -p src
+          printf '{"compilerOptions":{"target":"ES2022"},"include":["src/**/*.ts"]}\n' > tsconfig.json
+          printf 'export function total(price: number, quantity: number): number {\n  return price * quantity;\n}\n' > src/cart.ts
+          git add .
+          git commit -m "initial"
+          printf 'export function total(price: number, quantity: number): number {\n  return price;\n}\n' > src/cart.ts
+          "$GITHUB_WORKSPACE/.ci-smoke-venv/bin/apex-ray" review --worktree --no-llm --output review.md --json review.json
+          test -s review.md
+          test -s review.json
+          "$GITHUB_WORKSPACE/.ci-smoke-venv/bin/python" - <<'PY'
+          import json
+          from pathlib import Path
+
+          report = json.loads(Path("review.json").read_text(encoding="utf-8"))
+          assert report["analyzer_results"], "expected bundled TypeScript analyzer results"
+          warnings = "\n".join(
+              warning
+              for analyzer_result in report["analyzer_results"]
+              for warning in analyzer_result.get("warnings", [])
+          )
+          assert "TypeScript analyzer unavailable" not in warnings
+          assert any(
+              symbol.get("changed_symbols")
+              for analyzer_result in report["analyzer_results"]
+              for symbol in analyzer_result.get("files", [])
+          ), "expected changed symbols from bundled TypeScript analyzer"
+          PY

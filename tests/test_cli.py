@@ -1,18 +1,19 @@
-from __future__ import annotations
-
 import json
+import re
 from pathlib import Path
+from types import SimpleNamespace
 
 from typer.testing import CliRunner
 
 from apex_ray.cli import app
-from apex_ray.llm_cache import REVIEW_PROMPT_VERSION
+from apex_ray.llm.cache import REVIEW_PROMPT_VERSION
 from apex_ray.models import (
     DiffStats,
     DiffSummary,
     Finding,
     FindingConfidence,
     FindingSeverity,
+    FindingVerification,
     ProjectProfile,
     ReviewConfig,
     TargetMode,
@@ -21,6 +22,12 @@ from apex_ray.report import build_report
 
 runner = CliRunner()
 FIXTURE_DIR = Path(__file__).parent / "fixtures"
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+_RICH_FRAME_CHARS = str.maketrans({ord(char): " " for char in "\u2500\u2502\u256d\u256e\u2570\u256f"})
+
+
+def _plain_cli_output(output: str) -> str:
+    return " ".join(_ANSI_RE.sub("", output).translate(_RICH_FRAME_CHARS).split())
 
 
 def test_version_option() -> None:
@@ -41,7 +48,20 @@ def test_init_creates_config(tmp_path: Path, monkeypatch) -> None:
     assert (tmp_path / "lefthook.yml").exists()
     assert (tmp_path / "AGENTS.md").exists()
     assert (tmp_path / ".claude" / "CLAUDE.md").exists()
+    assert (tmp_path / ".apex-ray" / "skills" / "apex-ray" / "SKILL.md").exists()
+    assert (tmp_path / ".apex-ray" / "skills" / "apex-ray-improve" / "SKILL.md").exists()
+    assert (tmp_path / ".codex" / "skills" / "apex-ray" / "SKILL.md").exists()
+    assert (tmp_path / ".codex" / "skills" / "apex-ray-improve" / "SKILL.md").exists()
+    assert (tmp_path / ".claude" / "skills" / "apex-ray" / "SKILL.md").exists()
+    assert (tmp_path / ".claude" / "skills" / "apex-ray-improve" / "SKILL.md").exists()
     assert "apex-ray-review" in (tmp_path / "lefthook.yml").read_text(encoding="utf-8")
+    assert "apex-ray gate pre-push" in (tmp_path / "lefthook.yml").read_text(encoding="utf-8")
+    assert "--no-llm" not in (tmp_path / "lefthook.yml").read_text(encoding="utf-8")
+    config_text = (tmp_path / ".apex-ray" / "config.yml").read_text(encoding="utf-8")
+    assert "max_packs: 64" in config_text
+    assert "max_deep_packs: 48" in config_text
+    assert "max_input_tokens: 300000" in config_text
+    assert "Next: inspect and commit Apex Ray setup files" in result.stdout
 
 
 def test_init_can_skip_hooks_and_agent_files(tmp_path: Path, monkeypatch) -> None:
@@ -53,6 +73,18 @@ def test_init_can_skip_hooks_and_agent_files(tmp_path: Path, monkeypatch) -> Non
     assert (tmp_path / ".apex-ray" / "config.yml").exists()
     assert not (tmp_path / "lefthook.yml").exists()
     assert not (tmp_path / "AGENTS.md").exists()
+    assert not (tmp_path / ".apex-ray" / "skills").exists()
+
+
+def test_init_can_skip_agent_skill(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["init", "--no-agent-skill"], catch_exceptions=False)
+
+    assert result.exit_code == 0
+    assert (tmp_path / "AGENTS.md").exists()
+    assert not (tmp_path / ".apex-ray" / "skills").exists()
+    assert "$apex-ray" not in (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
 
 
 def test_doctor_reports_local_config(tmp_path: Path, monkeypatch) -> None:
@@ -108,7 +140,7 @@ def test_memory_suggest_writes_cards_from_report(tmp_path: Path) -> None:
 
     result = runner.invoke(
         app,
-        ["memory", "suggest", "--from-report", str(report_path), "--output", str(output)],
+        ["memory", "suggest", "--from-report", str(report_path), "--output", str(output), "--include-unverified"],
         catch_exceptions=False,
     )
 
@@ -148,6 +180,120 @@ def test_review_patch_writes_markdown_and_json(tmp_path: Path, monkeypatch) -> N
     assert "# Apex Ray Review" in output.read_text(encoding="utf-8")
     assert '"files_changed": 3' in json_output.read_text(encoding="utf-8")
     assert "<h1>Apex Ray Review</h1>" in html_output.read_text(encoding="utf-8")
+
+
+def test_gate_pre_push_blocks_high_verified_finding(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    finding = Finding(
+        title="Missing tenant predicate",
+        severity=FindingSeverity.HIGH,
+        confidence=FindingConfidence.HIGH,
+        file="src/orders.ts",
+        line=84,
+        failure_mode="The changed query can return another tenant's order.",
+        evidence="The diff removes tenantId from the lookup predicate.",
+        suggested_fix="Restore the tenantId predicate.",
+        suggested_test="Add a cross-tenant lookup regression test.",
+        context_pack_id="src/orders.ts#getOrder:1",
+    )
+
+    def fake_run_review_pipeline(*args, **kwargs):
+        config = args[3]
+        return build_report(
+            ProjectProfile(root=str(tmp_path), is_git_repo=True),
+            config,
+            DiffSummary(target_mode=TargetMode.BASE, base="main", stats=DiffStats(files_changed=1)),
+            findings=[finding],
+            verifications=[
+                FindingVerification(
+                    finding=finding,
+                    approved=True,
+                    confidence=FindingConfidence.HIGH,
+                    reason="Concrete diff-caused issue.",
+                )
+            ],
+        )
+
+    monkeypatch.setattr("apex_ray.cli.gate.git.repo_root", lambda _cwd: tmp_path)
+    monkeypatch.setattr("apex_ray.cli.gate.git.is_git_repo", lambda _root: True)
+    monkeypatch.setattr(
+        "apex_ray.cli.gate.git.diff_base", lambda _root, _base: "diff --git a/src/orders.ts b/src/orders.ts\n"
+    )
+    monkeypatch.setattr("apex_ray.cli.gate.run_review_pipeline", fake_run_review_pipeline)
+    monkeypatch.setattr("apex_ray.cli.gate.continue_review_from_report", lambda report, **_kwargs: (report, []))
+
+    result = runner.invoke(app, ["gate", "pre-push"])
+
+    assert result.exit_code == 1
+    assert "APEX RAY GATE: BLOCKED" in result.stdout
+    assert "Missing tenant predicate" in result.stdout
+    assert "After fixing, commit the changes and run git push again." in result.stdout
+    assert (tmp_path / ".apex-ray" / "reports" / "pre-push.json").exists()
+
+
+def test_gate_pre_push_does_not_block_unverified_finding_by_default(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    finding = Finding(
+        title="Unverified high issue",
+        severity=FindingSeverity.HIGH,
+        confidence=FindingConfidence.MEDIUM,
+        file="src/orders.ts",
+        failure_mode="Potential issue.",
+        evidence="Candidate evidence.",
+        suggested_fix="Investigate.",
+        suggested_test="Add a regression test.",
+    )
+
+    def fake_run_review_pipeline(*args, **kwargs):
+        config = args[3]
+        return build_report(
+            ProjectProfile(root=str(tmp_path), is_git_repo=True),
+            config,
+            DiffSummary(target_mode=TargetMode.BASE, base="main", stats=DiffStats(files_changed=1)),
+            findings=[finding],
+        )
+
+    monkeypatch.setattr("apex_ray.cli.gate.git.repo_root", lambda _cwd: tmp_path)
+    monkeypatch.setattr("apex_ray.cli.gate.git.is_git_repo", lambda _root: True)
+    monkeypatch.setattr(
+        "apex_ray.cli.gate.git.diff_base", lambda _root, _base: "diff --git a/src/orders.ts b/src/orders.ts\n"
+    )
+    monkeypatch.setattr("apex_ray.cli.gate.run_review_pipeline", fake_run_review_pipeline)
+    monkeypatch.setattr("apex_ray.cli.gate.continue_review_from_report", lambda report, **_kwargs: (report, []))
+
+    result = runner.invoke(app, ["gate", "pre-push"])
+
+    assert result.exit_code == 0
+    assert "APEX RAY GATE: PASSED" in result.stdout
+    assert "Findings: 1" in result.stdout
+
+
+def test_gate_pre_push_blocks_critical_partial_coverage(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    def fake_run_review_pipeline(*args, **kwargs):
+        config = args[3]
+        report = build_report(
+            ProjectProfile(root=str(tmp_path), is_git_repo=True),
+            config,
+            DiffSummary(target_mode=TargetMode.BASE, base="main", stats=DiffStats(files_changed=1)),
+        )
+        report.llm_coverage.partial_severity = "critical"
+        report.llm_coverage.partial_reasons = ["1 unreviewed P0 context pack(s)"]
+        return report
+
+    monkeypatch.setattr("apex_ray.cli.gate.git.repo_root", lambda _cwd: tmp_path)
+    monkeypatch.setattr("apex_ray.cli.gate.git.is_git_repo", lambda _root: True)
+    monkeypatch.setattr(
+        "apex_ray.cli.gate.git.diff_base", lambda _root, _base: "diff --git a/src/orders.ts b/src/orders.ts\n"
+    )
+    monkeypatch.setattr("apex_ray.cli.gate.run_review_pipeline", fake_run_review_pipeline)
+    monkeypatch.setattr("apex_ray.cli.gate.continue_review_from_report", lambda report, **_kwargs: (report, []))
+
+    result = runner.invoke(app, ["gate", "pre-push"])
+
+    assert result.exit_code == 1
+    assert "Partial coverage is critical" in result.stdout
 
 
 def test_review_patch_reports_explicit_config_path(tmp_path: Path, monkeypatch) -> None:
@@ -229,6 +375,71 @@ def test_review_rejects_same_markdown_and_html_output(tmp_path: Path, monkeypatc
     assert "Markdown and HTML output paths must be different" in result.output
 
 
+def test_review_continue_from_respects_configured_llm_default(tmp_path: Path, monkeypatch) -> None:
+    report = build_report(
+        ProjectProfile(root=str(tmp_path), is_git_repo=True),
+        ReviewConfig(),
+        DiffSummary(target_mode=TargetMode.PATCH, stats=DiffStats(files_changed=1)),
+    )
+    report_path = tmp_path / "review.json"
+    output = tmp_path / "continued.md"
+    json_output = tmp_path / "continued.json"
+    report_path.write_text(report.model_dump_json(indent=2), encoding="utf-8")
+    seen: dict[str, bool] = {}
+
+    def fake_continue(*args, **kwargs):
+        seen["llm_enabled"] = kwargs["config"].llm.enabled
+        return report, [object()]
+
+    monkeypatch.setattr("apex_ray.cli.main.continue_review_from_report", fake_continue)
+
+    result = runner.invoke(
+        app,
+        ["review", "--continue-from", str(report_path), "--output", str(output), "--json", str(json_output)],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert seen["llm_enabled"] is False
+
+
+def test_review_continue_from_can_enable_llm_explicitly(tmp_path: Path, monkeypatch) -> None:
+    report = build_report(
+        ProjectProfile(root=str(tmp_path), is_git_repo=True),
+        ReviewConfig(),
+        DiffSummary(target_mode=TargetMode.PATCH, stats=DiffStats(files_changed=1)),
+    )
+    report_path = tmp_path / "review.json"
+    output = tmp_path / "continued.md"
+    json_output = tmp_path / "continued.json"
+    report_path.write_text(report.model_dump_json(indent=2), encoding="utf-8")
+    seen: dict[str, bool] = {}
+
+    def fake_continue(*args, **kwargs):
+        seen["llm_enabled"] = kwargs["config"].llm.enabled
+        return report, [object()]
+
+    monkeypatch.setattr("apex_ray.cli.main.continue_review_from_report", fake_continue)
+
+    result = runner.invoke(
+        app,
+        [
+            "review",
+            "--continue-from",
+            str(report_path),
+            "--llm",
+            "--output",
+            str(output),
+            "--json",
+            str(json_output),
+        ],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert seen["llm_enabled"] is True
+
+
 def test_review_patch_can_run_fake_llm(tmp_path: Path, monkeypatch, built_ts_analyzer: None) -> None:
     monkeypatch.chdir(tmp_path)
     fixture = FIXTURE_DIR / "ts_project"
@@ -267,3 +478,114 @@ review:
     assert data["llm_runs"][0]["provider"] == "fake"
     assert data["llm_runs"][0]["prompt_version"] == REVIEW_PROMPT_VERSION
     assert "No LLM findings reported." in output.read_text(encoding="utf-8")
+
+
+def test_eval_run_prs_cli_passes_options_to_runner(tmp_path: Path, monkeypatch) -> None:
+    seen: dict[str, object] = {}
+
+    def fake_run_pr_eval_cases(**kwargs: object) -> SimpleNamespace:
+        seen.update(kwargs)
+        return SimpleNamespace(
+            matched_greptile_findings_total=2,
+            greptile_findings_total=3,
+            extra_apex_findings_total=1,
+            failed=False,
+            partial=0,
+        )
+
+    monkeypatch.setattr("apex_ray.cli.eval.run_pr_eval_cases", fake_run_pr_eval_cases)
+
+    result = runner.invoke(
+        app,
+        [
+            "eval",
+            "run-prs",
+            "--repo",
+            str(tmp_path / "repo"),
+            "--cases",
+            str(tmp_path / "cases"),
+            "--output",
+            str(tmp_path / "run"),
+            "--pr",
+            "12",
+            "--llm",
+            "--llm-provider",
+            "fake",
+            "--llm-model",
+            "fake-strong",
+            "--verify",
+            "--cache-dir",
+            str(tmp_path / "cache"),
+            "--telemetry-path",
+            str(tmp_path / "telemetry.jsonl"),
+            "--case-jobs",
+            "2",
+        ],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert "Matched Greptile findings: 2/3; extra Apex findings: 1" in result.stdout
+    assert seen["source_repo"] == tmp_path / "repo"
+    assert seen["cases_dir"] == tmp_path / "cases"
+    assert seen["output_dir"] == tmp_path / "run"
+    assert seen["pr_numbers"] == [12]
+    assert seen["llm_enabled"] is True
+    assert seen["provider_override"] == "fake"
+    assert seen["model_override"] == "fake-strong"
+    assert seen["verify_override"] is True
+    assert seen["cache_dir"] == tmp_path / "cache"
+    assert seen["telemetry_path"] == tmp_path / "telemetry.jsonl"
+    assert seen["case_jobs"] == 2
+
+
+def test_eval_run_prs_cli_fails_on_partial_by_default(tmp_path: Path, monkeypatch) -> None:
+    def fake_run_pr_eval_cases(**_kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(
+            matched_greptile_findings_total=1,
+            greptile_findings_total=1,
+            extra_apex_findings_total=0,
+            failed=0,
+            partial=1,
+        )
+
+    monkeypatch.setattr("apex_ray.cli.eval.run_pr_eval_cases", fake_run_pr_eval_cases)
+
+    result = runner.invoke(
+        app,
+        [
+            "eval",
+            "run-prs",
+            "--repo",
+            str(tmp_path / "repo"),
+            "--cases",
+            str(tmp_path / "cases"),
+            "--output",
+            str(tmp_path / "run"),
+        ],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 1
+    assert "Partial PR eval cases: 1" in result.stdout
+
+
+def test_eval_run_prs_cli_rejects_conflicting_llm_flags(tmp_path: Path) -> None:
+    result = runner.invoke(
+        app,
+        [
+            "eval",
+            "run-prs",
+            "--repo",
+            str(tmp_path / "repo"),
+            "--cases",
+            str(tmp_path / "cases"),
+            "--output",
+            str(tmp_path / "run"),
+            "--llm",
+            "--no-llm",
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "Use only one of --llm or --no-llm" in _plain_cli_output(result.output)

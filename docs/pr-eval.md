@@ -53,7 +53,7 @@ apex-ray eval run-prs \
   --case-timeout 1800
 ```
 
-`--case-jobs` runs independent PR cases in parallel. `--case-timeout` marks a stuck case as `timed_out`, terminates the worker process group, and keeps the suite moving. `--resume` trusts terminal per-case artifacts (`succeeded`, `partial`, `quarantined`, or `skipped`) only when their run fingerprint still matches the current replay options and label file; stale `running`/missing/mismatched cases are rerun.
+`--case-jobs` runs independent PR cases in parallel. `--case-timeout` marks a stuck case as `timed_out`, terminates the worker process group, and keeps the suite moving. `--resume` trusts terminal per-case artifacts (`succeeded`, `partial`, `quarantined`, or `skipped`) only when their run fingerprint still matches the current replay options and label file; stale `running`/missing/mismatched cases are rerun. Partial cases exit non-zero by default; use `--allow-partial` only when explicitly accepting incomplete coverage.
 
 The comparison matches Greptile findings to Apex Ray findings by file, nearby line, and issue text overlap. Missed Greptile findings indicate recall gaps. Extra Apex findings require manual triage: they can be false positives, true issues Greptile missed, or findings outside the first-pass Greptile baseline. Use `--allow-extra-findings` for a recall-only gate while still reporting extra findings.
 

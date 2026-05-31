@@ -14,7 +14,7 @@ Apex Ray reads a git diff, builds compact context packs around changed code, run
 
 - Builds TS/JS context packs from changed files, symbols, callers, callees, contracts, metadata, and related tests.
 - Supports project-specific rules and repo-committed review memory.
-- Runs without LLM calls, or with Codex CLI when configured.
+- Runs without LLM calls, or with Codex CLI / Claude Code CLI when configured.
 - Routes cheap and strong models through profiles.
 - Tracks LLM coverage, skipped packs, partial severity, provider failures, cache usage, and continuation commands.
 - Replays historical GitHub PR review comments for local evals.
@@ -31,7 +31,7 @@ Apex Ray does not replace CI, tests, linters, typecheck, dependency scanners, SA
 - npm
 - git
 - uv for development
-- Codex CLI for LLM review
+- Codex CLI or Claude Code CLI for LLM review
 - GitHub CLI only for historical PR capture/eval commands
 
 ## Install
@@ -42,9 +42,8 @@ The project is not published yet. For local development:
 git clone git@github.com:dobrotacreator/apex-ray.git
 cd apex-ray
 uv sync --all-groups
-cd analyzers/typescript
-npm ci
-npm run build
+npm --prefix analyzers/typescript ci
+npm --prefix analyzers/typescript run build
 ```
 
 Run from the repository root:
@@ -54,6 +53,13 @@ uv run apex-ray --version
 uv run apex-ray doctor
 ```
 
+The shorter `apex-ray ...` commands below assume the console script is installed on your `PATH`. When working from a source checkout, either prefix commands with `uv run` or install the local checkout as a user tool:
+
+```bash
+uv tool install --editable .
+apex-ray doctor
+```
+
 ## Quickstart
 
 In a project you want to review:
@@ -61,15 +67,23 @@ In a project you want to review:
 ```bash
 apex-ray init
 apex-ray doctor
-apex-ray review --worktree --no-llm --output review.md --json review.json
+git status --short
 ```
 
-`apex-ray init` creates `.apex-ray/config.yml`, rules/memory/report directories, gitignore entries, agent instruction files, and a Lefthook pre-push review command. Use `--hooks none` or `--agent-files none` for exceptional repositories.
+Inspect and commit the setup files before using the first worktree review for application changes.
 
-Run LLM review when Codex CLI is configured:
+`apex-ray init` creates `.apex-ray/config.yml`, rules/memory/report directories, gitignore entries, brief agent instruction pointers, project-local Apex Ray skills (`$apex-ray` and `$apex-ray-improve`), and a Lefthook pre-push gate command that follows shared and local config. Use `--hooks none`, `--agent-files none`, or `--no-agent-skill` for exceptional repositories.
+
+After the setup commit, run a deterministic local review:
 
 ```bash
-apex-ray review --worktree --llm --output review.md --json review.json --html review.html
+apex-ray review --worktree --no-llm --output .apex-ray/reports/review.md --json .apex-ray/reports/review.json
+```
+
+Run the configured LLM review explicitly:
+
+```bash
+apex-ray review --worktree --llm --output .apex-ray/reports/review.md --json .apex-ray/reports/review.json --html .apex-ray/reports/review.html
 ```
 
 Review a branch against the configured base:
@@ -81,9 +95,17 @@ apex-ray review --base main --llm
 Continue only unreviewed packs from a partial report:
 
 ```bash
-apex-ray review --continue-from review.json --residual-priority p0 --llm
-apex-ray review --continue-from review.json --only-pack 'apps/api/src/payments.ts#capture:1' --llm
+apex-ray review --continue-from .apex-ray/reports/review.json --residual-priority p0 --llm
+apex-ray review --continue-from .apex-ray/reports/review.json --only-pack 'apps/api/src/payments.ts#capture:1' --llm
 ```
+
+Run the same gate that `apex-ray init` wires into pre-push:
+
+```bash
+apex-ray gate pre-push
+```
+
+The gate reviews `review.base...HEAD`, writes `.apex-ray/reports/pre-push.md` and `.apex-ray/reports/pre-push.json`, prints an agent-friendly blocking summary, and exits non-zero when the configured policy fails.
 
 ## Configuration
 
@@ -102,14 +124,23 @@ review:
     paths:
       - .apex-ray/memory
   llm:
-    enabled: false
+    enabled: true
     provider: codex_cli
     coverage_mode: balanced
-    max_input_tokens: 120000
+    max_packs: 64
+    max_deep_packs: 48
+    max_input_tokens: 300000
     verify: true
   telemetry:
     enabled: false
     path: .apex-ray/telemetry/review-runs.jsonl
+  gates:
+    pre_push:
+      enabled: true
+      min_finding_severity: high
+      require_verified_findings: true
+      fail_on_quality_gate: true
+      fail_on_partial_severity: critical
 ```
 
 Machine-specific overrides can live in `.apex-ray/config.local.yml`. Apex Ray merges built-in defaults, shared config, local config, and CLI flags in that order. Local config is gitignored by default and is intended for provider/model/cost differences between contributors.
@@ -153,6 +184,10 @@ Avoid near-sunset model IDs in shared defaults. Team members can use `.apex-ray/
 
 See [docs/providers.md](docs/providers.md).
 
+## Architecture
+
+For a high-level implementation map, review flow, init artifacts, telemetry/eval flow, and test fixture explanation, see [docs/architecture.md](docs/architecture.md).
+
 ## Coverage And Continuation
 
 LLM coverage modes:
@@ -194,8 +229,11 @@ Caches and telemetry are local files. They may include repository paths, model n
 ## Development
 
 ```bash
-uv run pytest -q
-cd analyzers/typescript && npm run build
+uv run coverage run -m pytest -q
+uv run coverage report -m
+npm --prefix analyzers/typescript run typecheck
+npm --prefix analyzers/typescript test
+npm --prefix analyzers/typescript run coverage
 git diff --check
 ```
 
