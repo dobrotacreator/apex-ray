@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.2](https://github.com/dobrotacreator/apex-ray/compare/v0.1.1...v0.1.2) (2026-06-01)
+
+
+### Bug Fixes
+
+* **release:** keep uv lock version in sync ([#16](https://github.com/dobrotacreator/apex-ray/issues/16)) ([8907f4a](https://github.com/dobrotacreator/apex-ray/commit/8907f4a9a576d595a203219f062b497e6d47b491))
+
 ## [0.1.1](https://github.com/dobrotacreator/apex-ray/compare/v0.1.0...v0.1.1) (2026-06-01)
 
 
