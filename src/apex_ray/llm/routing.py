@@ -10,7 +10,7 @@ def verification_groups_by_route(
     for pack_id, indexed_findings in findings_by_pack_id.items():
         pack = packs_by_id[pack_id]
         route_groups: dict[
-            tuple[str, str | None, str | None, str | None, str | None, int, str | None, str],
+            tuple[str, str | None, str | None, str | None, str | None, str | None, int, str | None, str],
             tuple[LLMConfig, str | None, str, list[tuple[int, Finding]]],
         ] = {}
         for index, finding in indexed_findings:
@@ -30,10 +30,11 @@ def verification_route_key(
     config: LLMConfig,
     profile: str | None,
     route_reason: str,
-) -> tuple[str, str | None, str | None, str | None, str | None, int, str | None, str]:
+) -> tuple[str, str | None, str | None, str | None, str | None, str | None, int, str | None, str]:
     return (
         str(config.provider),
         config.model,
+        str(config.effort) if config.effort else None,
         profile,
         config.codex_path,
         config.claude_path,
@@ -137,6 +138,8 @@ def config_for_profile_or_model(
             resolved.provider = profile.provider
         if profile.model is not None:
             resolved.model = profile.model
+        if profile.effort is not None:
+            resolved.effort = profile.effort
         if profile.timeout_seconds is not None:
             resolved.timeout_seconds = profile.timeout_seconds
         if profile.codex_path is not None:

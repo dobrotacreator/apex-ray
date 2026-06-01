@@ -29,6 +29,7 @@ def default_config_text(base: str = DEFAULT_BASE_BRANCH) -> str:
   llm:
     enabled: true
     provider: codex_cli
+    effort: medium
     coverage_mode: balanced
     max_packs: 64
     max_deep_packs: 48

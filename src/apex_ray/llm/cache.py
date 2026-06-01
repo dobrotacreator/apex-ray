@@ -52,6 +52,7 @@ class LLMCache:
                 "key": key,
                 "provider": config.provider,
                 "model": config.model,
+                "effort": config.effort,
                 "prompt_version": review_prompt_version(config),
                 "created_at": _now_iso(),
                 "response": FindingResponse(findings=findings).model_dump(mode="json"),
@@ -87,6 +88,7 @@ class LLMCache:
                 "key": key,
                 "provider": config.provider,
                 "model": config.model,
+                "effort": config.effort,
                 "prompt_version": VERIFIER_PROMPT_VERSION,
                 "created_at": _now_iso(),
                 "response": {
@@ -147,6 +149,7 @@ def review_cache_key(pack: ContextPack, config: LLMConfig) -> str:
             "review_depth": depth,
             "provider": config.provider,
             "model": config.model,
+            "effort": config.effort,
             "pack": pack_prompt_payload(pack, "review", depth=depth),
         }
     )
@@ -160,6 +163,7 @@ def verification_cache_key(finding: Finding, pack: ContextPack, config: LLMConfi
             "prompt_version": VERIFIER_PROMPT_VERSION,
             "provider": config.provider,
             "model": config.model,
+            "effort": config.effort,
             "finding": finding.model_dump(mode="json"),
             "pack": pack_prompt_payload(pack, "verify"),
         }

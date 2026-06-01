@@ -150,6 +150,7 @@ review:
   llm:
     enabled: true
     provider: codex_cli
+    effort: medium
     coverage_mode: balanced
     max_packs: 64
     max_deep_packs: 48
@@ -190,9 +191,11 @@ review:
       cheap:
         provider: codex_cli
         model: "<cheap-codex-model>"
+        effort: low
       strong:
         provider: claude_code_cli
         model: "<strong-claude-model-or-alias>"
+        effort: medium
     routing:
       review_profile: cheap
       verify_profile: strong
@@ -204,7 +207,7 @@ review:
         pack_truncated: true
 ```
 
-Avoid near-sunset model IDs in shared defaults. Team members can use `.apex-ray/config.local.yml` for personal provider/model/path/cost overrides.
+Avoid near-sunset model IDs in shared defaults. `effort` maps to Codex CLI `model_reasoning_effort` and Claude Code CLI `--effort`; use `.apex-ray/config.local.yml` for personal provider/model/path/cost overrides.
 
 See [docs/providers.md](docs/providers.md).
 

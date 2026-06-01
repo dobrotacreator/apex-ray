@@ -31,6 +31,7 @@ review:
   llm:
     enabled: true
     provider: codex_cli
+    effort: medium
     coverage_mode: balanced
     max_packs: 64
     max_deep_packs: 48
@@ -59,6 +60,7 @@ review:
     jobs: 2
     provider: claude_code_cli
     model: "<personal-model-or-alias>"
+    effort: medium
     claude_path: claude
     timeout_seconds: 900
     max_input_tokens: 80000

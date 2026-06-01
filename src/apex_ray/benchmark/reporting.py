@@ -159,9 +159,12 @@ def format_llm_route_summary(route: object) -> str:
     status = getattr(route, "status", "unknown")
     profile = getattr(route, "profile", None)
     model = getattr(route, "model", None)
+    effort = getattr(route, "effort", None)
     runs = getattr(route, "runs", 0)
     tokens = getattr(route, "estimated_input_tokens", 0)
     identity = profile or model or "default"
+    if effort:
+        identity = f"{identity}@{effort}"
     return f"{kind}/{provider}/{identity}/{status}: {runs} runs, ~{tokens} tokens"
 
 

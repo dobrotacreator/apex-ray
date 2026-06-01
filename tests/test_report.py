@@ -37,6 +37,7 @@ def test_render_markdown_summarizes_llm_pack_selection() -> None:
             LLMRun(
                 provider="fake",
                 model="codex-cheap",
+                effort="low",
                 profile="cheap",
                 route_reason="profile:cheap",
                 context_pack_id="src/cart.ts#calculateTotal:1",
@@ -52,6 +53,7 @@ def test_render_markdown_summarizes_llm_pack_selection() -> None:
     assert "- Review context packs: `1` of `2`" in markdown
     assert "- Skipped context packs: `1`" in markdown
     assert "## LLM Coverage" in markdown
+    assert "effort: `low`" in markdown
     assert "- Unreviewed context packs: `1`" in markdown
     assert "- Slice coverage:" in markdown
     assert "`source` - reviewed `1/1`" in markdown

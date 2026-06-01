@@ -534,6 +534,14 @@ def test_review_cache_key_changes_when_review_depth_changes() -> None:
     assert review_cache_key(pack, deep) != review_cache_key(pack, shallow)
 
 
+def test_review_cache_key_changes_when_effort_changes() -> None:
+    pack = make_pack()
+    low = LLMConfig(provider=LLMProviderName.FAKE, model="codex-model", effort="low")
+    high = LLMConfig(provider=LLMProviderName.FAKE, model="codex-model", effort="high")
+
+    assert review_cache_key(pack, low) != review_cache_key(pack, high)
+
+
 def test_review_config_uses_default_profile() -> None:
     config = LLMConfig(
         provider=LLMProviderName.FAKE,
@@ -558,6 +566,7 @@ def test_review_config_profile_can_switch_provider_and_cli_path() -> None:
             "strong": LLMProfile(
                 provider=LLMProviderName.CLAUDE_CODE_CLI,
                 model="sonnet",
+                effort="xhigh",
                 claude_path="tools/claude",
             ),
         },
@@ -568,6 +577,7 @@ def test_review_config_profile_can_switch_provider_and_cli_path() -> None:
 
     assert resolved.provider == "claude_code_cli"
     assert resolved.model == "sonnet"
+    assert resolved.effort == "xhigh"
     assert resolved.claude_path == "tools/claude"
     assert resolved.codex_path == "codex"
     assert profile == "strong"
@@ -1115,6 +1125,29 @@ def test_build_codex_command_is_read_only_and_schema_bound(tmp_path: Path) -> No
     assert command[-3:] == ["--model", "gpt-5-codex", "-"]
 
 
+def test_build_codex_command_can_set_reasoning_effort(tmp_path: Path) -> None:
+    command = build_codex_command(
+        codex_path="/usr/local/bin/codex",
+        schema_path=tmp_path / "schema.json",
+        output_path=tmp_path / "out.json",
+        model="gpt-5.4",
+        effort="low",
+    )
+
+    assert command[command.index("--config") + 1] == 'model_reasoning_effort="low"'
+    assert command.index("--config") < command.index("exec")
+
+
+def test_build_codex_command_rejects_claude_only_max_effort(tmp_path: Path) -> None:
+    with pytest.raises(LLMProviderError, match="does not support effort 'max'"):
+        build_codex_command(
+            codex_path="/usr/local/bin/codex",
+            schema_path=tmp_path / "schema.json",
+            output_path=tmp_path / "out.json",
+            effort="max",
+        )
+
+
 def test_parse_codex_usage_from_jsonl_uses_latest_token_count_event() -> None:
     usage = parse_codex_usage_from_jsonl(
         "\n".join(
@@ -1332,6 +1365,17 @@ def test_build_claude_command_is_noninteractive_schema_bound_and_toolless() -> N
     assert json.loads(command[command.index("--json-schema") + 1])["required"] == ["findings"]
     assert command[command.index("--tools") + 1] == ""
     assert command[-2:] == ["--model", "sonnet"]
+
+
+def test_build_claude_command_can_set_effort() -> None:
+    command = build_claude_command(
+        claude_path="/usr/local/bin/claude",
+        schema=finding_response_schema(),
+        model="sonnet",
+        effort="max",
+    )
+
+    assert command[-4:] == ["--model", "sonnet", "--effort", "max"]
 
 
 def test_parse_claude_usage_from_json_reads_cache_tokens_and_cost() -> None:

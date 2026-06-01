@@ -10,6 +10,7 @@ review:
     enabled: true
     provider: codex_cli
     model: "<codex-model>"
+    effort: medium
     codex_path: codex
     verify: true
 ```
@@ -20,6 +21,7 @@ review:
     enabled: true
     provider: claude_code_cli
     model: "<claude-model-or-alias>"
+    effort: medium
     claude_path: claude
     verify: true
 ```
@@ -33,9 +35,11 @@ review:
       cheap:
         provider: codex_cli
         model: "<cheap-codex-model>"
+        effort: low
       strong:
         provider: claude_code_cli
         model: "<strong-claude-model-or-alias>"
+        effort: medium
     routing:
       review_profile: cheap
       verify_profile: strong
@@ -47,9 +51,11 @@ review:
         pack_truncated: true
 ```
 
-Do not use near-sunset model IDs in shared defaults. Team members can override provider choice, executable paths, jobs, timeout, token budget, and model cost locally in `.apex-ray/config.local.yml`.
+Do not use near-sunset model IDs in shared defaults. Team members can override provider choice, executable paths, jobs, timeout, token budget, reasoning effort, and model cost locally in `.apex-ray/config.local.yml`.
 
 Codex and Claude can be used in the same project by assigning different providers to routing profiles. Keep shared config focused on team review policy; put personal provider/model choices in local config when team members have different CLI subscriptions or credentials.
+
+`effort` maps to Codex CLI `model_reasoning_effort` (`low`, `medium`, `high`, `xhigh`) and Claude Code CLI `--effort` (`low`, `medium`, `high`, `xhigh`, `max`). Configure it at `review.llm.effort` for the default route or inside each profile for routed review/verify calls.
 
 Both providers receive Apex Ray's generated context pack through stdin and must return JSON matching Apex Ray's schema. Claude Code runs with tools disabled for these provider calls; review context comes from Apex Ray, not from letting the provider inspect or edit the repository directly.
 

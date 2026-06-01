@@ -265,6 +265,7 @@ def render_markdown(report: ReviewReport) -> str:
             for route in coverage.routes:
                 profile = f", profile: `{route.profile}`" if route.profile else ""
                 model = f", model: `{route.model}`" if route.model else ""
+                effort = f", effort: `{route.effort}`" if route.effort else ""
                 reason = f", route: `{route.route_reason}`" if route.route_reason else ""
                 actual = f", actual: `{route.actual_total_tokens}` tokens" if route.actual_total_tokens else ""
                 saved = (
@@ -273,7 +274,7 @@ def render_markdown(report: ReviewReport) -> str:
                     else ""
                 )
                 lines.append(
-                    f"  - {route.kind}/{route.provider}, status: `{route.status}`{profile}{model}{reason}, "
+                    f"  - {route.kind}/{route.provider}, status: `{route.status}`{profile}{model}{effort}{reason}, "
                     f"runs: `{route.runs}`, findings: `{route.findings_count}`, "
                     f"input: `{route.input_chars}` chars (`~{route.estimated_input_tokens}` tokens), "
                     f"cache: `{route.cache_hits}` hits / `{route.cache_misses}` misses{actual}{saved}, "
@@ -368,13 +369,14 @@ def render_markdown(report: ReviewReport) -> str:
             cache = _format_run_cache(run)
             profile = f", profile: `{run.profile}`" if run.profile else ""
             model = f", model: `{run.model}`" if run.model else ""
+            effort = f", effort: `{run.effort}`" if run.effort else ""
             route = f", route: `{run.route_reason}`" if run.route_reason else ""
             actual = f", actual: `{run.actual_total_tokens}` tokens" if run.actual_total_tokens else ""
             saved = f", saved: `~{run.estimated_saved_input_tokens}` tokens" if run.estimated_saved_input_tokens else ""
             lines.append(
                 f"- `{run.context_pack_id}` - {run.kind}, {run.provider}, status: `{run.status}`, "
                 f"prompt: `{run.prompt_version or 'unknown'}`, findings: `{run.findings_count}`, "
-                f"cache: `{cache}`{profile}{model}{route}, "
+                f"cache: `{cache}`{profile}{model}{effort}{route}, "
                 f"input: `{run.input_chars}` chars (`~{run.estimated_input_tokens}` tokens), "
                 f"duration: `{run.duration_ms}ms`{actual}{saved}{suffix}"
             )

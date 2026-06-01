@@ -66,6 +66,14 @@ class LLMCoverageMode(StrEnum):
     EXHAUSTIVE = "exhaustive"
 
 
+class LLMReasoningEffort(StrEnum):
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+    XHIGH = "xhigh"
+    MAX = "max"
+
+
 class FindingSeverity(StrEnum):
     CRITICAL = "critical"
     HIGH = "high"
@@ -186,6 +194,7 @@ class MemoryConfig(StrictApexModel):
 class LLMProfile(StrictApexModel):
     provider: LLMProviderName | None = None
     model: str | None = None
+    effort: LLMReasoningEffort | None = None
     timeout_seconds: int | None = Field(default=None, gt=0)
     codex_path: str | None = None
     claude_path: str | None = None
@@ -216,6 +225,7 @@ class LLMConfig(StrictApexModel):
     enabled: bool = False
     provider: LLMProviderName = LLMProviderName.CODEX_CLI
     model: str | None = None
+    effort: LLMReasoningEffort | None = None
     timeout_seconds: int = Field(default=300, gt=0)
     jobs: int = Field(default=1, ge=1)
     max_packs: int = Field(default=64, gt=0)
@@ -362,6 +372,7 @@ class LLMRouteSummary(ApexModel):
     kind: str
     provider: str
     model: str | None = None
+    effort: str | None = None
     profile: str | None = None
     route_reason: str | None = None
     status: str
@@ -741,6 +752,7 @@ class LLMRun(ApexModel):
     kind: str = "review"
     provider: str
     model: str | None = None
+    effort: str | None = None
     profile: str | None = None
     route_reason: str | None = None
     prompt_version: str | None = None

@@ -135,17 +135,18 @@ def _build_llm_coverage(
     )
     coverage_todos = _build_coverage_todos(residual_risks, context_packs)
 
-    routes: dict[tuple[str, str, str | None, str | None, str | None, str], LLMRouteSummary] = {}
+    routes: dict[tuple[str, str, str | None, str | None, str | None, str | None, str], LLMRouteSummary] = {}
     for run in llm_runs:
         cache_hits = _run_cache_hits(run)
         cache_misses = _run_cache_misses(run)
-        key = (run.kind, run.provider, run.model, run.profile, run.route_reason, run.status)
+        key = (run.kind, run.provider, run.model, run.effort, run.profile, run.route_reason, run.status)
         route = routes.get(key)
         if route is None:
             route = LLMRouteSummary(
                 kind=run.kind,
                 provider=run.provider,
                 model=run.model,
+                effort=run.effort,
                 profile=run.profile,
                 route_reason=run.route_reason,
                 status=run.status,

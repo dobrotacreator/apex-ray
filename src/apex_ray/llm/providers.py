@@ -102,6 +102,7 @@ class CodexCLIProvider:
                 schema_path=schema_path,
                 output_path=output_path,
                 model=self.config.model,
+                effort=self.config.effort,
             )
             proc = subprocess.run(
                 command,
@@ -151,6 +152,7 @@ class CodexCLIProvider:
                 schema_path=schema_path,
                 output_path=output_path,
                 model=self.config.model,
+                effort=self.config.effort,
             )
             proc = subprocess.run(
                 command,
@@ -193,6 +195,7 @@ class ClaudeCodeCLIProvider:
                 claude_path=claude_path,
                 schema=finding_response_schema(),
                 model=self.config.model,
+                effort=self.config.effort,
             )
             proc = subprocess.run(
                 command,
@@ -232,6 +235,7 @@ class ClaudeCodeCLIProvider:
                 claude_path=claude_path,
                 schema=verification_batch_response_schema(),
                 model=self.config.model,
+                effort=self.config.effort,
             )
             proc = subprocess.run(
                 command,
