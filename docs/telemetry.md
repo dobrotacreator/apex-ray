@@ -27,6 +27,8 @@ apex-ray telemetry-summary --telemetry-path .apex-ray/telemetry/review-runs.json
 
 Entries include a schema version, run duration, target mode, diff size, finding counts, context-pack counts, coverage ratios, partial severity, residual P0/P1 counts, LLM duration, cache hit/miss counts, failed LLM runs, pack statuses, and model routes.
 
+Telemetry is intentionally metric-oriented. It does not store the full Markdown/JSON review artifact. If a team needs full per-run findings, evidence, skipped-pack details, and source-context snapshots for quality debugging, enable `review.reports.archive: true`.
+
 Token fields are intentionally split:
 
 - `llm_estimated_input_tokens` is Apex Ray's pre-run estimate from the generated prompt text. It is used for context budgeting and remains available even when a provider does not expose usage.

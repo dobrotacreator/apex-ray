@@ -41,6 +41,9 @@ def test_init_config_creates_default_file(tmp_path: Path) -> None:
     assert config.llm.max_input_tokens == 300_000
     assert config.telemetry.enabled is False
     assert config.telemetry.path == ".apex-ray/telemetry/review-runs.jsonl"
+    assert config.reports.archive is False
+    assert config.reports.archive_dir == ".apex-ray/reports/runs"
+    assert config.reports.retention == 20
 
 
 def test_load_config_parses_analyzer_shard_size(tmp_path: Path) -> None:
@@ -68,6 +71,21 @@ def test_load_config_parses_review_telemetry(tmp_path: Path) -> None:
 
     assert config.telemetry.enabled is True
     assert config.telemetry.path == ".apex-ray/telemetry/custom.jsonl"
+
+
+def test_load_config_parses_report_archive(tmp_path: Path) -> None:
+    path = tmp_path / ".apex-ray" / "config.yml"
+    path.parent.mkdir()
+    path.write_text(
+        "review:\n  reports:\n    archive: true\n    archive_dir: .apex-ray/reports/archive\n    retention: 7\n",
+        encoding="utf-8",
+    )
+
+    config, _ = load_config(tmp_path)
+
+    assert config.reports.archive is True
+    assert config.reports.archive_dir == ".apex-ray/reports/archive"
+    assert config.reports.retention == 7
 
 
 def test_load_config_merges_local_override_after_shared_config(tmp_path: Path) -> None:

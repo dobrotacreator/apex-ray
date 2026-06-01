@@ -38,6 +38,10 @@ def default_config_text(base: str = DEFAULT_BASE_BRANCH) -> str:
   telemetry:
     enabled: false
     path: .apex-ray/telemetry/review-runs.jsonl
+  reports:
+    archive: false
+    archive_dir: .apex-ray/reports/runs
+    retention: 20
   gates:
     pre_push:
       enabled: true
@@ -117,6 +121,7 @@ Apex Ray is the project's local diff-aware AI review tool. Use it to create dete
 - Use `.apex-ray/config.yml` for shared team policy and `.apex-ray/config.local.yml` for personal provider/model/cost overrides.
 - Use `.apex-ray/rules/` for stable review rules and `.apex-ray/memory/` for curated team learning.
 - Use `apex-ray telemetry-summary --telemetry-path .apex-ray/telemetry/review-runs.jsonl` when tuning cost, latency, coverage, or model routing.
+- Treat `.apex-ray/reports/*.md/json/html` as latest snapshots. Use `review.reports.archive: true` only when full per-run report history is needed for quality debugging.
 - Use `apex-ray eval capture-prs` and `apex-ray eval run-prs` only for historical PR benchmark/eval work.
 
 ## Outputs
@@ -342,6 +347,7 @@ def _read_review_config(config_path: Path) -> dict[str, Any]:
             "context",
             "llm",
             "telemetry",
+            "reports",
             "gates",
         },
         f"{config_path}:review",
@@ -372,6 +378,7 @@ def _normalize_review_config(review: dict[str, Any]) -> dict[str, Any]:
         "context": review.get("context", {}),
         "llm": review.get("llm", {}),
         "telemetry": review.get("telemetry", {}),
+        "reports": review.get("reports", {}),
         "gates": review.get("gates", {}),
     }
 

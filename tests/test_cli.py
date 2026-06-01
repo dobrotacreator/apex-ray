@@ -182,6 +182,40 @@ def test_review_patch_writes_markdown_and_json(tmp_path: Path, monkeypatch) -> N
     assert "<h1>Apex Ray Review</h1>" in html_output.read_text(encoding="utf-8")
 
 
+def test_review_patch_archives_reports_when_enabled(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    patch = tmp_path / "sample.diff"
+    patch.write_text((FIXTURE_DIR / "sample.diff").read_text(encoding="utf-8"), encoding="utf-8")
+    config = tmp_path / ".apex-ray" / "config.yml"
+    config.parent.mkdir(parents=True)
+    config.write_text(
+        "review:\n  reports:\n    archive: true\n    retention: 5\n",
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "review",
+            "--diff",
+            str(patch),
+            "--output",
+            ".apex-ray/reports/review.md",
+            "--json",
+            ".apex-ray/reports/review.json",
+        ],
+        catch_exceptions=False,
+    )
+
+    archive_dirs = list((tmp_path / ".apex-ray" / "reports" / "runs").iterdir())
+    assert result.exit_code == 0
+    assert "Archived report:" in result.stdout
+    assert len(archive_dirs) == 1
+    assert (archive_dirs[0] / "review.md").exists()
+    assert (archive_dirs[0] / "review.json").exists()
+    assert (archive_dirs[0] / "manifest.json").exists()
+
+
 def test_gate_pre_push_blocks_high_verified_finding(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
     finding = Finding(
@@ -229,6 +263,41 @@ def test_gate_pre_push_blocks_high_verified_finding(tmp_path: Path, monkeypatch)
     assert "Missing tenant predicate" in result.stdout
     assert "After fixing, commit the changes and run git push again." in result.stdout
     assert (tmp_path / ".apex-ray" / "reports" / "pre-push.json").exists()
+
+
+def test_gate_pre_push_archives_reports_when_enabled(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    config = tmp_path / ".apex-ray" / "config.yml"
+    config.parent.mkdir(parents=True)
+    config.write_text(
+        "review:\n  reports:\n    archive: true\n",
+        encoding="utf-8",
+    )
+
+    def fake_run_review_pipeline(*args, **kwargs):
+        config = args[3]
+        return build_report(
+            ProjectProfile(root=str(tmp_path), is_git_repo=True),
+            config,
+            DiffSummary(target_mode=TargetMode.BASE, base="main", stats=DiffStats(files_changed=1)),
+        )
+
+    monkeypatch.setattr("apex_ray.cli.gate.git.repo_root", lambda _cwd: tmp_path)
+    monkeypatch.setattr("apex_ray.cli.gate.git.is_git_repo", lambda _root: True)
+    monkeypatch.setattr(
+        "apex_ray.cli.gate.git.diff_base", lambda _root, _base: "diff --git a/src/orders.ts b/src/orders.ts\n"
+    )
+    monkeypatch.setattr("apex_ray.cli.gate.run_review_pipeline", fake_run_review_pipeline)
+    monkeypatch.setattr("apex_ray.cli.gate.continue_review_from_report", lambda report, **_kwargs: (report, []))
+
+    result = runner.invoke(app, ["gate", "pre-push"], catch_exceptions=False)
+
+    archive_dirs = list((tmp_path / ".apex-ray" / "reports" / "runs").iterdir())
+    assert result.exit_code == 0
+    assert "Archived report:" in result.stdout
+    assert len(archive_dirs) == 1
+    assert (archive_dirs[0] / "pre-push.md").exists()
+    assert (archive_dirs[0] / "pre-push.json").exists()
 
 
 def test_gate_pre_push_does_not_block_unverified_finding_by_default(tmp_path: Path, monkeypatch) -> None:

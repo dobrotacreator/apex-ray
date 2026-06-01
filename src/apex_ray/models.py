@@ -262,6 +262,12 @@ class TelemetryConfig(StrictApexModel):
     path: str = ".apex-ray/telemetry/review-runs.jsonl"
 
 
+class ReportsConfig(StrictApexModel):
+    archive: bool = False
+    archive_dir: str = ".apex-ray/reports/runs"
+    retention: int | None = Field(default=20, ge=1)
+
+
 class PrePushGateConfig(StrictApexModel):
     enabled: bool = True
     min_finding_severity: FindingSeverity | None = FindingSeverity.HIGH
@@ -290,6 +296,7 @@ class ReviewConfig(StrictApexModel):
     context: ContextConfig = Field(default_factory=ContextConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
     telemetry: TelemetryConfig = Field(default_factory=TelemetryConfig)
+    reports: ReportsConfig = Field(default_factory=ReportsConfig)
     gates: GatesConfig = Field(default_factory=GatesConfig)
 
 

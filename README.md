@@ -225,6 +225,8 @@ LLM coverage modes:
 
 Reports include reviewed/unreviewed pack IDs, partial severity, residual P0/P1 packs, skipped reasons, provider failures, cache metrics, provider-reported token usage when available, and suggested continuation commands.
 
+Report paths are latest snapshots by default. Enable `review.reports.archive: true` to also keep full per-run report copies under `.apex-ray/reports/runs/` with configurable retention.
+
 ## Telemetry
 
 Local review telemetry is append-only JSONL. It is intended for tuning cost, latency, model routing, and coverage. Apex Ray records estimated input tokens before provider calls and provider-reported actual token/cost metadata after calls when the configured CLI exposes it:
@@ -251,7 +253,7 @@ See [docs/pr-eval.md](docs/pr-eval.md).
 
 When LLM review is enabled, Apex Ray sends selected diff and context-pack content to the configured local CLI provider. Review that provider's privacy and retention policy before using Apex Ray on private code.
 
-Caches and telemetry are local files. They may include repository paths, model names, finding counts, coverage metadata, and token estimates. Keep them ignored unless a team intentionally curates a shared artifact.
+Caches, telemetry, and archived reports are local files. They may include repository paths, model names, finding counts, coverage metadata, token estimates, findings, and source snippets. Keep them ignored unless a team intentionally curates a shared artifact.
 
 ## Development
 
