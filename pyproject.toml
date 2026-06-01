@@ -92,6 +92,7 @@ pythonpath = ["src"]
 line-length = 120
 target-version = "py314"
 src = ["src", "tests"]
+extend-exclude = ["release-please-config.json"]
 
 [tool.ruff.lint]
 select = [

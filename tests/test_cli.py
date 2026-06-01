@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 from typer.testing import CliRunner
 
+from apex_ray import __version__
 from apex_ray.cli import app
 from apex_ray.llm.cache import REVIEW_PROMPT_VERSION
 from apex_ray.models import (
@@ -34,7 +35,7 @@ def test_version_option() -> None:
     result = runner.invoke(app, ["--version"], catch_exceptions=False)
 
     assert result.exit_code == 0
-    assert "0.1.0" in result.stdout
+    assert result.stdout.strip() == __version__
 
 
 def test_init_creates_config(tmp_path: Path, monkeypatch) -> None:
