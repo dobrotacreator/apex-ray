@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.1.1](https://github.com/dobrotacreator/apex-ray/compare/v0.1.0...v0.1.1) (2026-06-01)
+
+
+### Features
+
+* **telemetry:** record llm usage and archive reports ([#15](https://github.com/dobrotacreator/apex-ray/issues/15)) ([1f1be19](https://github.com/dobrotacreator/apex-ray/commit/1f1be19cce9bb75d54b7c001bbb20b35f191b7fa))
+
+
+### Infrastructure
+
+* **release:** allow manual PyPI publish ([#13](https://github.com/dobrotacreator/apex-ray/issues/13)) ([f946516](https://github.com/dobrotacreator/apex-ray/commit/f9465167fc682a3ec29b1654830935d5dffc57ad))
+
 ## 0.1.0 (2026-05-31)
 
 

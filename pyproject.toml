@@ -1,6 +1,6 @@
 [project]
 name = "apex-ray"
-version = "0.1.0"
+version = "0.1.1"
 description = "Local CLI-first AI code review for TypeScript and JavaScript projects."
 readme = "README.md"
 requires-python = ">=3.14"
