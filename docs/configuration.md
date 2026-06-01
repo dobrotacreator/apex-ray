@@ -54,6 +54,8 @@ review:
       max_stdout_findings: 10
       stdout_format: agent
       auto_followup_p0: true
+      progress: auto
+      progress_interval_seconds: 5
 ```
 
 ## Local Override Example
@@ -121,8 +123,16 @@ Default behavior:
 - block on verified `high` or `critical` findings;
 - block on failed LLM coverage quality gate;
 - block on `critical` partial coverage;
-- print a compact, agent-readable summary to stdout.
+- print live progress to stderr and a compact, agent-readable summary to stdout.
 
 Set `review.gates.pre_push.enabled: false` in local config to skip the hook gate. Prefer local config for personal cost/model/provider differences instead of editing the shared hook command.
 
 Set `review.llm.enabled: false` in local config when a machine should keep normal review and pre-push gate runs deterministic and offline.
+
+`review.gates.pre_push.progress` controls live hook output:
+
+- `auto`: show progress for local runs and suppress it when `CI` is set.
+- `always`: always print progress to stderr.
+- `never`: suppress progress.
+
+`progress_interval_seconds` throttles repeated per-pack counters while still forcing major stage messages and final counters.

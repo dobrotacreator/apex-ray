@@ -74,6 +74,12 @@ class LLMReasoningEffort(StrEnum):
     MAX = "max"
 
 
+class ProgressMode(StrEnum):
+    AUTO = "auto"
+    ALWAYS = "always"
+    NEVER = "never"
+
+
 class FindingSeverity(StrEnum):
     CRITICAL = "critical"
     HIGH = "high"
@@ -277,6 +283,8 @@ class PrePushGateConfig(StrictApexModel):
     max_stdout_findings: int = Field(default=10, ge=0)
     stdout_format: Literal["agent", "compact"] = "agent"
     auto_followup_p0: bool = True
+    progress: ProgressMode = ProgressMode.AUTO
+    progress_interval_seconds: float = Field(default=5.0, ge=0.0)
 
 
 class GatesConfig(StrictApexModel):

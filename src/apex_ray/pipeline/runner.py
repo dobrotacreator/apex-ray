@@ -25,6 +25,7 @@ from apex_ray.pipeline.selection import (
     plan_llm_context_selection,
     select_continuation_context_packs,
 )
+from apex_ray.progress import NoopProgress, ProgressSink
 from apex_ray.report import build_report
 
 
@@ -36,15 +37,26 @@ def run_review_pipeline(
     base: str | None = None,
     config_path: Path | None = None,
     provider: LLMProvider | None = None,
+    progress: ProgressSink | None = None,
 ) -> ReviewReport:
+    progress = progress or NoopProgress()
+    progress.event("parsing diff", force=True)
     diff_summary = parse_unified_diff(diff_text, target_mode=target_mode, base=base)
     diff_summary = classify_diff(diff_summary, config.ignore)
     apply_language_filter(diff_summary, config.languages)
+    progress.event(
+        f"parsed diff: {diff_summary.stats.files_changed} file(s), "
+        f"+{diff_summary.stats.additions}/-{diff_summary.stats.deletions}, "
+        f"{diff_summary.stats.ignored_files} ignored",
+        force=True,
+    )
 
+    progress.event("discovering project", force=True)
     project = discover_project(repo_root, ignored_patterns=config.ignore, config_path=config_path)
     analyzer_results = []
     fallback_reasons_by_path: dict[str, str] = {}
     try:
+        progress.event(f"running TypeScript analyzer on {len(diff_summary.files)} changed file(s)", force=True)
         ts_result = run_typescript_analyzer(repo_root, diff_summary.files, config.analyzer)
         if ts_result:
             analyzer_results.append(ts_result)
@@ -52,12 +64,21 @@ def run_review_pipeline(
                 fallback_reasons_by_path[failed_path] = (
                     "TypeScript analyzer shard failed; using diff-only fallback context."
                 )
+            progress.event(
+                f"TypeScript analyzer completed: {sum(len(file.symbols) for file in ts_result.files)} symbol(s), "
+                f"{len(ts_result.failed_files)} failed file(s)",
+                force=True,
+            )
+        else:
+            progress.event("TypeScript analyzer skipped", force=True)
     except AnalyzerError as exc:
         warning = str(exc)
         diff_summary.warnings.append(warning)
         for changed_file in diff_summary.files:
             fallback_reasons_by_path[changed_file.path] = f"TypeScript analyzer unavailable: {warning}"
+        progress.event(f"TypeScript analyzer unavailable: {warning}", force=True)
 
+    progress.event("building context packs", force=True)
     context_packs = build_context_packs(
         analyzer_results,
         diff_summary.files,
@@ -65,11 +86,13 @@ def run_review_pipeline(
         repo_root=repo_root,
         fallback_reasons_by_path=fallback_reasons_by_path,
     )
+    progress.event(f"built {len(context_packs)} context pack(s)", force=True)
     findings = []
     verifications = []
     llm_runs = []
     llm_selection = None
     if config.llm.enabled:
+        progress.event("planning LLM context selection", force=True)
         llm_selection = plan_llm_context_selection(
             context_packs,
             diff_summary.files,
@@ -85,6 +108,12 @@ def run_review_pipeline(
         deep_context_packs = [pack for pack in context_packs if pack.id in deep_selected_ids]
         shallow_context_packs = [pack for pack in context_packs if pack.id in shallow_selected_ids]
         llm_context_packs = [pack for pack in context_packs if pack.id in selected_ids]
+        progress.event(
+            f"selected {len(llm_context_packs)} LLM context pack(s): "
+            f"{len(deep_context_packs)} deep, {len(shallow_context_packs)} shallow, "
+            f"{len(context_packs) - len(llm_context_packs)} unreviewed",
+            force=True,
+        )
         capped_pack_ids = [
             pack_id
             for pack_id, reason in llm_selection.skipped_context_pack_reasons.items()
@@ -125,6 +154,7 @@ def run_review_pipeline(
                     repo_root,
                     provider=provider,
                     review_depth="shallow",
+                    progress=progress,
                 )
                 deep_findings, deep_runs = review_context_packs(
                     deep_context_packs,
@@ -132,22 +162,28 @@ def run_review_pipeline(
                     repo_root,
                     provider=provider,
                     review_depth="deep",
+                    progress=progress,
                 )
                 findings = consolidate_findings([*shallow_findings, *deep_findings])
                 llm_runs = [*shallow_runs, *deep_runs]
                 if config.llm.verify and findings:
+                    progress.event(f"verifying {len(findings)} finding(s)", force=True)
                     findings, verifications, verifier_runs = verify_findings(
                         findings,
                         context_packs,
                         config.llm,
                         repo_root,
                         provider=provider,
+                        progress=progress,
                     )
                     llm_runs.extend(verifier_runs)
                 findings = consolidate_findings(findings)
             except LLMProviderError:
                 raise
+    else:
+        progress.event("LLM review disabled", force=True)
 
+    progress.event("building report", force=True)
     return build_report(
         project,
         config,
@@ -172,7 +208,9 @@ def continue_review_from_report(
     only_unreviewed: bool = True,
     review_depth: Literal["deep", "shallow"] = "deep",
     provider: LLMProvider | None = None,
+    progress: ProgressSink | None = None,
 ) -> tuple[ReviewReport, list[ContextPack]]:
+    progress = progress or NoopProgress()
     effective_config = config.model_copy(deep=True) if config is not None else report.config.model_copy(deep=True)
     root = repo_root or Path(report.project.root)
     selected_packs = select_continuation_context_packs(
@@ -182,6 +220,7 @@ def continue_review_from_report(
         pack_ids=pack_ids,
         only_unreviewed=only_unreviewed,
     )
+    progress.event(f"selected {len(selected_packs)} continuation context pack(s)", force=True)
     if not selected_packs:
         return (
             build_report(
@@ -224,6 +263,7 @@ def continue_review_from_report(
         root,
         provider=provider,
         review_depth=review_depth,
+        progress=progress,
     )
     llm_runs = [*report.llm_runs, *review_runs]
     verifications = list(report.verifications)
@@ -235,6 +275,7 @@ def continue_review_from_report(
             effective_config.llm,
             root,
             provider=provider,
+            progress=progress,
         )
         verifications.extend(new_verifications)
         llm_runs.extend(verifier_runs)
