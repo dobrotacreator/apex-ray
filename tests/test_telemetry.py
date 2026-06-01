@@ -31,6 +31,11 @@ def test_review_telemetry_round_trip(tmp_path: Path) -> None:
                 duration_ms=9,
                 input_chars=400,
                 estimated_input_tokens=100,
+                actual_input_tokens=80,
+                actual_output_tokens=20,
+                actual_total_tokens=100,
+                estimated_saved_input_tokens=25,
+                usage_source="unit",
                 cache_hits=1,
             )
         ],
@@ -54,9 +59,13 @@ def test_review_telemetry_round_trip(tmp_path: Path) -> None:
     assert entry["duration_ms"] == 25
     assert entry["files_changed"] == 1
     assert entry["llm_estimated_input_tokens"] == 100
+    assert entry["llm_actual_total_tokens"] == 100
+    assert entry["llm_estimated_saved_input_tokens"] == 25
+    assert entry["llm_usage_sources"] == ["unit"]
     assert entry["llm_cache_hits"] == 1
     assert entry["pack_status_counts"] == {"reviewed_deep": 1}
     assert "Latest LLM tokens: `~100`" in summary
+    assert "Latest actual LLM tokens: `100`" in summary
 
 
 def test_review_telemetry_jsonl_is_compact(tmp_path: Path) -> None:

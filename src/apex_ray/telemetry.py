@@ -69,6 +69,16 @@ def append_review_telemetry(
         "llm_duration_ms": coverage.total_duration_ms,
         "llm_input_chars": coverage.input_chars,
         "llm_estimated_input_tokens": coverage.estimated_input_tokens,
+        "llm_actual_input_tokens": coverage.actual_input_tokens,
+        "llm_actual_cached_input_tokens": coverage.actual_cached_input_tokens,
+        "llm_actual_output_tokens": coverage.actual_output_tokens,
+        "llm_actual_reasoning_output_tokens": coverage.actual_reasoning_output_tokens,
+        "llm_actual_total_tokens": coverage.actual_total_tokens,
+        "llm_actual_cache_read_input_tokens": coverage.actual_cache_read_input_tokens,
+        "llm_actual_cache_creation_input_tokens": coverage.actual_cache_creation_input_tokens,
+        "llm_estimated_saved_input_tokens": coverage.estimated_saved_input_tokens,
+        "llm_estimated_cost_usd": coverage.estimated_cost_usd,
+        "llm_usage_sources": coverage.usage_sources,
         "llm_cache_hits": coverage.cache_hits,
         "llm_cache_misses": coverage.cache_misses,
         "llm_run_status_counts": coverage.run_status_counts,
@@ -114,6 +124,8 @@ def render_review_telemetry_summary(entries: list[dict[str, Any]]) -> str:
 
     latest = entries[-1]
     tokens = sum(_int(entry.get("llm_estimated_input_tokens")) for entry in entries)
+    actual_tokens = sum(_int(entry.get("llm_actual_total_tokens")) for entry in entries)
+    saved_tokens = sum(_int(entry.get("llm_estimated_saved_input_tokens")) for entry in entries)
     duration_ms = sum(_int(entry.get("duration_ms")) for entry in entries)
     llm_duration_ms = sum(_int(entry.get("llm_duration_ms")) for entry in entries)
     failed_llm_runs = sum(
@@ -131,7 +143,10 @@ def render_review_telemetry_summary(entries: list[dict[str, Any]]) -> str:
             f"- Latest coverage: `{_float(latest.get('coverage_ratio')):.1%}`",
             f"- Latest high-risk coverage: `{_float(latest.get('high_risk_coverage_ratio')):.1%}`",
             f"- Latest LLM tokens: `~{latest.get('llm_estimated_input_tokens', 0)}`",
+            f"- Latest actual LLM tokens: `{latest.get('llm_actual_total_tokens', 0)}`",
             f"- Total LLM tokens: `~{tokens}`",
+            f"- Total actual LLM tokens: `{actual_tokens}`",
+            f"- Estimated saved input tokens: `~{saved_tokens}`",
             f"- Average LLM tokens/run: `~{tokens // len(entries)}`",
             f"- Total wall time: `{duration_ms}ms`",
             f"- Average wall time/run: `{duration_ms // len(entries)}ms`",
@@ -149,7 +164,8 @@ def render_review_telemetry_summary(entries: list[dict[str, Any]]) -> str:
             f"target `{entry.get('target_mode')}`, findings `{entry.get('findings_count', 0)}`, "
             f"coverage `{_float(entry.get('coverage_ratio')):.1%}`, "
             f"partial `{entry.get('partial_severity', 'none')}`, "
-            f"tokens `~{entry.get('llm_estimated_input_tokens', 0)}`, "
+            f"tokens `~{entry.get('llm_estimated_input_tokens', 0)}`"
+            f"/`{entry.get('llm_actual_total_tokens', 0)}` actual, "
             f"duration `{entry.get('duration_ms', 0)}ms`"
         )
     lines.append("")

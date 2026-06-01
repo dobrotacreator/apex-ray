@@ -370,6 +370,16 @@ class LLMRouteSummary(ApexModel):
     duration_ms: int = 0
     input_chars: int = 0
     estimated_input_tokens: int = 0
+    actual_input_tokens: int = 0
+    actual_cached_input_tokens: int = 0
+    actual_output_tokens: int = 0
+    actual_reasoning_output_tokens: int = 0
+    actual_total_tokens: int = 0
+    actual_cache_read_input_tokens: int = 0
+    actual_cache_creation_input_tokens: int = 0
+    estimated_saved_input_tokens: int = 0
+    estimated_cost_usd: float | None = None
+    usage_sources: list[str] = Field(default_factory=list)
     cache_hits: int = 0
     cache_misses: int = 0
     errors: int = 0
@@ -525,6 +535,16 @@ class LLMCoverageSummary(ApexModel):
     total_duration_ms: int = 0
     input_chars: int = 0
     estimated_input_tokens: int = 0
+    actual_input_tokens: int = 0
+    actual_cached_input_tokens: int = 0
+    actual_output_tokens: int = 0
+    actual_reasoning_output_tokens: int = 0
+    actual_total_tokens: int = 0
+    actual_cache_read_input_tokens: int = 0
+    actual_cache_creation_input_tokens: int = 0
+    estimated_saved_input_tokens: int = 0
+    estimated_cost_usd: float | None = None
+    usage_sources: list[str] = Field(default_factory=list)
     cache_hits: int = 0
     cache_misses: int = 0
     routes: list[LLMRouteSummary] = Field(default_factory=list)
@@ -695,6 +715,28 @@ class FindingVerification(ApexModel):
     reason: str
 
 
+class LLMUsage(ApexModel):
+    source: str
+    input_tokens: int = 0
+    cached_input_tokens: int = 0
+    output_tokens: int = 0
+    reasoning_output_tokens: int = 0
+    total_tokens: int = 0
+    cache_read_input_tokens: int = 0
+    cache_creation_input_tokens: int = 0
+    estimated_cost_usd: float | None = None
+
+
+class LLMReviewResult(ApexModel):
+    findings: list[Finding] = Field(default_factory=list)
+    usage: LLMUsage | None = None
+
+
+class LLMVerificationResult(ApexModel):
+    verifications: list[FindingVerification] = Field(default_factory=list)
+    usage: LLMUsage | None = None
+
+
 class LLMRun(ApexModel):
     kind: str = "review"
     provider: str
@@ -707,6 +749,16 @@ class LLMRun(ApexModel):
     duration_ms: int
     input_chars: int = 0
     estimated_input_tokens: int = 0
+    actual_input_tokens: int = 0
+    actual_cached_input_tokens: int = 0
+    actual_output_tokens: int = 0
+    actual_reasoning_output_tokens: int = 0
+    actual_total_tokens: int = 0
+    actual_cache_read_input_tokens: int = 0
+    actual_cache_creation_input_tokens: int = 0
+    estimated_saved_input_tokens: int = 0
+    estimated_cost_usd: float | None = None
+    usage_source: str | None = None
     findings_count: int = 0
     cache_hit: bool = False
     cache_hits: int = 0

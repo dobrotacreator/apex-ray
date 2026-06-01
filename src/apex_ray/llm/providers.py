@@ -20,6 +20,7 @@ from apex_ray.llm.responses import (
     parse_verification_batch_response,
     verification_batch_response_schema,
 )
+from apex_ray.llm.usage import parse_claude_usage_from_json, parse_codex_usage_from_jsonl
 from apex_ray.models import (
     ContextPack,
     Finding,
@@ -27,6 +28,8 @@ from apex_ray.models import (
     FindingVerification,
     LLMConfig,
     LLMProviderName,
+    LLMReviewResult,
+    LLMVerificationResult,
 )
 
 
@@ -77,6 +80,9 @@ class CodexCLIProvider:
         self.config = config
 
     def review_context_pack(self, pack: ContextPack, repo_root: Path) -> list[Finding]:
+        return self.review_context_pack_with_usage(pack, repo_root).findings
+
+    def review_context_pack_with_usage(self, pack: ContextPack, repo_root: Path) -> LLMReviewResult:
         codex_path = resolve_codex_path(self.config.codex_path, repo_root)
         prompt = (
             build_shallow_review_prompt(pack) if self.config.review_depth == "shallow" else build_review_prompt(pack)
@@ -113,14 +119,20 @@ class CodexCLIProvider:
             if not output_path.exists():
                 raise LLMProviderError("Codex CLI did not write an output message.")
 
-            return parse_finding_response(output_path.read_text(encoding="utf-8"), pack.id).findings
+            response = parse_finding_response(output_path.read_text(encoding="utf-8"), pack.id)
+            return LLMReviewResult(findings=response.findings, usage=parse_codex_usage_from_jsonl(proc.stdout))
 
     def verify_finding(self, finding: Finding, pack: ContextPack, repo_root: Path) -> FindingVerification:
         return self.verify_findings([finding], pack, repo_root)[0]
 
     def verify_findings(self, findings: list[Finding], pack: ContextPack, repo_root: Path) -> list[FindingVerification]:
+        return self.verify_findings_with_usage(findings, pack, repo_root).verifications
+
+    def verify_findings_with_usage(
+        self, findings: list[Finding], pack: ContextPack, repo_root: Path
+    ) -> LLMVerificationResult:
         if not findings:
-            return []
+            return LLMVerificationResult()
 
         codex_path = resolve_codex_path(self.config.codex_path, repo_root)
         prompt = build_verifier_batch_prompt(findings, pack)
@@ -156,7 +168,10 @@ class CodexCLIProvider:
             if not output_path.exists():
                 raise LLMProviderError("Codex CLI verifier did not write an output message.")
 
-            return parse_verification_batch_response(output_path.read_text(encoding="utf-8"), findings)
+            return LLMVerificationResult(
+                verifications=parse_verification_batch_response(output_path.read_text(encoding="utf-8"), findings),
+                usage=parse_codex_usage_from_jsonl(proc.stdout),
+            )
 
 
 class ClaudeCodeCLIProvider:
@@ -164,6 +179,9 @@ class ClaudeCodeCLIProvider:
         self.config = config
 
     def review_context_pack(self, pack: ContextPack, repo_root: Path) -> list[Finding]:
+        return self.review_context_pack_with_usage(pack, repo_root).findings
+
+    def review_context_pack_with_usage(self, pack: ContextPack, repo_root: Path) -> LLMReviewResult:
         claude_path = resolve_claude_path(self.config.claude_path, repo_root)
         prompt = (
             build_shallow_review_prompt(pack) if self.config.review_depth == "shallow" else build_review_prompt(pack)
@@ -190,14 +208,20 @@ class ClaudeCodeCLIProvider:
                 details = proc.stderr.strip() or proc.stdout.strip()
                 raise LLMProviderError(f"Claude Code CLI failed with exit {proc.returncode}: {details}")
             response_text = claude_result_text(proc.stdout)
-            return parse_finding_response(response_text, pack.id).findings
+            response = parse_finding_response(response_text, pack.id)
+            return LLMReviewResult(findings=response.findings, usage=parse_claude_usage_from_json(proc.stdout))
 
     def verify_finding(self, finding: Finding, pack: ContextPack, repo_root: Path) -> FindingVerification:
         return self.verify_findings([finding], pack, repo_root)[0]
 
     def verify_findings(self, findings: list[Finding], pack: ContextPack, repo_root: Path) -> list[FindingVerification]:
+        return self.verify_findings_with_usage(findings, pack, repo_root).verifications
+
+    def verify_findings_with_usage(
+        self, findings: list[Finding], pack: ContextPack, repo_root: Path
+    ) -> LLMVerificationResult:
         if not findings:
-            return []
+            return LLMVerificationResult()
 
         claude_path = resolve_claude_path(self.config.claude_path, repo_root)
         prompt = build_verifier_batch_prompt(findings, pack)
@@ -223,7 +247,10 @@ class ClaudeCodeCLIProvider:
                 details = proc.stderr.strip() or proc.stdout.strip()
                 raise LLMProviderError(f"Claude Code CLI verifier failed with exit {proc.returncode}: {details}")
             response_text = claude_result_text(proc.stdout)
-            return parse_verification_batch_response(response_text, findings)
+            return LLMVerificationResult(
+                verifications=parse_verification_batch_response(response_text, findings),
+                usage=parse_claude_usage_from_json(proc.stdout),
+            )
 
 
 def provider_from_config(config: LLMConfig) -> LLMProvider:
@@ -234,6 +261,34 @@ def provider_from_config(config: LLMConfig) -> LLMProvider:
     if config.provider == LLMProviderName.CLAUDE_CODE_CLI:
         return ClaudeCodeCLIProvider(config)
     raise LLMProviderError(f"Unsupported LLM provider: {config.provider}")
+
+
+def review_context_pack_with_provider(
+    provider: LLMProvider,
+    pack: ContextPack,
+    repo_root: Path,
+) -> LLMReviewResult:
+    batch_reviewer = getattr(provider, "review_context_pack_with_usage", None)
+    if callable(batch_reviewer):
+        reviewer = cast(Callable[[ContextPack, Path], LLMReviewResult], batch_reviewer)
+        return reviewer(pack, repo_root)
+    return LLMReviewResult(findings=provider.review_context_pack(pack, repo_root))
+
+
+def verify_findings_with_provider_result(
+    provider: LLMProvider,
+    findings: list[Finding],
+    pack: ContextPack,
+    repo_root: Path,
+) -> LLMVerificationResult:
+    usage_verifier = getattr(provider, "verify_findings_with_usage", None)
+    if callable(usage_verifier):
+        verifier = cast(
+            Callable[[list[Finding], ContextPack, Path], LLMVerificationResult],
+            usage_verifier,
+        )
+        return verifier(findings, pack, repo_root)
+    return LLMVerificationResult(verifications=verify_findings_with_provider(provider, findings, pack, repo_root))
 
 
 def verify_findings_with_provider(

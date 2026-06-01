@@ -21,9 +21,10 @@ from apex_ray.llm.findings import (
 from apex_ray.llm.providers import (
     LLMProvider,
     provider_from_config,
+    review_context_pack_with_provider,
 )
 from apex_ray.llm.providers import (
-    verify_findings_with_provider as _verify_findings_with_provider,
+    verify_findings_with_provider_result as _verify_findings_with_provider_result,
 )
 from apex_ray.llm.routing import (
     fallback_review_config_after_error as _fallback_review_config_after_error,
@@ -36,6 +37,9 @@ from apex_ray.llm.routing import (
 )
 from apex_ray.llm.usage import (
     estimate_tokens as _estimate_tokens,
+)
+from apex_ray.llm.usage import (
+    llm_run_usage_fields as _llm_run_usage_fields,
 )
 from apex_ray.llm.usage import (
     review_input_chars as _review_input_chars,
@@ -83,6 +87,7 @@ def review_context_packs(
             cache_key = review_cache_key(pack, pack_config) if cache else None
             cache_hit = False
             provider_called = False
+            usage = None
             try:
                 cached_findings = None
                 if cache and cache_key and not base_config.refresh_cache:
@@ -90,7 +95,9 @@ def review_context_packs(
                     cache_hit = cached_findings is not None
                 if cached_findings is None:
                     provider_called = True
-                    cached_findings = llm_provider.review_context_pack(pack, repo_root)
+                    result = review_context_pack_with_provider(llm_provider, pack, repo_root)
+                    cached_findings = result.findings
+                    usage = result.usage
                     if cache and cache_key:
                         cache.write_review(cache_key, pack_config, cached_findings)
                 pack_findings = filter_findings_for_context_pack(cached_findings, pack)
@@ -143,6 +150,10 @@ def review_context_packs(
                     cache_hits=1 if cache_hit else 0,
                     cache_misses=1 if cache_key and not cache_hit else 0,
                     cache_key=cache_key,
+                    estimated_saved_input_tokens=(
+                        _estimate_tokens(_review_input_chars(pack, review_depth=review_depth)) if cache_hit else 0
+                    ),
+                    **_llm_run_usage_fields(usage),
                 )
             )
             return pack_findings, runs
@@ -207,6 +218,7 @@ def verify_findings(
         cache_hit = False
         cache_hits = 0
         cache_misses = 0
+        usage = None
         pack_verifications: dict[int, FindingVerification] = {}
         misses: list[tuple[int, Finding]] = []
         status = "ok"
@@ -228,7 +240,9 @@ def verify_findings(
                 cache_misses = len(misses)
             if misses:
                 missed_findings = [finding for _, finding in misses]
-                provider_verifications = _verify_findings_with_provider(llm_provider, missed_findings, pack, repo_root)
+                result = _verify_findings_with_provider_result(llm_provider, missed_findings, pack, repo_root)
+                provider_verifications = result.verifications
+                usage = result.usage
                 if len(provider_verifications) != len(missed_findings):
                     raise LLMProviderError(
                         f"Verifier returned {len(provider_verifications)} decisions for {len(missed_findings)} findings."
@@ -271,6 +285,8 @@ def verify_findings(
                 cache_misses=cache_misses,
                 cache_key=next(iter(cache_keys.values())) if len(cache_keys) == 1 else None,
                 error=error,
+                estimated_saved_input_tokens=_estimated_verification_saved_tokens(indexed_findings, misses, pack),
+                **_llm_run_usage_fields(usage),
             ),
         )
 
@@ -302,3 +318,13 @@ def verify_findings(
 
 def _elapsed_ms(start: float) -> int:
     return int((time.monotonic() - start) * 1000)
+
+
+def _estimated_verification_saved_tokens(
+    indexed_findings: list[tuple[int, Finding]],
+    misses: list[tuple[int, Finding]],
+    pack: ContextPack,
+) -> int:
+    missed_indexes = {index for index, _ in misses}
+    cached_findings = [finding for index, finding in indexed_findings if index not in missed_indexes]
+    return _estimate_tokens(_verification_batch_input_chars(cached_findings, pack)) if cached_findings else 0

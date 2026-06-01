@@ -16,6 +16,7 @@ def build_codex_command(
         "--ask-for-approval",
         "never",
         "exec",
+        "--json",
         "--ephemeral",
         "--sandbox",
         "read-only",

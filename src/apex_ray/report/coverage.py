@@ -2,6 +2,7 @@ from collections import Counter
 from shlex import quote
 from typing import Literal
 
+from apex_ray.llm.usage import aggregate_actual_usage
 from apex_ray.models import (
     ContextPack,
     FileKind,
@@ -155,10 +156,23 @@ def _build_llm_coverage(
         route.duration_ms += run.duration_ms
         route.input_chars += run.input_chars
         route.estimated_input_tokens += run.estimated_input_tokens
+        route.actual_input_tokens += run.actual_input_tokens
+        route.actual_cached_input_tokens += run.actual_cached_input_tokens
+        route.actual_output_tokens += run.actual_output_tokens
+        route.actual_reasoning_output_tokens += run.actual_reasoning_output_tokens
+        route.actual_total_tokens += run.actual_total_tokens
+        route.actual_cache_read_input_tokens += run.actual_cache_read_input_tokens
+        route.actual_cache_creation_input_tokens += run.actual_cache_creation_input_tokens
+        route.estimated_saved_input_tokens += run.estimated_saved_input_tokens
+        if run.estimated_cost_usd is not None:
+            route.estimated_cost_usd = round((route.estimated_cost_usd or 0.0) + run.estimated_cost_usd, 6)
+        if run.usage_source and run.usage_source not in route.usage_sources:
+            route.usage_sources.append(run.usage_source)
         route.cache_hits += cache_hits
         route.cache_misses += cache_misses
         route.errors += 1 if run.error else 0
 
+    usage_totals = aggregate_actual_usage(llm_runs)
     return LLMCoverageSummary(
         enabled=config.llm.enabled,
         verify_enabled=config.llm.verify,
@@ -215,6 +229,7 @@ def _build_llm_coverage(
         total_duration_ms=sum(run.duration_ms for run in llm_runs),
         input_chars=sum(run.input_chars for run in llm_runs),
         estimated_input_tokens=sum(run.estimated_input_tokens for run in llm_runs),
+        **usage_totals,
         cache_hits=sum(_run_cache_hits(run) for run in llm_runs),
         cache_misses=sum(_run_cache_misses(run) for run in llm_runs),
         routes=sorted(

@@ -220,11 +220,11 @@ LLM coverage modes:
 - `balanced`: deep review for high-value packs plus shallow breadth under token budget.
 - `exhaustive`: review every reviewable pack when budget allows.
 
-Reports include reviewed/unreviewed pack IDs, partial severity, residual P0/P1 packs, skipped reasons, provider failures, cache metrics, and suggested continuation commands.
+Reports include reviewed/unreviewed pack IDs, partial severity, residual P0/P1 packs, skipped reasons, provider failures, cache metrics, provider-reported token usage when available, and suggested continuation commands.
 
 ## Telemetry
 
-Local review telemetry is append-only JSONL. It is intended for tuning cost, latency, model routing, and coverage:
+Local review telemetry is append-only JSONL. It is intended for tuning cost, latency, model routing, and coverage. Apex Ray records estimated input tokens before provider calls and provider-reported actual token/cost metadata after calls when the configured CLI exposes it:
 
 ```bash
 apex-ray review --worktree --llm --telemetry

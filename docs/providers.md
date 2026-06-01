@@ -52,3 +52,5 @@ Do not use near-sunset model IDs in shared defaults. Team members can override p
 Codex and Claude can be used in the same project by assigning different providers to routing profiles. Keep shared config focused on team review policy; put personal provider/model choices in local config when team members have different CLI subscriptions or credentials.
 
 Both providers receive Apex Ray's generated context pack through stdin and must return JSON matching Apex Ray's schema. Claude Code runs with tools disabled for these provider calls; review context comes from Apex Ray, not from letting the provider inspect or edit the repository directly.
+
+Apex Ray records provider-reported usage when the CLI exposes it. Claude Code JSON output can include token usage and estimated cost metadata. Codex CLI JSON events can include token count events in supported versions. If provider usage is absent, reports and telemetry still include Apex Ray's estimated input-token counts.
