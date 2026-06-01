@@ -17,7 +17,7 @@
         {
           "type": "toml",
           "path": "uv.lock",
-          "jsonpath": "$.package[?(@.name=='apex-ray')].version"
+          "jsonpath": "$.package[?(@.name.value=='apex-ray')].version"
         }
       ],
       "changelog-sections": [
