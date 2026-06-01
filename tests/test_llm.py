@@ -289,6 +289,27 @@ def test_review_context_packs_can_run_without_shared_provider_in_parallel() -> N
     assert [run.context_pack_id for run in runs] == [first.id, second.id]
 
 
+def test_review_context_packs_reports_parallel_progress_without_reordering_runs() -> None:
+    class Recorder:
+        def __init__(self) -> None:
+            self.messages: list[str] = []
+
+        def event(self, message: str, *, key: str | None = None, force: bool = False) -> None:
+            self.messages.append(message)
+
+    progress = Recorder()
+    config = LLMConfig(provider=LLMProviderName.FAKE, jobs=2)
+    first = make_pack()
+    second = make_pack().model_copy(update={"id": "src/cart.ts#other:1"})
+
+    findings, runs = review_context_packs([first, second], config, Path("."), progress=progress)
+
+    assert findings == []
+    assert [run.context_pack_id for run in runs] == [first.id, second.id]
+    assert "review deep: 2 context pack(s), jobs=2" in progress.messages
+    assert any(message.startswith("review deep 2/2 done") for message in progress.messages)
+
+
 def test_filter_findings_for_context_pack_allows_reference_files() -> None:
     pack = make_pack().model_copy(
         update={

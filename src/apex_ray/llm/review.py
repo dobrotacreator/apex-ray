@@ -1,5 +1,5 @@
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Literal
 
@@ -55,6 +55,7 @@ from apex_ray.models import (
     LLMConfig,
     LLMRun,
 )
+from apex_ray.progress import NoopProgress, ProgressSink
 
 
 def review_context_packs(
@@ -64,10 +65,12 @@ def review_context_packs(
     provider: LLMProvider | None = None,
     *,
     review_depth: Literal["deep", "shallow"] = "deep",
+    progress: ProgressSink | None = None,
 ) -> tuple[list[Finding], list[LLMRun]]:
     if not packs:
         return [], []
 
+    progress = progress or NoopProgress()
     base_config = config.model_copy(deep=True)
     base_config.review_depth = review_depth
     cache = cache_for_config(repo_root, config)
@@ -162,13 +165,43 @@ def review_context_packs(
 
         return [], runs
 
+    progress.event(
+        f"review {review_depth}: {len(packs)} context pack(s), jobs={_effective_jobs(config.jobs, len(packs))}",
+        force=True,
+    )
     if provider is None and config.jobs > 1 and len(packs) > 1:
+        results: list[tuple[list[Finding], list[LLMRun]] | None] = [None] * len(packs)
         with ThreadPoolExecutor(max_workers=config.jobs) as executor:
-            results = [future.result() for future in [executor.submit(review_pack, pack) for pack in packs]]
+            futures = {executor.submit(review_pack, pack): index for index, pack in enumerate(packs)}
+            completed = 0
+            for future in as_completed(futures):
+                index = futures[future]
+                result = future.result()
+                results[index] = result
+                completed += 1
+                progress.event(
+                    _review_progress_message(review_depth, completed, len(packs), packs[index], result[1]),
+                    key=f"review:{review_depth}",
+                    force=completed == len(packs),
+                )
+        completed_results = [result for result in results if result is not None]
     else:
-        results = [review_pack(pack) for pack in packs]
+        completed_results = []
+        for index, pack in enumerate(packs, start=1):
+            progress.event(
+                f"review {review_depth} {index}/{len(packs)} starting ({_short_context_id(pack.id)})",
+                key=f"review:{review_depth}:start",
+                force=index == 1,
+            )
+            result = review_pack(pack)
+            completed_results.append(result)
+            progress.event(
+                _review_progress_message(review_depth, index, len(packs), pack, result[1]),
+                key=f"review:{review_depth}",
+                force=index == len(packs),
+            )
 
-    for pack_findings, pack_runs in results:
+    for pack_findings, pack_runs in completed_results:
         findings = dedupe_findings([*findings, *pack_findings])
         runs.extend(pack_runs)
 
@@ -181,10 +214,12 @@ def verify_findings(
     config: LLMConfig,
     repo_root: Path,
     provider: LLMProvider | None = None,
+    progress: ProgressSink | None = None,
 ) -> tuple[list[Finding], list[FindingVerification], list[LLMRun]]:
     if not findings:
         return [], [], []
 
+    progress = progress or NoopProgress()
     cache = cache_for_config(repo_root, config)
     packs_by_id = {pack.id: pack for pack in packs}
     verifications_by_index: dict[int, FindingVerification] = {}
@@ -295,21 +330,50 @@ def verify_findings(
 
     verification_groups = _verification_groups_by_route(findings_by_pack_id, packs_by_id, config)
     if provider is None and config.jobs > 1 and len(verification_groups) > 1:
+        results: list[tuple[dict[int, FindingVerification], LLMRun] | None] = [None] * len(verification_groups)
+        progress.event(
+            f"verify: {len(findings)} finding(s) across {len(verification_groups)} context pack(s), jobs={config.jobs}",
+            force=True,
+        )
         with ThreadPoolExecutor(max_workers=config.jobs) as executor:
-            results = [
-                future.result()
-                for future in [
-                    executor.submit(verify_pack, pack_id, group, route_config, profile, route_reason)
-                    for pack_id, group, route_config, profile, route_reason in verification_groups
-                ]
-            ]
+            futures = {
+                executor.submit(verify_pack, pack_id, group, route_config, profile, route_reason): index
+                for index, (pack_id, group, route_config, profile, route_reason) in enumerate(verification_groups)
+            }
+            completed = 0
+            for future in as_completed(futures):
+                index = futures[future]
+                result = future.result()
+                results[index] = result
+                completed += 1
+                pack_id = verification_groups[index][0]
+                progress.event(
+                    _verify_progress_message(completed, len(verification_groups), pack_id, result[1]),
+                    key="verify",
+                    force=completed == len(verification_groups),
+                )
+        completed_results = [result for result in results if result is not None]
     else:
-        results = [
-            verify_pack(pack_id, group, route_config, profile, route_reason)
-            for pack_id, group, route_config, profile, route_reason in verification_groups
-        ]
+        progress.event(
+            f"verify: {len(findings)} finding(s) across {len(verification_groups)} context pack(s), jobs=1",
+            force=True,
+        )
+        completed_results = []
+        for index, (pack_id, group, route_config, profile, route_reason) in enumerate(verification_groups, start=1):
+            progress.event(
+                f"verify {index}/{len(verification_groups)} starting ({_short_context_id(pack_id)})",
+                key="verify:start",
+                force=index == 1,
+            )
+            result = verify_pack(pack_id, group, route_config, profile, route_reason)
+            completed_results.append(result)
+            progress.event(
+                _verify_progress_message(index, len(verification_groups), pack_id, result[1]),
+                key="verify",
+                force=index == len(verification_groups),
+            )
 
-    for pack_verifications, run in results:
+    for pack_verifications, run in completed_results:
         verifications_by_index.update(pack_verifications)
         runs.append(run)
 
@@ -321,6 +385,37 @@ def verify_findings(
 
 def _elapsed_ms(start: float) -> int:
     return int((time.monotonic() - start) * 1000)
+
+
+def _effective_jobs(jobs: int, total: int) -> int:
+    return min(jobs, total)
+
+
+def _review_progress_message(
+    review_depth: str,
+    completed: int,
+    total: int,
+    pack: ContextPack,
+    runs: list[LLMRun],
+) -> str:
+    status = runs[-1].status if runs else "skipped"
+    findings_count = sum(run.findings_count for run in runs)
+    return (
+        f"review {review_depth} {completed}/{total} done "
+        f"({_short_context_id(pack.id)}, {status}, {findings_count} finding(s))"
+    )
+
+
+def _verify_progress_message(completed: int, total: int, pack_id: str, run: LLMRun) -> str:
+    return (
+        f"verify {completed}/{total} done ({_short_context_id(pack_id)}, {run.status}, {run.findings_count} approved)"
+    )
+
+
+def _short_context_id(value: str, max_chars: int = 96) -> str:
+    if len(value) <= max_chars:
+        return value
+    return f"{value[: max_chars - 1]}..."
 
 
 def _estimated_verification_saved_tokens(

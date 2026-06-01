@@ -62,6 +62,7 @@ def test_init_creates_config(tmp_path: Path, monkeypatch) -> None:
     assert "max_packs: 64" in config_text
     assert "max_deep_packs: 48" in config_text
     assert "max_input_tokens: 300000" in config_text
+    assert "progress: auto" in config_text
     assert "Next: inspect and commit Apex Ray setup files" in result.stdout
 
 
@@ -299,6 +300,42 @@ def test_gate_pre_push_archives_reports_when_enabled(tmp_path: Path, monkeypatch
     assert len(archive_dirs) == 1
     assert (archive_dirs[0] / "pre-push.md").exists()
     assert (archive_dirs[0] / "pre-push.json").exists()
+
+
+def test_gate_pre_push_emits_progress_to_stderr(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    config = tmp_path / ".apex-ray" / "config.yml"
+    config.parent.mkdir(parents=True)
+    config.write_text(
+        "review:\n  gates:\n    pre_push:\n      progress: always\n      progress_interval_seconds: 0\n",
+        encoding="utf-8",
+    )
+
+    def fake_run_review_pipeline(*args, **kwargs):
+        progress = kwargs["progress"]
+        progress.event("pipeline progress", force=True)
+        config = args[3]
+        return build_report(
+            ProjectProfile(root=str(tmp_path), is_git_repo=True),
+            config,
+            DiffSummary(target_mode=TargetMode.BASE, base="main", stats=DiffStats(files_changed=1)),
+        )
+
+    monkeypatch.setattr("apex_ray.cli.gate.git.repo_root", lambda _cwd: tmp_path)
+    monkeypatch.setattr("apex_ray.cli.gate.git.is_git_repo", lambda _root: True)
+    monkeypatch.setattr(
+        "apex_ray.cli.gate.git.diff_base", lambda _root, _base: "diff --git a/src/orders.ts b/src/orders.ts\n"
+    )
+    monkeypatch.setattr("apex_ray.cli.gate.run_review_pipeline", fake_run_review_pipeline)
+    monkeypatch.setattr("apex_ray.cli.gate.continue_review_from_report", lambda report, **_kwargs: (report, []))
+
+    result = runner.invoke(app, ["gate", "pre-push"], catch_exceptions=False)
+
+    assert result.exit_code == 0
+    assert "APEX RAY GATE: PASSED" in result.stdout
+    assert "pipeline progress" not in result.stdout
+    assert "apex-ray: reading diff main...HEAD" in result.stderr
+    assert "apex-ray: pipeline progress" in result.stderr
 
 
 def test_gate_pre_push_does_not_block_unverified_finding_by_default(tmp_path: Path, monkeypatch) -> None:

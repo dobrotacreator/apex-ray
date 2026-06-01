@@ -166,6 +166,8 @@ review:
       require_verified_findings: true
       fail_on_quality_gate: true
       fail_on_partial_severity: critical
+      progress: auto
+      progress_interval_seconds: 5
 ```
 
 Machine-specific overrides can live in `.apex-ray/config.local.yml`. Apex Ray merges built-in defaults, shared config, local config, and CLI flags in that order. Local config is gitignored by default and is intended for provider/model/cost differences between contributors.

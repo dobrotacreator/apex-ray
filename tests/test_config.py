@@ -44,6 +44,8 @@ def test_init_config_creates_default_file(tmp_path: Path) -> None:
     assert config.reports.archive is False
     assert config.reports.archive_dir == ".apex-ray/reports/runs"
     assert config.reports.retention == 20
+    assert config.gates.pre_push.progress == "auto"
+    assert config.gates.pre_push.progress_interval_seconds == 5.0
 
 
 def test_load_config_parses_analyzer_shard_size(tmp_path: Path) -> None:

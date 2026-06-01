@@ -12,6 +12,7 @@ from apex_ray.gates import evaluate_pre_push_gate, render_pre_push_gate_stdout
 from apex_ray.llm import LLMProviderError
 from apex_ray.models import ReviewReport, TargetMode
 from apex_ray.pipeline import continue_review_from_report, run_review_pipeline
+from apex_ray.progress import NoopProgress, ProgressSink, StreamProgress, progress_enabled
 from apex_ray.report import ReportArtifact, archive_report_artifacts, render_html, render_markdown
 from apex_ray.report.coverage import continue_command_for_pack
 from apex_ray.telemetry import TelemetryError, append_review_telemetry
@@ -54,6 +55,7 @@ def pre_push(
     if not gate_config.enabled:
         typer.echo("APEX RAY GATE: DISABLED")
         raise typer.Exit()
+    progress = _progress_for_gate(gate_config)
 
     output = _resolve_output_path(root, output)
     json_output = _resolve_output_path(root, json_output)
@@ -68,6 +70,7 @@ def pre_push(
     target_base = base or review_config.base
     started_monotonic = time.monotonic()
     try:
+        progress.event(f"reading diff {target_base}...HEAD", force=True)
         diff_text = _load_base_diff(root, target_base)
         report = run_review_pipeline(
             root,
@@ -76,6 +79,7 @@ def pre_push(
             review_config,
             base=target_base,
             config_path=config_path,
+            progress=progress,
         )
         if gate_config.auto_followup_p0 and report.llm_coverage.partial_severity == "critical":
             report, selected_packs = continue_review_from_report(
@@ -85,13 +89,15 @@ def pre_push(
                 residual_priorities={"p0"},
                 only_unreviewed=True,
                 review_depth="deep",
+                progress=progress,
             )
             if selected_packs:
-                typer.echo(f"Auto-followup reviewed {len(selected_packs)} residual P0 context pack(s).")
+                progress.event(f"auto-followup reviewed {len(selected_packs)} residual P0 context pack(s)", force=True)
     except LLMProviderError as exc:
         raise typer.BadParameter(str(exc)) from exc
     duration_ms = round((time.monotonic() - started_monotonic) * 1000)
 
+    progress.event("writing reports", force=True)
     _set_continue_commands(report, json_output)
     previous_decision = evaluate_pre_push_gate(previous_report, gate_config) if previous_report else None
     decision = evaluate_pre_push_gate(report, gate_config)
@@ -128,6 +134,7 @@ def pre_push(
         effective_telemetry_path = root / effective_telemetry_path
     if telemetry_enabled:
         try:
+            progress.event("appending telemetry", force=True)
             append_review_telemetry(
                 report,
                 effective_telemetry_path,
@@ -140,6 +147,7 @@ def pre_push(
         except TelemetryError as exc:
             raise typer.BadParameter(str(exc)) from exc
 
+    progress.event("evaluating pre-push gate", force=True)
     typer.echo(
         render_pre_push_gate_stdout(
             report,
@@ -185,3 +193,9 @@ def _load_previous_report(path: Path) -> ReviewReport | None:
 def _set_continue_commands(report: ReviewReport, json_output: Path) -> None:
     for todo in report.llm_coverage.coverage_todos:
         todo.suggested_command = continue_command_for_pack(todo.context_pack_id, str(json_output))
+
+
+def _progress_for_gate(config) -> ProgressSink:
+    if not progress_enabled(config.progress):
+        return NoopProgress()
+    return StreamProgress(interval_seconds=config.progress_interval_seconds)
