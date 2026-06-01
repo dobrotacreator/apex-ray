@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.4](https://github.com/dobrotacreator/apex-ray/compare/v0.1.3...v0.1.4) (2026-06-01)
+
+
+### Features
+
+* **gate:** show pre-push progress output ([#20](https://github.com/dobrotacreator/apex-ray/issues/20)) ([8040045](https://github.com/dobrotacreator/apex-ray/commit/804004514189098f0b0d34083979ad0141f2140a))
+
 ## [0.1.3](https://github.com/dobrotacreator/apex-ray/compare/v0.1.2...v0.1.3) (2026-06-01)
 
 
