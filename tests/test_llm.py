@@ -33,6 +33,7 @@ from apex_ray.llm import (
     verify_findings,
 )
 from apex_ray.llm.cache import REVIEW_PROMPT_VERSION, REVIEW_SHALLOW_PROMPT_VERSION, VERIFIER_PROMPT_VERSION, LLMCache
+from apex_ray.llm.usage import parse_claude_usage_from_json, parse_codex_usage_from_jsonl
 from apex_ray.models import (
     AnalyzerReference,
     AnalyzerSymbol,
@@ -46,8 +47,11 @@ from apex_ray.models import (
     LLMConfig,
     LLMProfile,
     LLMProviderName,
+    LLMReviewResult,
     LLMRoutingCondition,
     LLMRoutingConfig,
+    LLMUsage,
+    LLMVerificationResult,
     MemoryMatch,
     RiskSignal,
     RuleMatch,
@@ -153,6 +157,93 @@ def test_review_context_packs_records_provider_failure_per_pack() -> None:
     assert findings == []
     assert runs[0].status == "failed_quota"
     assert "usage limit" in (runs[0].error or "")
+
+
+def test_review_context_packs_records_provider_reported_usage() -> None:
+    class UsageProvider:
+        def review_context_pack_with_usage(self, pack: ContextPack, repo_root: Path) -> LLMReviewResult:
+            return LLMReviewResult(
+                findings=[],
+                usage=LLMUsage(
+                    source="unit",
+                    input_tokens=120,
+                    cached_input_tokens=40,
+                    output_tokens=20,
+                    reasoning_output_tokens=5,
+                    total_tokens=185,
+                    estimated_cost_usd=0.0012,
+                ),
+            )
+
+        def review_context_pack(self, pack: ContextPack, repo_root: Path) -> list[Finding]:
+            raise AssertionError("usage-aware review path should be used")
+
+        def verify_finding(self, finding: Finding, pack: ContextPack, repo_root: Path) -> FindingVerification:
+            raise AssertionError("not used")
+
+    config = LLMConfig(provider=LLMProviderName.FAKE)
+
+    _, runs = review_context_packs([make_pack()], config, Path("."), provider=UsageProvider())
+
+    assert runs[0].usage_source == "unit"
+    assert runs[0].actual_input_tokens == 120
+    assert runs[0].actual_cached_input_tokens == 40
+    assert runs[0].actual_output_tokens == 20
+    assert runs[0].actual_reasoning_output_tokens == 5
+    assert runs[0].actual_total_tokens == 185
+    assert runs[0].estimated_cost_usd == 0.0012
+
+
+def test_verify_findings_records_provider_reported_usage() -> None:
+    finding = Finding(
+        title="Potential incorrect total",
+        severity=FindingSeverity.HIGH,
+        confidence=FindingConfidence.HIGH,
+        file="src/cart.ts",
+        line=6,
+        failure_mode="Totals can be wrong.",
+        evidence="The changed symbol is calculateTotal.",
+        suggested_fix="Preserve the existing multiplication.",
+        suggested_test="Add a multi-item cart test.",
+        context_pack_id=make_pack().id,
+    )
+
+    class UsageVerifier:
+        def review_context_pack(self, pack: ContextPack, repo_root: Path) -> list[Finding]:
+            raise AssertionError("not used")
+
+        def verify_finding(self, finding: Finding, pack: ContextPack, repo_root: Path) -> FindingVerification:
+            raise AssertionError("usage-aware verifier path should be used")
+
+        def verify_findings_with_usage(
+            self, findings: list[Finding], pack: ContextPack, repo_root: Path
+        ) -> LLMVerificationResult:
+            return LLMVerificationResult(
+                verifications=[
+                    FindingVerification(
+                        finding=findings[0],
+                        approved=True,
+                        confidence=FindingConfidence.HIGH,
+                        reason="Concrete.",
+                    )
+                ],
+                usage=LLMUsage(source="unit", input_tokens=40, output_tokens=8, total_tokens=48),
+            )
+
+    approved, verifications, runs = verify_findings(
+        [finding],
+        [make_pack()],
+        LLMConfig(provider=LLMProviderName.FAKE),
+        Path("."),
+        provider=UsageVerifier(),
+    )
+
+    assert approved == [finding]
+    assert verifications[0].approved is True
+    assert runs[0].usage_source == "unit"
+    assert runs[0].actual_input_tokens == 40
+    assert runs[0].actual_output_tokens == 8
+    assert runs[0].actual_total_tokens == 48
 
 
 def test_shallow_review_uses_compact_prompt_and_cheap_route() -> None:
@@ -376,6 +467,8 @@ def test_review_context_pack_uses_cache_on_second_run(tmp_path: Path) -> None:
     assert second_runs[0].cache_hit is True
     assert second_runs[0].input_chars == 0
     assert second_runs[0].estimated_input_tokens == 0
+    assert second_runs[0].actual_total_tokens == 0
+    assert second_runs[0].estimated_saved_input_tokens > 0
     assert second_runs[0].cache_hits == 1
     assert second_runs[0].cache_misses == 0
     assert second_findings == first_findings
@@ -441,6 +534,14 @@ def test_review_cache_key_changes_when_review_depth_changes() -> None:
     assert review_cache_key(pack, deep) != review_cache_key(pack, shallow)
 
 
+def test_review_cache_key_changes_when_effort_changes() -> None:
+    pack = make_pack()
+    low = LLMConfig(provider=LLMProviderName.FAKE, model="codex-model", effort="low")
+    high = LLMConfig(provider=LLMProviderName.FAKE, model="codex-model", effort="high")
+
+    assert review_cache_key(pack, low) != review_cache_key(pack, high)
+
+
 def test_review_config_uses_default_profile() -> None:
     config = LLMConfig(
         provider=LLMProviderName.FAKE,
@@ -465,6 +566,7 @@ def test_review_config_profile_can_switch_provider_and_cli_path() -> None:
             "strong": LLMProfile(
                 provider=LLMProviderName.CLAUDE_CODE_CLI,
                 model="sonnet",
+                effort="xhigh",
                 claude_path="tools/claude",
             ),
         },
@@ -475,6 +577,7 @@ def test_review_config_profile_can_switch_provider_and_cli_path() -> None:
 
     assert resolved.provider == "claude_code_cli"
     assert resolved.model == "sonnet"
+    assert resolved.effort == "xhigh"
     assert resolved.claude_path == "tools/claude"
     assert resolved.codex_path == "codex"
     assert profile == "strong"
@@ -1013,12 +1116,111 @@ def test_build_codex_command_is_read_only_and_schema_bound(tmp_path: Path) -> No
     )
 
     assert command[:4] == ["/usr/local/bin/codex", "--ask-for-approval", "never", "exec"]
+    assert "--json" in command
     assert "--ephemeral" in command
     assert command[command.index("--sandbox") + 1] == "read-only"
     assert command[command.index("--ask-for-approval") + 1] == "never"
     assert "--output-schema" in command
     assert "--output-last-message" in command
     assert command[-3:] == ["--model", "gpt-5-codex", "-"]
+
+
+def test_build_codex_command_can_set_reasoning_effort(tmp_path: Path) -> None:
+    command = build_codex_command(
+        codex_path="/usr/local/bin/codex",
+        schema_path=tmp_path / "schema.json",
+        output_path=tmp_path / "out.json",
+        model="gpt-5.4",
+        effort="low",
+    )
+
+    assert command[command.index("--config") + 1] == 'model_reasoning_effort="low"'
+    assert command.index("--config") < command.index("exec")
+
+
+def test_build_codex_command_rejects_claude_only_max_effort(tmp_path: Path) -> None:
+    with pytest.raises(LLMProviderError, match="does not support effort 'max'"):
+        build_codex_command(
+            codex_path="/usr/local/bin/codex",
+            schema_path=tmp_path / "schema.json",
+            output_path=tmp_path / "out.json",
+            effort="max",
+        )
+
+
+def test_parse_codex_usage_from_jsonl_uses_latest_token_count_event() -> None:
+    usage = parse_codex_usage_from_jsonl(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "token_count",
+                            "info": {
+                                "total_token_usage": {
+                                    "input_tokens": 100,
+                                    "cached_input_tokens": 25,
+                                    "output_tokens": 10,
+                                    "reasoning_output_tokens": 3,
+                                    "total_tokens": 113,
+                                }
+                            },
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "token_count",
+                            "info": {
+                                "total_token_usage": {
+                                    "input_tokens": 120,
+                                    "cached_input_tokens": 30,
+                                    "output_tokens": 15,
+                                    "reasoning_output_tokens": 5,
+                                    "total_tokens": 140,
+                                }
+                            },
+                        },
+                    }
+                ),
+            ]
+        )
+    )
+
+    assert usage is not None
+    assert usage.source == "codex_cli_json"
+    assert usage.input_tokens == 120
+    assert usage.cached_input_tokens == 30
+    assert usage.output_tokens == 15
+    assert usage.reasoning_output_tokens == 5
+    assert usage.total_tokens == 140
+
+
+def test_parse_codex_usage_from_jsonl_supports_turn_completed_events() -> None:
+    usage = parse_codex_usage_from_jsonl(
+        json.dumps(
+            {
+                "type": "turn.completed",
+                "usage": {
+                    "input_tokens": 15134,
+                    "cached_input_tokens": 3456,
+                    "output_tokens": 24,
+                    "reasoning_output_tokens": 17,
+                },
+            }
+        )
+    )
+
+    assert usage is not None
+    assert usage.source == "codex_cli_json"
+    assert usage.input_tokens == 15134
+    assert usage.cached_input_tokens == 3456
+    assert usage.output_tokens == 24
+    assert usage.reasoning_output_tokens == 17
+    assert usage.total_tokens == 15158
 
 
 def test_codex_provider_runs_outside_reviewed_repo(
@@ -1163,6 +1365,45 @@ def test_build_claude_command_is_noninteractive_schema_bound_and_toolless() -> N
     assert json.loads(command[command.index("--json-schema") + 1])["required"] == ["findings"]
     assert command[command.index("--tools") + 1] == ""
     assert command[-2:] == ["--model", "sonnet"]
+
+
+def test_build_claude_command_can_set_effort() -> None:
+    command = build_claude_command(
+        claude_path="/usr/local/bin/claude",
+        schema=finding_response_schema(),
+        model="sonnet",
+        effort="max",
+    )
+
+    assert command[-4:] == ["--model", "sonnet", "--effort", "max"]
+
+
+def test_parse_claude_usage_from_json_reads_cache_tokens_and_cost() -> None:
+    usage = parse_claude_usage_from_json(
+        json.dumps(
+            {
+                "type": "result",
+                "result": json.dumps({"findings": []}),
+                "total_cost_usd": 0.0025,
+                "usage": {
+                    "input_tokens": 50,
+                    "cache_read_input_tokens": 200,
+                    "cache_creation_input_tokens": 30,
+                    "output_tokens": 12,
+                },
+            }
+        )
+    )
+
+    assert usage is not None
+    assert usage.source == "claude_json"
+    assert usage.input_tokens == 50
+    assert usage.cached_input_tokens == 200
+    assert usage.cache_read_input_tokens == 200
+    assert usage.cache_creation_input_tokens == 30
+    assert usage.output_tokens == 12
+    assert usage.total_tokens == 292
+    assert usage.estimated_cost_usd == 0.0025
 
 
 def test_claude_provider_runs_outside_reviewed_repo_and_parses_json_result(

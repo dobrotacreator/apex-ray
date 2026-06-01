@@ -248,17 +248,36 @@ def render_markdown(report: ReviewReport) -> str:
         lines.append(
             f"- Estimated LLM input: `{coverage.input_chars}` chars (`~{coverage.estimated_input_tokens}` tokens)"
         )
+        if coverage.actual_total_tokens:
+            lines.append(
+                f"- Provider-reported LLM tokens: `{coverage.actual_total_tokens}` total "
+                f"(`{coverage.actual_input_tokens}` input, `{coverage.actual_cached_input_tokens}` cached input, "
+                f"`{coverage.actual_output_tokens}` output, `{coverage.actual_reasoning_output_tokens}` reasoning)"
+            )
+        if coverage.estimated_saved_input_tokens:
+            lines.append(f"- Estimated cache-saved input: `~{coverage.estimated_saved_input_tokens}` tokens")
+        if coverage.estimated_cost_usd is not None:
+            lines.append(f"- Estimated provider cost: `${coverage.estimated_cost_usd:.6f}`")
+        if coverage.usage_sources:
+            lines.append(f"- Usage sources: `{', '.join(coverage.usage_sources)}`")
         if coverage.routes:
             lines.append("- Model routes:")
             for route in coverage.routes:
                 profile = f", profile: `{route.profile}`" if route.profile else ""
                 model = f", model: `{route.model}`" if route.model else ""
+                effort = f", effort: `{route.effort}`" if route.effort else ""
                 reason = f", route: `{route.route_reason}`" if route.route_reason else ""
+                actual = f", actual: `{route.actual_total_tokens}` tokens" if route.actual_total_tokens else ""
+                saved = (
+                    f", saved: `~{route.estimated_saved_input_tokens}` tokens"
+                    if route.estimated_saved_input_tokens
+                    else ""
+                )
                 lines.append(
-                    f"  - {route.kind}/{route.provider}, status: `{route.status}`{profile}{model}{reason}, "
+                    f"  - {route.kind}/{route.provider}, status: `{route.status}`{profile}{model}{effort}{reason}, "
                     f"runs: `{route.runs}`, findings: `{route.findings_count}`, "
                     f"input: `{route.input_chars}` chars (`~{route.estimated_input_tokens}` tokens), "
-                    f"cache: `{route.cache_hits}` hits / `{route.cache_misses}` misses, "
+                    f"cache: `{route.cache_hits}` hits / `{route.cache_misses}` misses{actual}{saved}, "
                     f"duration: `{route.duration_ms}ms`"
                 )
         if coverage.unreviewed_context_pack_ids:
@@ -350,13 +369,16 @@ def render_markdown(report: ReviewReport) -> str:
             cache = _format_run_cache(run)
             profile = f", profile: `{run.profile}`" if run.profile else ""
             model = f", model: `{run.model}`" if run.model else ""
+            effort = f", effort: `{run.effort}`" if run.effort else ""
             route = f", route: `{run.route_reason}`" if run.route_reason else ""
+            actual = f", actual: `{run.actual_total_tokens}` tokens" if run.actual_total_tokens else ""
+            saved = f", saved: `~{run.estimated_saved_input_tokens}` tokens" if run.estimated_saved_input_tokens else ""
             lines.append(
                 f"- `{run.context_pack_id}` - {run.kind}, {run.provider}, status: `{run.status}`, "
                 f"prompt: `{run.prompt_version or 'unknown'}`, findings: `{run.findings_count}`, "
-                f"cache: `{cache}`{profile}{model}{route}, "
+                f"cache: `{cache}`{profile}{model}{effort}{route}, "
                 f"input: `{run.input_chars}` chars (`~{run.estimated_input_tokens}` tokens), "
-                f"duration: `{run.duration_ms}ms`{suffix}"
+                f"duration: `{run.duration_ms}ms`{actual}{saved}{suffix}"
             )
     lines.append("")
 

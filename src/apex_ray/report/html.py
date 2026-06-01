@@ -108,6 +108,7 @@ def render_html(report: ReviewReport) -> str:
     <div class="metric"><span>Memory cards</span><strong>{memory.applied_cards}/{memory.loaded_cards}</strong></div>
     <div class="metric"><span>Coverage gate</span><strong>{escape(coverage.quality_gate_status)}</strong></div>
     <div class="metric"><span>Estimated input tokens</span><strong>~{coverage.estimated_input_tokens}</strong></div>
+    <div class="metric"><span>Actual LLM tokens</span><strong>{coverage.actual_total_tokens}</strong></div>
     <div class="metric"><span>LLM duration</span><strong>{coverage.total_duration_ms}ms</strong></div>
   </div>
 
@@ -122,6 +123,7 @@ def render_html(report: ReviewReport) -> str:
     <li>Source changed-line coverage: <code>{coverage.source_changed_line_coverage_ratio:.1%}</code></li>
     <li>High-risk coverage: <code>{coverage.high_risk_coverage_ratio:.1%}</code></li>
     <li>Cache: <code>{coverage.cache_hits}</code> hits / <code>{coverage.cache_misses}</code> misses</li>
+    <li>Provider-reported tokens: <code>{coverage.actual_total_tokens}</code> total; saved by cache: <code>~{coverage.estimated_saved_input_tokens}</code></li>
     <li>Over-budget packs: <code>{len(coverage.over_budget_context_pack_ids)}</code></li>
     <li>Over-token-budget packs: <code>{len(coverage.over_token_budget_context_pack_ids)}</code></li>
     <li>Truncated packs: <code>{len(coverage.truncated_context_pack_ids)}</code></li>

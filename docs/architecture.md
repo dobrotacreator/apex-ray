@@ -209,8 +209,8 @@ Telemetry is append-only JSONL and is not injected into review prompts. It is us
 - target mode and changed-file counts;
 - LLM enabled/disabled state;
 - model/provider/profile routing;
-- estimated input tokens;
-- cache hits and misses;
+- estimated input tokens, provider-reported actual tokens when available, and estimated provider cost;
+- cache hits, misses, and estimated cache-saved input tokens;
 - coverage ratio and skipped packs;
 - finding counts and verifier outcomes.
 

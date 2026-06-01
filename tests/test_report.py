@@ -37,6 +37,7 @@ def test_render_markdown_summarizes_llm_pack_selection() -> None:
             LLMRun(
                 provider="fake",
                 model="codex-cheap",
+                effort="low",
                 profile="cheap",
                 route_reason="profile:cheap",
                 context_pack_id="src/cart.ts#calculateTotal:1",
@@ -52,6 +53,7 @@ def test_render_markdown_summarizes_llm_pack_selection() -> None:
     assert "- Review context packs: `1` of `2`" in markdown
     assert "- Skipped context packs: `1`" in markdown
     assert "## LLM Coverage" in markdown
+    assert "effort: `low`" in markdown
     assert "- Unreviewed context packs: `1`" in markdown
     assert "- Slice coverage:" in markdown
     assert "`source` - reviewed `1/1`" in markdown
@@ -187,6 +189,52 @@ def test_report_uses_explicit_batch_cache_counters() -> None:
     assert data["llm_coverage"]["cache_misses"] == 1
     assert data["llm_coverage"]["routes"][0]["cache_hits"] == 2
     assert data["llm_coverage"]["routes"][0]["cache_misses"] == 1
+
+
+def test_report_aggregates_provider_reported_usage() -> None:
+    config = ReviewConfig()
+    config.llm.enabled = True
+    report = build_report(
+        ProjectProfile(root="/repo", is_git_repo=True),
+        config,
+        DiffSummary(target_mode=TargetMode.PATCH, stats=DiffStats(files_changed=1)),
+        context_packs=[ContextPack(id="src/auth.ts#file", file="src/auth.ts")],
+        llm_runs=[
+            LLMRun(
+                provider="codex_cli",
+                model="gpt-5-codex",
+                context_pack_id="src/auth.ts#file",
+                status="ok",
+                duration_ms=12,
+                input_chars=400,
+                estimated_input_tokens=100,
+                actual_input_tokens=90,
+                actual_cached_input_tokens=30,
+                actual_output_tokens=12,
+                actual_reasoning_output_tokens=8,
+                actual_total_tokens=110,
+                estimated_saved_input_tokens=50,
+                estimated_cost_usd=0.001,
+                usage_source="codex_cli_json",
+            )
+        ],
+    )
+
+    markdown = render_markdown(report)
+    data = report.model_dump(mode="json")
+    coverage = data["llm_coverage"]
+    route = coverage["routes"][0]
+
+    assert "- Provider-reported LLM tokens: `110` total" in markdown
+    assert "- Estimated cache-saved input: `~50` tokens" in markdown
+    assert coverage["actual_total_tokens"] == 110
+    assert coverage["actual_cached_input_tokens"] == 30
+    assert coverage["estimated_saved_input_tokens"] == 50
+    assert coverage["estimated_cost_usd"] == 0.001
+    assert coverage["usage_sources"] == ["codex_cli_json"]
+    assert route["actual_total_tokens"] == 110
+    assert route["estimated_saved_input_tokens"] == 50
+    assert route["usage_sources"] == ["codex_cli_json"]
 
 
 def test_report_summarizes_repo_memory() -> None:

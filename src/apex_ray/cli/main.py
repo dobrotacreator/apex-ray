@@ -20,7 +20,7 @@ from apex_ray.invocation import ReviewOverrides, apply_review_overrides
 from apex_ray.llm import LLMProviderError
 from apex_ray.models import LLMCoverageMode, LLMProviderName, ReviewReport, TargetMode
 from apex_ray.pipeline import continue_review_from_report, run_review_pipeline
-from apex_ray.report import render_html, render_markdown
+from apex_ray.report import ReportArtifact, archive_report_artifacts, render_html, render_markdown
 from apex_ray.report.coverage import continue_command_for_pack
 from apex_ray.telemetry import (
     DEFAULT_REVIEW_TELEMETRY_PATH,
@@ -381,15 +381,30 @@ def review(
 
     _set_continue_commands(report, json_output)
 
+    markdown_text = render_markdown(report)
+    json_text = report.model_dump_json(indent=2)
+    html_text = render_html(report) if html_output else None
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(render_markdown(report), encoding="utf-8")
-
+    output.write_text(markdown_text, encoding="utf-8")
     json_output.parent.mkdir(parents=True, exist_ok=True)
-    json_output.write_text(report.model_dump_json(indent=2), encoding="utf-8")
+    json_output.write_text(json_text, encoding="utf-8")
 
     if html_output:
         html_output.parent.mkdir(parents=True, exist_ok=True)
-        html_output.write_text(render_html(report), encoding="utf-8")
+        html_output.write_text(html_text or "", encoding="utf-8")
+
+    artifacts = [
+        ReportArtifact(output, markdown_text),
+        ReportArtifact(json_output, json_text),
+    ]
+    if html_output and html_text is not None:
+        artifacts.append(ReportArtifact(html_output, html_text))
+    archive_path = archive_report_artifacts(
+        root,
+        effective_config.reports,
+        artifacts,
+        created_at=report.generated_at,
+    )
 
     if telemetry_enabled:
         try:
@@ -409,6 +424,8 @@ def review(
     typer.echo(f"Wrote {json_output}")
     if html_output:
         typer.echo(f"Wrote {html_output}")
+    if archive_path:
+        typer.echo(f"Archived report: {archive_path}")
     if telemetry_enabled:
         typer.echo(f"Appended telemetry: {effective_telemetry_path}")
 

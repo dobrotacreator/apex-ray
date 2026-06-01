@@ -10,21 +10,31 @@ def build_codex_command(
     schema_path: Path,
     output_path: Path,
     model: str | None = None,
+    effort: str | None = None,
 ) -> list[str]:
     command = [
         codex_path,
         "--ask-for-approval",
         "never",
-        "exec",
-        "--ephemeral",
-        "--sandbox",
-        "read-only",
-        "--skip-git-repo-check",
-        "--output-schema",
-        str(schema_path),
-        "--output-last-message",
-        str(output_path),
     ]
+    if effort:
+        if effort == "max":
+            raise LLMProviderError("Codex CLI does not support effort 'max'; use low, medium, high, or xhigh.")
+        command.extend(["--config", f'model_reasoning_effort="{effort}"'])
+    command.extend(
+        [
+            "exec",
+            "--json",
+            "--ephemeral",
+            "--sandbox",
+            "read-only",
+            "--skip-git-repo-check",
+            "--output-schema",
+            str(schema_path),
+            "--output-last-message",
+            str(output_path),
+        ]
+    )
     if model:
         command.extend(["--model", model])
     command.append("-")
@@ -35,6 +45,7 @@ def build_claude_command(
     claude_path: str,
     schema: dict[str, object],
     model: str | None = None,
+    effort: str | None = None,
 ) -> list[str]:
     command = [
         claude_path,
@@ -49,6 +60,8 @@ def build_claude_command(
     ]
     if model:
         command.extend(["--model", model])
+    if effort:
+        command.extend(["--effort", effort])
     return command
 
 

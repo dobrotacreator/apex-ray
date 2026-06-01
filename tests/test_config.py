@@ -35,11 +35,15 @@ def test_init_config_creates_default_file(tmp_path: Path) -> None:
     assert config.memory.max_cards_per_pack == 4
     assert config.llm.profiles == {}
     assert config.llm.enabled is True
+    assert config.llm.effort == "medium"
     assert config.llm.max_packs == 64
     assert config.llm.max_deep_packs == 48
     assert config.llm.max_input_tokens == 300_000
     assert config.telemetry.enabled is False
     assert config.telemetry.path == ".apex-ray/telemetry/review-runs.jsonl"
+    assert config.reports.archive is False
+    assert config.reports.archive_dir == ".apex-ray/reports/runs"
+    assert config.reports.retention == 20
 
 
 def test_load_config_parses_analyzer_shard_size(tmp_path: Path) -> None:
@@ -67,6 +71,21 @@ def test_load_config_parses_review_telemetry(tmp_path: Path) -> None:
 
     assert config.telemetry.enabled is True
     assert config.telemetry.path == ".apex-ray/telemetry/custom.jsonl"
+
+
+def test_load_config_parses_report_archive(tmp_path: Path) -> None:
+    path = tmp_path / ".apex-ray" / "config.yml"
+    path.parent.mkdir()
+    path.write_text(
+        "review:\n  reports:\n    archive: true\n    archive_dir: .apex-ray/reports/archive\n    retention: 7\n",
+        encoding="utf-8",
+    )
+
+    config, _ = load_config(tmp_path)
+
+    assert config.reports.archive is True
+    assert config.reports.archive_dir == ".apex-ray/reports/archive"
+    assert config.reports.retention == 7
 
 
 def test_load_config_merges_local_override_after_shared_config(tmp_path: Path) -> None:
@@ -428,10 +447,12 @@ def test_load_config_parses_llm_profiles_and_routing(tmp_path: Path) -> None:
         "      cheap:\n"
         "        provider: codex_cli\n"
         "        model: codex-cheap\n"
+        "        effort: low\n"
         "        codex_path: tools/codex\n"
         "      strong:\n"
         "        provider: claude_code_cli\n"
         "        model: claude-strong\n"
+        "        effort: high\n"
         "        claude_path: tools/claude\n"
         "    routing:\n"
         "      review_profile: cheap\n"
@@ -448,9 +469,11 @@ def test_load_config_parses_llm_profiles_and_routing(tmp_path: Path) -> None:
     config, _ = load_config(tmp_path)
 
     assert config.llm.profiles["cheap"].model == "codex-cheap"
+    assert config.llm.profiles["cheap"].effort == "low"
     assert config.llm.profiles["cheap"].codex_path == "tools/codex"
     assert config.llm.profiles["strong"].provider == "claude_code_cli"
     assert config.llm.profiles["strong"].model == "claude-strong"
+    assert config.llm.profiles["strong"].effort == "high"
     assert config.llm.profiles["strong"].claude_path == "tools/claude"
     assert config.llm.routing.review_profile == "cheap"
     assert config.llm.routing.verify_profile == "strong"

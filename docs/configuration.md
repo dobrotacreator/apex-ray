@@ -31,6 +31,7 @@ review:
   llm:
     enabled: true
     provider: codex_cli
+    effort: medium
     coverage_mode: balanced
     max_packs: 64
     max_deep_packs: 48
@@ -39,6 +40,10 @@ review:
   telemetry:
     enabled: false
     path: .apex-ray/telemetry/review-runs.jsonl
+  reports:
+    archive: false
+    archive_dir: .apex-ray/reports/runs
+    retention: 20
   gates:
     pre_push:
       enabled: true
@@ -59,6 +64,7 @@ review:
     jobs: 2
     provider: claude_code_cli
     model: "<personal-model-or-alias>"
+    effort: medium
     claude_path: claude
     timeout_seconds: 900
     max_input_tokens: 80000
@@ -87,6 +93,22 @@ Use memory for known false positives, recurring review patterns, severity calibr
 - `exhaustive`: review every reviewable pack when budget allows.
 
 Reports show partial severity, reviewed/unreviewed packs, residual P0/P1 work, and continuation commands.
+
+## Reports
+
+Review and gate commands always write latest report files to the configured `--output`, `--json`, and optional `--html` paths. Reusing the same paths overwrites those latest files.
+
+Set `review.reports.archive: true` to also copy each generated report into a run directory under `review.reports.archive_dir`. This preserves full Markdown/JSON/HTML artifacts for review-quality debugging while keeping the latest paths stable for agents and hooks.
+
+```yaml
+review:
+  reports:
+    archive: true
+    archive_dir: .apex-ray/reports/runs
+    retention: 20
+```
+
+`retention` keeps the newest run directories and prunes older ones. Set `retention: null` to disable pruning. Report archives may contain source snippets, findings, file paths, and provider metadata; keep `.apex-ray/reports/` ignored unless the team intentionally curates a specific artifact.
 
 ## Pre-Push Gate
 

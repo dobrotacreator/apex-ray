@@ -66,6 +66,14 @@ class LLMCoverageMode(StrEnum):
     EXHAUSTIVE = "exhaustive"
 
 
+class LLMReasoningEffort(StrEnum):
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+    XHIGH = "xhigh"
+    MAX = "max"
+
+
 class FindingSeverity(StrEnum):
     CRITICAL = "critical"
     HIGH = "high"
@@ -186,6 +194,7 @@ class MemoryConfig(StrictApexModel):
 class LLMProfile(StrictApexModel):
     provider: LLMProviderName | None = None
     model: str | None = None
+    effort: LLMReasoningEffort | None = None
     timeout_seconds: int | None = Field(default=None, gt=0)
     codex_path: str | None = None
     claude_path: str | None = None
@@ -216,6 +225,7 @@ class LLMConfig(StrictApexModel):
     enabled: bool = False
     provider: LLMProviderName = LLMProviderName.CODEX_CLI
     model: str | None = None
+    effort: LLMReasoningEffort | None = None
     timeout_seconds: int = Field(default=300, gt=0)
     jobs: int = Field(default=1, ge=1)
     max_packs: int = Field(default=64, gt=0)
@@ -252,6 +262,12 @@ class TelemetryConfig(StrictApexModel):
     path: str = ".apex-ray/telemetry/review-runs.jsonl"
 
 
+class ReportsConfig(StrictApexModel):
+    archive: bool = False
+    archive_dir: str = ".apex-ray/reports/runs"
+    retention: int | None = Field(default=20, ge=1)
+
+
 class PrePushGateConfig(StrictApexModel):
     enabled: bool = True
     min_finding_severity: FindingSeverity | None = FindingSeverity.HIGH
@@ -280,6 +296,7 @@ class ReviewConfig(StrictApexModel):
     context: ContextConfig = Field(default_factory=ContextConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
     telemetry: TelemetryConfig = Field(default_factory=TelemetryConfig)
+    reports: ReportsConfig = Field(default_factory=ReportsConfig)
     gates: GatesConfig = Field(default_factory=GatesConfig)
 
 
@@ -362,6 +379,7 @@ class LLMRouteSummary(ApexModel):
     kind: str
     provider: str
     model: str | None = None
+    effort: str | None = None
     profile: str | None = None
     route_reason: str | None = None
     status: str
@@ -370,6 +388,16 @@ class LLMRouteSummary(ApexModel):
     duration_ms: int = 0
     input_chars: int = 0
     estimated_input_tokens: int = 0
+    actual_input_tokens: int = 0
+    actual_cached_input_tokens: int = 0
+    actual_output_tokens: int = 0
+    actual_reasoning_output_tokens: int = 0
+    actual_total_tokens: int = 0
+    actual_cache_read_input_tokens: int = 0
+    actual_cache_creation_input_tokens: int = 0
+    estimated_saved_input_tokens: int = 0
+    estimated_cost_usd: float | None = None
+    usage_sources: list[str] = Field(default_factory=list)
     cache_hits: int = 0
     cache_misses: int = 0
     errors: int = 0
@@ -525,6 +553,16 @@ class LLMCoverageSummary(ApexModel):
     total_duration_ms: int = 0
     input_chars: int = 0
     estimated_input_tokens: int = 0
+    actual_input_tokens: int = 0
+    actual_cached_input_tokens: int = 0
+    actual_output_tokens: int = 0
+    actual_reasoning_output_tokens: int = 0
+    actual_total_tokens: int = 0
+    actual_cache_read_input_tokens: int = 0
+    actual_cache_creation_input_tokens: int = 0
+    estimated_saved_input_tokens: int = 0
+    estimated_cost_usd: float | None = None
+    usage_sources: list[str] = Field(default_factory=list)
     cache_hits: int = 0
     cache_misses: int = 0
     routes: list[LLMRouteSummary] = Field(default_factory=list)
@@ -695,10 +733,33 @@ class FindingVerification(ApexModel):
     reason: str
 
 
+class LLMUsage(ApexModel):
+    source: str
+    input_tokens: int = 0
+    cached_input_tokens: int = 0
+    output_tokens: int = 0
+    reasoning_output_tokens: int = 0
+    total_tokens: int = 0
+    cache_read_input_tokens: int = 0
+    cache_creation_input_tokens: int = 0
+    estimated_cost_usd: float | None = None
+
+
+class LLMReviewResult(ApexModel):
+    findings: list[Finding] = Field(default_factory=list)
+    usage: LLMUsage | None = None
+
+
+class LLMVerificationResult(ApexModel):
+    verifications: list[FindingVerification] = Field(default_factory=list)
+    usage: LLMUsage | None = None
+
+
 class LLMRun(ApexModel):
     kind: str = "review"
     provider: str
     model: str | None = None
+    effort: str | None = None
     profile: str | None = None
     route_reason: str | None = None
     prompt_version: str | None = None
@@ -707,6 +768,16 @@ class LLMRun(ApexModel):
     duration_ms: int
     input_chars: int = 0
     estimated_input_tokens: int = 0
+    actual_input_tokens: int = 0
+    actual_cached_input_tokens: int = 0
+    actual_output_tokens: int = 0
+    actual_reasoning_output_tokens: int = 0
+    actual_total_tokens: int = 0
+    actual_cache_read_input_tokens: int = 0
+    actual_cache_creation_input_tokens: int = 0
+    estimated_saved_input_tokens: int = 0
+    estimated_cost_usd: float | None = None
+    usage_source: str | None = None
     findings_count: int = 0
     cache_hit: bool = False
     cache_hits: int = 0
