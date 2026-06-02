@@ -53,10 +53,16 @@ markdown_extensions:
 
 nav:
   - Overview: index.md
-  - Configuration: configuration.md
-  - Providers: providers.md
-  - Rules And Memory: memory.md
-  - Architecture: architecture.md
-  - Telemetry: telemetry.md
-  - Historical PR Evals: pr-eval.md
-  - Development: development.md
+  - Getting Started:
+      - Quick Start: quickstart.md
+      - Review Workflow: review-workflow.md
+      - Configuration: configuration.md
+      - LLM Providers: providers.md
+  - Project Knowledge:
+      - Rules And Memory: memory.md
+      - Telemetry: telemetry.md
+  - Quality:
+      - Historical PR Evals: pr-eval.md
+  - Internals:
+      - Architecture: architecture.md
+      - Development: development.md
