@@ -18,7 +18,7 @@ npm --prefix analyzers/typescript run build
 
 ## Architecture Map
 
-See `docs/architecture.md` for the high-level product flow, init artifacts, telemetry/eval flow, and test fixture map.
+See `architecture.md` for the high-level product flow, init artifacts, telemetry/eval flow, and test fixture map.
 
 Python code lives under `src/apex_ray/`. Keep domain code in the existing packages:
 
@@ -62,6 +62,20 @@ Install Lefthook if you want local git hooks:
 
 ```bash
 lefthook install
+```
+
+## Docs Site
+
+Build the GitHub Pages documentation site locally:
+
+```bash
+uv run --locked --only-group docs mkdocs build --strict
+```
+
+Preview it locally:
+
+```bash
+uv run --locked --only-group docs mkdocs serve
 ```
 
 ## Generated Files
