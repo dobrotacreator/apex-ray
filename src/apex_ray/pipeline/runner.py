@@ -1,7 +1,7 @@
 from pathlib import Path
 from typing import Literal
 
-from apex_ray.analyzers import AnalyzerError, run_typescript_analyzer
+from apex_ray.analyzers import run_analyzers
 from apex_ray.classify import classify_diff
 from apex_ray.context import build_context_packs
 from apex_ray.diff import parse_unified_diff
@@ -53,30 +53,27 @@ def run_review_pipeline(
 
     progress.event("discovering project", force=True)
     project = discover_project(repo_root, ignored_patterns=config.ignore, config_path=config_path)
-    analyzer_results = []
-    fallback_reasons_by_path: dict[str, str] = {}
-    try:
-        progress.event(f"running TypeScript analyzer on {len(diff_summary.files)} changed file(s)", force=True)
-        ts_result = run_typescript_analyzer(repo_root, diff_summary.files, config.analyzer)
-        if ts_result:
-            analyzer_results.append(ts_result)
-            for failed_path in ts_result.failed_files:
-                fallback_reasons_by_path[failed_path] = (
-                    "TypeScript analyzer shard failed; using diff-only fallback context."
-                )
-            progress.event(
-                f"TypeScript analyzer completed: {sum(len(file.symbols) for file in ts_result.files)} symbol(s), "
-                f"{len(ts_result.failed_files)} failed file(s)",
-                force=True,
-            )
-        else:
-            progress.event("TypeScript analyzer skipped", force=True)
-    except AnalyzerError as exc:
-        warning = str(exc)
-        diff_summary.warnings.append(warning)
-        for changed_file in diff_summary.files:
-            fallback_reasons_by_path[changed_file.path] = f"TypeScript analyzer unavailable: {warning}"
-        progress.event(f"TypeScript analyzer unavailable: {warning}", force=True)
+    progress.event("running analyzers", force=True)
+    analyzer_run = run_analyzers(repo_root, diff_summary.files, config.analyzer)
+    analyzer_results = analyzer_run.results
+    fallback_reasons_by_path = analyzer_run.fallback_reasons_by_path
+    diff_summary.warnings.extend(analyzer_run.warnings)
+    for backend_run in analyzer_run.backend_runs:
+        if backend_run.changed_files_count == 0:
+            progress.event(f"{backend_run.display_name} analyzer skipped", force=True)
+            continue
+        if backend_run.warning:
+            progress.event(backend_run.warning, force=True)
+            continue
+        if backend_run.result is None:
+            progress.event(f"{backend_run.display_name} analyzer skipped", force=True)
+            continue
+        progress.event(
+            f"{backend_run.display_name} analyzer completed: "
+            f"{sum(len(file.symbols) for file in backend_run.result.files)} symbol(s), "
+            f"{len(backend_run.result.failed_files)} failed file(s)",
+            force=True,
+        )
 
     progress.event("building context packs", force=True)
     context_packs = build_context_packs(
