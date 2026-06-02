@@ -4,8 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from apex_ray.analyzers import AnalyzerError, run_typescript_analyzer, typescript_analyzer_script
-from apex_ray.models import AnalyzerConfig, ChangedFile, FileKind
+from apex_ray.analyzers import AnalyzerError, run_analyzers, run_typescript_analyzer, typescript_analyzer_script
+from apex_ray.models import AnalyzerConfig, AnalyzerFile, AnalyzerResult, ChangedFile, FileKind
 
 
 def test_typescript_analyzer_uses_configured_script_path(tmp_path: Path) -> None:
@@ -61,6 +61,77 @@ def test_typescript_analyzer_resolves_relative_script_path_against_repo_root(
     assert result is not None
     assert seen_command is not None
     assert seen_command[1] == str(script.resolve())
+
+
+def test_run_analyzers_scopes_unavailable_backend_fallback_to_matching_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    changed = [
+        ChangedFile(
+            old_path="src/cart.ts",
+            new_path="src/cart.ts",
+            language="typescript",
+            file_kind=FileKind.SOURCE,
+        ),
+        ChangedFile(
+            old_path="src/review.py",
+            new_path="src/review.py",
+            language="python",
+            file_kind=FileKind.SOURCE,
+        ),
+    ]
+
+    def fail_typescript(*args: object, **kwargs: object) -> AnalyzerResult | None:
+        raise AnalyzerError("boom")
+
+    monkeypatch.setattr("apex_ray.analyzers.run_typescript_analyzer", fail_typescript)
+
+    result = run_analyzers(tmp_path, changed)
+
+    assert result.results == []
+    assert result.warnings == ["TypeScript analyzer unavailable: boom"]
+    assert result.fallback_reasons_by_path == {
+        "src/cart.ts": "TypeScript analyzer unavailable: boom; using diff-only fallback context."
+    }
+    assert result.backend_runs[0].name == "typescript"
+    assert result.backend_runs[0].changed_files_count == 1
+    assert result.backend_runs[0].warning == "TypeScript analyzer unavailable: boom"
+
+
+def test_run_analyzers_returns_backend_results_and_partial_fallbacks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    changed = [
+        ChangedFile(
+            old_path="src/cart.ts",
+            new_path="src/cart.ts",
+            language="typescript",
+            file_kind=FileKind.SOURCE,
+        )
+    ]
+    analyzer_result = AnalyzerResult(
+        language="typescript",
+        projectRoot=str(tmp_path),
+        tsconfigPath=None,
+        files=[AnalyzerFile(path="src/cart.ts")],
+        warnings=["partial"],
+        indexCache=None,
+        partial=True,
+        failedFiles=["src/cart.ts"],
+    )
+
+    monkeypatch.setattr("apex_ray.analyzers.run_typescript_analyzer", lambda *args, **kwargs: analyzer_result)
+
+    result = run_analyzers(tmp_path, changed)
+
+    assert result.results == [analyzer_result]
+    assert result.warnings == []
+    assert result.fallback_reasons_by_path == {
+        "src/cart.ts": "TypeScript analyzer shard failed; using diff-only fallback context."
+    }
+    assert result.backend_runs[0].result == analyzer_result
 
 
 def test_typescript_analyzer_resolves_workspace_tsconfig_extends(
