@@ -27,7 +27,7 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/dobrotacreator/apex-ray"
+Homepage = "https://dobrotacreator.github.io/apex-ray/"
 Documentation = "https://dobrotacreator.github.io/apex-ray/"
 Repository = "https://github.com/dobrotacreator/apex-ray"
 Issues = "https://github.com/dobrotacreator/apex-ray/issues"

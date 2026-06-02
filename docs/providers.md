@@ -15,6 +15,30 @@ review:
     verify: true
 ```
 
+Put shared provider policy in `.apex-ray/config.yml` only when the whole team can use it. Put personal model IDs, executable paths, job counts, timeouts, and token budgets in `.apex-ray/config.local.yml`.
+
+## Provider Setup Checklist
+
+1. Install and authenticate the local provider CLI.
+2. Run the provider once outside Apex Ray to verify credentials.
+3. Run `apex-ray doctor` from the target repository.
+4. Add shared provider policy or local overrides.
+5. Run a small `--llm` review and inspect the Markdown and JSON reports.
+
+Local override example:
+
+```yaml
+review:
+  llm:
+    provider: codex_cli
+    model: "<personal-codex-model>"
+    effort: medium
+    codex_path: codex
+    jobs: 2
+    timeout_seconds: 900
+    max_input_tokens: 120000
+```
+
 ```yaml
 review:
   llm:
@@ -60,3 +84,31 @@ Codex and Claude can be used in the same project by assigning different provider
 Both providers receive Apex Ray's generated context pack through stdin and must return JSON matching Apex Ray's schema. Claude Code runs with tools disabled for these provider calls; review context comes from Apex Ray, not from letting the provider inspect or edit the repository directly.
 
 Apex Ray records provider-reported usage when the CLI exposes it. Claude Code JSON output can include token usage and estimated cost metadata. Codex CLI JSON events can include token count events in supported versions. If provider usage is absent, reports and telemetry still include Apex Ray's estimated input-token counts.
+
+## Disable LLM Locally
+
+When a machine should avoid LLM cost or does not have provider credentials, use local config:
+
+```yaml
+review:
+  llm:
+    enabled: false
+```
+
+You can still run deterministic analyzer/context reports with:
+
+```bash
+apex-ray review --worktree --no-llm
+```
+
+## Privacy And Cost
+
+With `--llm`, Apex Ray sends selected diff and context-pack content to the configured local CLI provider. Review that provider's privacy and retention policy before using Apex Ray on private code.
+
+Use routing profiles when you want cheaper broad review and stronger verification:
+
+- `review_profile`: broad first-pass review.
+- `verify_profile`: verifier pass for candidate findings.
+- `escalated_review_profile`: stronger review for high-risk packs.
+
+Use telemetry to tune cost, latency, cache hit rates, and coverage after real runs.

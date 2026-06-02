@@ -11,6 +11,17 @@ Apex Ray reads a git diff, builds compact context packs around changed code, run
 !!! warning "Pre-1.0"
     Apex Ray is pre-1.0. Report schemas and configuration can change while the project is prepared for production use.
 
+## Start Here
+
+| Goal | Read |
+| --- | --- |
+| Install Apex Ray and run a first review | [Quick Start](quickstart.md) |
+| Choose review targets, understand reports, and continue partial coverage | [Review Workflow](review-workflow.md) |
+| Configure shared policy, gates, reports, and coverage | [Configuration](configuration.md) |
+| Set up Codex CLI or Claude Code CLI provider routing | [LLM Providers](providers.md) |
+| Add project-specific review rules and team memory | [Rules And Memory](memory.md) |
+| Understand internals and contribution workflow | [Architecture](architecture.md) and [Development](development.md) |
+
 ## What It Does
 
 - Builds TS/JS context packs from changed files, symbols, callers, callees, contracts, metadata, and related tests.
@@ -21,71 +32,49 @@ Apex Ray reads a git diff, builds compact context packs around changed code, run
 - Replays historical GitHub PR review comments for local evals.
 - Writes local telemetry so teams can tune cost, latency, and coverage over time.
 
-## Requirements
+## What It Does Not Do
 
-- Python 3.14+
-- Node.js 24+
-- npm
-- git
-- uv for development
-- Codex CLI or Claude Code CLI for LLM review
-- GitHub CLI only for historical PR capture/eval commands
+Apex Ray does not replace tests, linters, typecheck, dependency scanners, SAST, CI, or human review. It focuses on diff-aware behavioral review and makes partial review coverage explicit instead of hiding it.
 
-## Install
-
-One-off run without a persistent install:
-
-```bash
-uvx apex-ray --help
-uvx apex-ray doctor
-```
-
-User-level CLI install:
+## Fast Path
 
 ```bash
 uv tool install apex-ray
-apex-ray --version
 apex-ray doctor
-```
-
-`pipx install apex-ray` is also supported if you use pipx for isolated Python CLI tools.
-
-## Quickstart
-
-In a project you want to review:
-
-```bash
 apex-ray init
-apex-ray doctor
-git status --short
-```
-
-Inspect and commit the setup files before using the first worktree review for application changes.
-
-After the setup commit, run a deterministic local review:
-
-```bash
 apex-ray review --worktree --no-llm --output .apex-ray/reports/review.md --json .apex-ray/reports/review.json
 ```
 
-Run the configured LLM review explicitly:
+After provider configuration is ready:
 
 ```bash
 apex-ray review --worktree --llm --output .apex-ray/reports/review.md --json .apex-ray/reports/review.json --html .apex-ray/reports/review.html
 ```
 
-Run the same gate that `apex-ray init` wires into pre-push:
+Run the pre-push gate manually:
 
 ```bash
 apex-ray gate pre-push
 ```
 
-## Learn More
+See [Quick Start](quickstart.md) for the full first-run sequence.
 
-- [Configuration](configuration.md)
-- [LLM providers](providers.md)
-- [Rules and memory](memory.md)
-- [Architecture and workflow](architecture.md)
-- [Telemetry](telemetry.md)
-- [Historical PR replay evals](pr-eval.md)
-- [Development](development.md)
+## Core Concepts
+
+- **Context packs** are the unit of review. A pack usually represents one changed symbol or file-level change plus nearby references, callees, contracts, rules, memory, metadata, and related tests.
+- **Rules** are stable project constraints injected only when they match a context pack.
+- **Memory** is curated team learning, false-positive calibration, and domain vocabulary.
+- **Coverage** records which packs were reviewed deeply, reviewed shallowly, skipped, or left as residual work.
+- **Reports** are local artifacts. Markdown and HTML are for humans; JSON is for automation and continuation.
+
+## Documentation Map
+
+- [Quick Start](quickstart.md): install, initialize a repo, run first no-LLM and LLM reviews.
+- [Review Workflow](review-workflow.md): daily commands, targets, reports, continuation, cache behavior, and troubleshooting.
+- [Configuration](configuration.md): shared config, local overrides, coverage, reports, and pre-push gate policy.
+- [LLM Providers](providers.md): Codex CLI, Claude Code CLI, profiles, routing, effort, usage, and privacy boundary.
+- [Rules And Memory](memory.md): project-specific review rules and curated repo memory.
+- [Telemetry](telemetry.md): local JSONL metrics for cost, latency, routing, and coverage tuning.
+- [Historical PR Replay Evals](pr-eval.md): capture and replay historical PR review comments for quality calibration.
+- [Architecture](architecture.md): implementation map, review flow, init flow, gate flow, eval flow, and benchmark flow.
+- [Development](development.md): contributor setup, checks, docs build, and release hygiene.

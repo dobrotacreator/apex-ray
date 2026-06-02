@@ -74,6 +74,38 @@ review:
     path: .apex-ray/telemetry/local-review-runs.jsonl
 ```
 
+## Common Local Overrides
+
+Disable LLM review on a machine that should stay deterministic or offline:
+
+```yaml
+review:
+  llm:
+    enabled: false
+```
+
+Use a personal provider and smaller budget without changing team policy:
+
+```yaml
+review:
+  llm:
+    provider: claude_code_cli
+    model: "<personal-model-or-alias>"
+    jobs: 2
+    max_input_tokens: 80000
+```
+
+Keep telemetry local to your machine:
+
+```yaml
+review:
+  telemetry:
+    enabled: true
+    path: .apex-ray/telemetry/local-review-runs.jsonl
+```
+
+Use `.apex-ray/config.yml` for shared policy and `.apex-ray/config.local.yml` for provider, model, cost, cache, timeout, and telemetry differences between contributors.
+
 ## Rules
 
 Rules are Markdown files with YAML frontmatter under `.apex-ray/rules/`. Rules are injected only into matching context packs.
@@ -95,6 +127,15 @@ Use memory for known false positives, recurring review patterns, severity calibr
 - `exhaustive`: review every reviewable pack when budget allows.
 
 Reports show partial severity, reviewed/unreviewed packs, residual P0/P1 work, and continuation commands.
+
+Tune coverage with:
+
+- `max_packs`: total LLM-reviewable pack cap.
+- `max_deep_packs`: cap for full deep review.
+- `max_input_tokens`: approximate total LLM review input-token budget.
+- `coverage_mode`: breadth/depth strategy.
+
+Prefer `balanced` for normal team use. Use `fast` for cheap smoke review and `exhaustive` for high-risk changes when provider cost and latency are acceptable.
 
 ## Reports
 
@@ -136,3 +177,17 @@ Set `review.llm.enabled: false` in local config when a machine should keep norma
 - `never`: suppress progress.
 
 `progress_interval_seconds` throttles repeated per-pack counters while still forcing major stage messages and final counters.
+
+## Config Validation
+
+Run diagnostics after changing configuration:
+
+```bash
+apex-ray doctor
+```
+
+Run a no-LLM review to verify discovery, ignores, analyzer coverage, and report paths without provider cost:
+
+```bash
+apex-ray review --worktree --no-llm --output .apex-ray/reports/review.md --json .apex-ray/reports/review.json
+```
