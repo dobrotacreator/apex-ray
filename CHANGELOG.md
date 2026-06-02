@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.1.5](https://github.com/dobrotacreator/apex-ray/compare/v0.1.4...v0.1.5) (2026-06-02)
+
+
+### Features
+
+* **gate:** add strict incremental pre-push retry ([#25](https://github.com/dobrotacreator/apex-ray/issues/25)) ([2cd1c19](https://github.com/dobrotacreator/apex-ray/commit/2cd1c1940bed386008800ba487171a20928ece0a))
+
+
+### Documentation
+
+* add MkDocs documentation site ([#22](https://github.com/dobrotacreator/apex-ray/issues/22)) ([0eabc74](https://github.com/dobrotacreator/apex-ray/commit/0eabc7404e56dc9d93b8da73fd2ef29869806677))
+* polish documentation site content ([#24](https://github.com/dobrotacreator/apex-ray/issues/24)) ([66f8689](https://github.com/dobrotacreator/apex-ray/commit/66f868981b995f1d9bad8788cf1d79faf55b2df2))
+
 ## [0.1.4](https://github.com/dobrotacreator/apex-ray/compare/v0.1.3...v0.1.4) (2026-06-01)
 
 
