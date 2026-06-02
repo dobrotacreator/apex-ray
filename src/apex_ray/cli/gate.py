@@ -8,8 +8,23 @@ from pydantic import ValidationError
 from apex_ray import git
 from apex_ray.cli.common import ensure_distinct_outputs
 from apex_ray.config import ConfigError, load_config
-from apex_ray.gates import evaluate_pre_push_gate, render_pre_push_gate_stdout
+from apex_ray.gate_retry import (
+    CarriedFinding,
+    CoverageDebt,
+    build_pre_push_state,
+    changed_paths,
+    check_incremental_eligibility,
+    config_fingerprint,
+    coverage_debt_from_decision,
+    current_blocking_findings,
+    dedupe_carried_findings,
+    load_pre_push_state,
+    resolve_state_path,
+    write_pre_push_state,
+)
+from apex_ray.gates import PrePushGateDecision, PrePushRetrySummary, evaluate_pre_push_gate, render_pre_push_gate_stdout
 from apex_ray.llm import LLMProviderError
+from apex_ray.llm.providers import provider_from_config
 from apex_ray.models import ReviewReport, TargetMode
 from apex_ray.pipeline import continue_review_from_report, run_review_pipeline
 from apex_ray.progress import NoopProgress, ProgressSink, StreamProgress, progress_enabled
@@ -68,16 +83,52 @@ def pre_push(
 
     previous_report = _load_previous_report(json_output)
     target_base = base or review_config.base
+    state_path = resolve_state_path(root, gate_config)
+    retry_state = None
+    retry_summary: PrePushRetrySummary | None = None
+    current_head = ""
+    merge_base_sha = ""
+    config_hash = ""
+    incremental_mode = False
+    incremental_fallback_reason = ""
+    if gate_config.incremental_retry.enabled:
+        try:
+            current_head = git.rev_parse(root, "HEAD")
+            merge_base_sha = git.merge_base(root, target_base, "HEAD")
+        except git.GitError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+        config_hash = config_fingerprint(review_config, gate_config)
+        retry_state = load_pre_push_state(state_path)
+        previous_head_exists = bool(retry_state and git.object_exists(root, retry_state.head_sha))
+        eligibility = check_incremental_eligibility(
+            retry_state,
+            repo_root=root,
+            base_ref=target_base,
+            merge_base_sha=merge_base_sha,
+            config_hash=config_hash,
+            previous_head_exists=previous_head_exists,
+        )
+        incremental_mode = eligibility.eligible
+        incremental_fallback_reason = eligibility.reason
+
     started_monotonic = time.monotonic()
     try:
-        progress.event(f"reading diff {target_base}...HEAD", force=True)
-        diff_text = _load_base_diff(root, target_base)
+        if incremental_mode and retry_state is not None:
+            progress.event(f"reading diff {retry_state.head_sha}..HEAD", force=True)
+            diff_text = _load_range_diff(root, retry_state.head_sha, "HEAD")
+            target_mode = TargetMode.PATCH
+            report_base = f"{retry_state.head_sha}..HEAD"
+        else:
+            progress.event(f"reading diff {target_base}...HEAD", force=True)
+            diff_text = _load_base_diff(root, target_base)
+            target_mode = TargetMode.BASE
+            report_base = target_base
         report = run_review_pipeline(
             root,
             diff_text,
-            TargetMode.BASE,
+            target_mode,
             review_config,
-            base=target_base,
+            base=report_base,
             config_path=config_path,
             progress=progress,
         )
@@ -100,9 +151,43 @@ def pre_push(
     progress.event("writing reports", force=True)
     _set_continue_commands(report, json_output)
     previous_decision = evaluate_pre_push_gate(previous_report, gate_config) if previous_report else None
-    decision = evaluate_pre_push_gate(report, gate_config)
+    current_decision = evaluate_pre_push_gate(report, gate_config)
+    active_carried_findings: list[CarriedFinding] = []
+    resolved_carried_count = 0
+    carried_coverage_debt = CoverageDebt()
+    if incremental_mode and retry_state is not None:
+        active_carried_findings, resolved_carried_count = _resolve_incremental_carried_findings(
+            retry_state.active_findings,
+            report,
+            repo_root=root,
+            config=review_config,
+            progress=progress,
+        )
+        if retry_state.coverage_debt.quality_gate_failed or retry_state.coverage_debt.partial_blocked:
+            carried_coverage_debt = retry_state.coverage_debt
+    current_coverage_debt = coverage_debt_from_decision(
+        report,
+        quality_gate_failed=current_decision.quality_gate_failed,
+        partial_blocked=current_decision.partial_blocked,
+        reasons=current_decision.reasons,
+    )
+    decision = _combine_incremental_decision(current_decision, active_carried_findings, carried_coverage_debt)
+    if gate_config.incremental_retry.enabled:
+        retry_summary = PrePushRetrySummary(
+            mode="incremental" if incremental_mode else "full",
+            fallback_reason="" if incremental_mode else incremental_fallback_reason,
+            new_blocking_findings=len(current_decision.blocking_findings),
+            still_blocking_carried_findings=sum(
+                1 for carried in active_carried_findings if carried.status == "still_present"
+            ),
+            uncertain_carried_findings=sum(1 for carried in active_carried_findings if carried.status == "uncertain"),
+            resolved_carried_findings=resolved_carried_count,
+            carried_coverage_reasons=carried_coverage_debt.reasons,
+        )
 
     markdown_text = render_markdown(report)
+    if retry_summary is not None:
+        markdown_text = _prepend_retry_summary_markdown(markdown_text, retry_summary, decision)
     json_text = report.model_dump_json(indent=2)
     html_text = render_html(report) if html_output is not None else None
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -125,6 +210,30 @@ def pre_push(
         artifacts,
         created_at=report.generated_at,
     )
+
+    if gate_config.incremental_retry.enabled:
+        state_coverage_debt = _merge_coverage_debt(carried_coverage_debt, current_coverage_debt)
+        state_findings = dedupe_carried_findings(
+            [
+                *active_carried_findings,
+                *current_blocking_findings(report, current_decision.blocking_findings, report_path=output),
+            ]
+        )
+        write_pre_push_state(
+            state_path,
+            build_pre_push_state(
+                repo_root=root,
+                base_ref=target_base,
+                merge_base_sha=merge_base_sha,
+                head_sha=current_head,
+                config_hash=config_hash,
+                report=report,
+                report_path=output,
+                json_path=json_output,
+                active_findings=state_findings,
+                coverage_debt=state_coverage_debt,
+            ),
+        )
 
     telemetry_enabled = (
         review_config.telemetry.enabled or telemetry or telemetry_path is not None
@@ -157,6 +266,7 @@ def pre_push(
             base=target_base,
             config=gate_config,
             previous_decision=previous_decision,
+            retry_summary=retry_summary,
         ),
         nl=False,
     )
@@ -181,6 +291,15 @@ def _load_base_diff(root: Path, base: str) -> str:
         raise typer.BadParameter(str(exc)) from exc
 
 
+def _load_range_diff(root: Path, old_ref: str, new_ref: str) -> str:
+    if not git.is_git_repo(root):
+        raise typer.BadParameter("Current directory is not a git repository.")
+    try:
+        return git.diff_range(root, old_ref, new_ref)
+    except git.GitError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+
 def _load_previous_report(path: Path) -> ReviewReport | None:
     if not path.exists():
         return None
@@ -199,3 +318,146 @@ def _progress_for_gate(config) -> ProgressSink:
     if not progress_enabled(config.progress):
         return NoopProgress()
     return StreamProgress(interval_seconds=config.progress_interval_seconds)
+
+
+def _resolve_incremental_carried_findings(
+    carried_findings: list[CarriedFinding],
+    report: ReviewReport,
+    *,
+    repo_root: Path,
+    config,
+    progress: ProgressSink,
+) -> tuple[list[CarriedFinding], int]:
+    changed = changed_paths(report)
+    unchanged_active: list[CarriedFinding] = []
+    needs_resolution: list[CarriedFinding] = []
+    for carried in carried_findings:
+        relevant = set(carried.relevant_files or [carried.finding.file])
+        if changed and relevant & changed:
+            needs_resolution.append(carried)
+        else:
+            unchanged_active.append(
+                carried.model_copy(
+                    update={
+                        "status": "still_present",
+                        "resolution_reason": "No relevant files changed since the previous gate attempt.",
+                    }
+                )
+            )
+    unresolved = resolve_carried_findings(
+        needs_resolution,
+        report,
+        repo_root=repo_root,
+        config=config,
+        progress=progress,
+    )
+    return dedupe_carried_findings([*unchanged_active, *unresolved]), len(needs_resolution) - len(unresolved)
+
+
+def resolve_carried_findings(
+    carried_findings: list[CarriedFinding],
+    report: ReviewReport,
+    *,
+    repo_root: Path,
+    config,
+    progress: ProgressSink,
+) -> list[CarriedFinding]:
+    if not carried_findings:
+        return []
+    if not config.llm.enabled:
+        progress.event(f"marking {len(carried_findings)} carried finding(s) uncertain; LLM disabled", force=True)
+        return [
+            _uncertain_carried_finding(carried, "Relevant files changed, but LLM resolution is disabled.")
+            for carried in carried_findings
+        ]
+    progress.event(f"resolving {len(carried_findings)} carried finding(s)", force=True)
+    provider = provider_from_config(config.llm)
+    unresolved: list[CarriedFinding] = []
+    for carried in carried_findings:
+        try:
+            resolution = provider.resolve_finding(carried.finding, carried.context_pack, report, repo_root)
+        except Exception as exc:
+            unresolved.append(_uncertain_carried_finding(carried, f"Resolution verifier failed: {exc}"))
+            continue
+        if resolution.status == "resolved":
+            continue
+        unresolved.append(
+            carried.model_copy(
+                update={
+                    "status": str(resolution.status),
+                    "resolution_reason": resolution.reason,
+                    "resolution_confidence": resolution.confidence,
+                }
+            )
+        )
+    return unresolved
+
+
+def _combine_incremental_decision(
+    current: PrePushGateDecision,
+    active_carried_findings: list[CarriedFinding],
+    carried_coverage_debt: CoverageDebt,
+) -> PrePushGateDecision:
+    reasons = list(current.reasons)
+    carried_findings = [carried.finding for carried in active_carried_findings]
+    if carried_findings:
+        reasons.append(f"Carried blocking findings: {len(carried_findings)}")
+    if carried_coverage_debt.quality_gate_failed or carried_coverage_debt.partial_blocked:
+        details = "; ".join(carried_coverage_debt.reasons)
+        reasons.append(f"Carried coverage debt{f': {details}' if details else ''}")
+    return PrePushGateDecision(
+        blocked=bool(reasons),
+        reasons=reasons,
+        blocking_findings=[*current.blocking_findings, *carried_findings],
+        quality_gate_failed=current.quality_gate_failed or carried_coverage_debt.quality_gate_failed,
+        partial_blocked=current.partial_blocked or carried_coverage_debt.partial_blocked,
+    )
+
+
+def _uncertain_carried_finding(carried: CarriedFinding, reason: str) -> CarriedFinding:
+    return carried.model_copy(
+        update={
+            "status": "uncertain",
+            "resolution_reason": reason,
+            "resolution_confidence": "low",
+        }
+    )
+
+
+def _merge_coverage_debt(carried: CoverageDebt, current: CoverageDebt) -> CoverageDebt:
+    quality_gate_failed = carried.quality_gate_failed or current.quality_gate_failed
+    partial_blocked = carried.partial_blocked or current.partial_blocked
+    reasons = [*carried.reasons, *[reason for reason in current.reasons if reason not in carried.reasons]]
+    return CoverageDebt(
+        quality_gate_failed=quality_gate_failed,
+        partial_blocked=partial_blocked,
+        reasons=reasons if quality_gate_failed or partial_blocked else [],
+        partial_severity=current.partial_severity if current.partial_severity != "none" else carried.partial_severity,
+        quality_gate_status=(
+            current.quality_gate_status if current.quality_gate_status != "pass" else carried.quality_gate_status
+        ),
+    )
+
+
+def _prepend_retry_summary_markdown(
+    markdown_text: str,
+    retry_summary: PrePushRetrySummary,
+    decision: PrePushGateDecision,
+) -> str:
+    title = "blocked" if decision.blocked else "passed"
+    lines = [
+        "## Pre-Push Gate",
+        "",
+        f"- Decision: `{title}`",
+        f"- Mode: `{retry_summary.mode}`",
+        f"- New blocking findings: `{retry_summary.new_blocking_findings}`",
+        f"- Still blocking carried findings: `{retry_summary.still_blocking_carried_findings}`",
+        f"- Uncertain carried findings: `{retry_summary.uncertain_carried_findings}`",
+        f"- Resolved carried findings: `{retry_summary.resolved_carried_findings}`",
+    ]
+    if retry_summary.fallback_reason:
+        lines.append(f"- Fallback reason: `{retry_summary.fallback_reason}`")
+    if retry_summary.carried_coverage_reasons:
+        lines.append(f"- Carried coverage debt: `{len(retry_summary.carried_coverage_reasons)}`")
+    lines.append("")
+    return "\n".join(lines) + markdown_text

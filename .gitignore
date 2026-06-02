@@ -29,6 +29,7 @@ dist/
 /review*.html
 /benchmark*.md
 /benchmark*.json
+docs/specs/
 analyzers/typescript/node_modules/
 analyzers/typescript/dist/
 analyzers/typescript/dist-test/

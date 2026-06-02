@@ -48,6 +48,10 @@ def diff_base(cwd: Path, base: str) -> str:
     return run_git(["diff", "--find-renames", "--find-copies", f"{base}...HEAD"], cwd=cwd).stdout
 
 
+def diff_range(cwd: Path, old_ref: str, new_ref: str = "HEAD") -> str:
+    return run_git(["diff", "--find-renames", "--find-copies", old_ref, new_ref], cwd=cwd).stdout
+
+
 def diff_staged(cwd: Path) -> str:
     return run_git(["diff", "--cached", "--find-renames", "--find-copies"], cwd=cwd).stdout
 
@@ -83,3 +87,16 @@ def untracked_files(cwd: Path) -> list[str]:
     if proc.returncode != 0:
         return []
     return [line for line in proc.stdout.splitlines() if line]
+
+
+def rev_parse(cwd: Path, ref: str) -> str:
+    return run_git(["rev-parse", "--verify", ref], cwd=cwd).stdout.strip()
+
+
+def merge_base(cwd: Path, base: str, head: str = "HEAD") -> str:
+    return run_git(["merge-base", base, head], cwd=cwd).stdout.strip()
+
+
+def object_exists(cwd: Path, ref: str) -> bool:
+    proc = run_git(["cat-file", "-e", f"{ref}^{{commit}}"], cwd=cwd, check=False)
+    return proc.returncode == 0

@@ -5,6 +5,8 @@ from pydantic import ValidationError
 from apex_ray.llm.errors import LLMProviderError
 from apex_ray.models import (
     Finding,
+    FindingResolution,
+    FindingResolutionResponse,
     FindingResponse,
     FindingVerification,
     VerificationBatchResponse,
@@ -92,6 +94,21 @@ def verification_batch_response_schema() -> dict[str, object]:
     }
 
 
+def resolution_response_schema() -> dict[str, object]:
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "status": {"type": "string", "enum": ["resolved", "still_present", "uncertain"]},
+            "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
+            "reason": {"type": "string"},
+            "evidence": {"type": "string"},
+            "suggested_next_action": {"type": "string"},
+        },
+        "required": ["status", "confidence", "reason", "evidence", "suggested_next_action"],
+    }
+
+
 def parse_finding_response(text: str, context_pack_id: str) -> FindingResponse:
     try:
         raw = json.loads(text)
@@ -164,6 +181,27 @@ def parse_verification_batch_response(text: str, findings: list[Finding]) -> lis
         )
         for index, finding in enumerate(findings)
     ]
+
+
+def parse_resolution_response(text: str, finding: Finding) -> FindingResolution:
+    try:
+        raw = json.loads(text)
+    except json.JSONDecodeError:
+        raw = json.loads(extract_json_object(text))
+
+    try:
+        response = FindingResolutionResponse.model_validate(raw)
+    except ValidationError as exc:
+        raise LLMProviderError(f"Invalid resolution response: {exc}") from exc
+
+    return FindingResolution(
+        finding=finding,
+        status=response.status,
+        confidence=response.confidence,
+        reason=response.reason,
+        evidence=response.evidence,
+        suggested_next_action=response.suggested_next_action,
+    )
 
 
 def extract_json_object(text: str) -> str:

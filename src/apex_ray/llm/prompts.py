@@ -1,7 +1,7 @@
 import json
 
 from apex_ray.memory import pack_prompt_payload
-from apex_ray.models import ContextPack, Finding
+from apex_ray.models import ContextPack, Finding, ReviewReport
 
 
 def build_review_prompt(pack: ContextPack) -> str:
@@ -92,4 +92,34 @@ def build_verifier_batch_prompt(findings: list[Finding], pack: ContextPack) -> s
         f"{json.dumps({'candidate_findings': findings_payload}, indent=2)}\n\n"
         "Context pack JSON:\n"
         f"{json.dumps(pack_payload, indent=2)}\n"
+    )
+
+
+def build_resolution_prompt(
+    finding: Finding,
+    previous_pack: ContextPack | None,
+    delta_report: ReviewReport,
+) -> str:
+    previous_payload = pack_prompt_payload(previous_pack, "verify") if previous_pack is not None else None
+    delta_pack_payloads = [pack_prompt_payload(pack, "verify") for pack in delta_report.context_packs]
+    delta_payload = {
+        "diff": delta_report.diff.model_dump(mode="json"),
+        "context_packs": delta_pack_payloads,
+    }
+    return (
+        "You are Apex Ray's strict pre-push retry resolution pass.\n"
+        "Decide whether a previously verified blocking code-review finding is resolved in the current snapshot.\n"
+        "Return status `resolved` only when the supplied delta and current context prove that the failure mode no longer applies.\n"
+        "Return `still_present` when the same failure mode remains visible or the delta leaves the relevant code unchanged.\n"
+        "Return `uncertain` when the supplied context is insufficient, ambiguous, or the fix may be elsewhere.\n"
+        "Do not mark resolved merely because the new delta review produced no findings.\n"
+        "Treat previous_context_pack as historical evidence for what was blocked, and delta_report as the only new evidence.\n"
+        "Prefer `uncertain` over `resolved` when proof is incomplete. `still_present` and `uncertain` both continue to block the gate.\n"
+        "Return only JSON that matches the provided schema.\n\n"
+        "Previous blocking finding JSON:\n"
+        f"{json.dumps(finding.model_dump(mode='json'), indent=2)}\n\n"
+        "Previous context pack JSON:\n"
+        f"{json.dumps(previous_payload, indent=2)}\n\n"
+        "Delta report JSON:\n"
+        f"{json.dumps(delta_payload, indent=2)}\n"
     )

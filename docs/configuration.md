@@ -178,6 +178,28 @@ Set `review.llm.enabled: false` in local config when a machine should keep norma
 
 `progress_interval_seconds` throttles repeated per-pack counters while still forcing major stage messages and final counters.
 
+### Incremental Retry
+
+Set `review.gates.pre_push.incremental_retry.enabled: true` to speed up repeated pre-push attempts after a previous gate run.
+
+```yaml
+review:
+  gates:
+    pre_push:
+      incremental_retry:
+        enabled: true
+        state_path: .apex-ray/reports/pre-push-state.json
+```
+
+The first run still reviews `review.base...HEAD`. Later eligible retry runs review only `previous_gate_head..HEAD`, carry forward unresolved blocking findings and coverage debt, and write combined gate state to `state_path`.
+
+Incremental retry is fail-closed:
+
+- previous verified blocking findings keep blocking until the resolution verifier returns `resolved`;
+- `still_present` and `uncertain` resolution results keep blocking;
+- critical carried coverage debt is not cleared by a delta-only run;
+- missing state, missing previous HEAD, merge-base changes, or config/rule/memory/model/prompt/gate-policy changes fall back to a full `review.base...HEAD` review.
+
 ## Config Validation
 
 Run diagnostics after changing configuration:

@@ -46,6 +46,8 @@ def test_init_config_creates_default_file(tmp_path: Path) -> None:
     assert config.reports.retention == 20
     assert config.gates.pre_push.progress == "auto"
     assert config.gates.pre_push.progress_interval_seconds == 5.0
+    assert config.gates.pre_push.incremental_retry.enabled is False
+    assert config.gates.pre_push.incremental_retry.state_path == ".apex-ray/reports/pre-push-state.json"
 
 
 def test_load_config_parses_analyzer_shard_size(tmp_path: Path) -> None:
@@ -88,6 +90,25 @@ def test_load_config_parses_report_archive(tmp_path: Path) -> None:
     assert config.reports.archive is True
     assert config.reports.archive_dir == ".apex-ray/reports/archive"
     assert config.reports.retention == 7
+
+
+def test_load_config_parses_pre_push_incremental_retry(tmp_path: Path) -> None:
+    path = tmp_path / ".apex-ray" / "config.yml"
+    path.parent.mkdir()
+    path.write_text(
+        "review:\n"
+        "  gates:\n"
+        "    pre_push:\n"
+        "      incremental_retry:\n"
+        "        enabled: true\n"
+        "        state_path: .apex-ray/reports/custom-pre-push-state.json\n",
+        encoding="utf-8",
+    )
+
+    config, _ = load_config(tmp_path)
+
+    assert config.gates.pre_push.incremental_retry.enabled is True
+    assert config.gates.pre_push.incremental_retry.state_path == ".apex-ray/reports/custom-pre-push-state.json"
 
 
 def test_load_config_merges_local_override_after_shared_config(tmp_path: Path) -> None:
