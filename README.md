@@ -5,6 +5,7 @@
 # Apex Ray
 
 [![CI](https://github.com/dobrotacreator/apex-ray/actions/workflows/ci.yml/badge.svg)](https://github.com/dobrotacreator/apex-ray/actions/workflows/ci.yml)
+[![Docs](https://img.shields.io/badge/docs-GitHub%20Pages-0ea5e9.svg)](https://dobrotacreator.github.io/apex-ray/)
 [![PyPI](https://img.shields.io/pypi/v/apex-ray.svg)](https://pypi.org/project/apex-ray/)
 [![Python 3.14+](https://img.shields.io/badge/python-3.14%2B-blue.svg)](https://github.com/dobrotacreator/apex-ray/blob/main/pyproject.toml)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)

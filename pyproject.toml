@@ -28,6 +28,7 @@ dependencies = [
 
 [project.urls]
 Homepage = "https://github.com/dobrotacreator/apex-ray"
+Documentation = "https://dobrotacreator.github.io/apex-ray/"
 Repository = "https://github.com/dobrotacreator/apex-ray"
 Issues = "https://github.com/dobrotacreator/apex-ray/issues"
 Changelog = "https://github.com/dobrotacreator/apex-ray/blob/main/CHANGELOG.md"
@@ -42,6 +43,10 @@ dev = [
     "pytest>=8.4",
     "ruff>=0.14",
     "twine>=6.2",
+]
+docs = [
+    "mkdocs>=1.6.1,<2",
+    "mkdocs-material>=9.7.6",
 ]
 
 [build-system]
