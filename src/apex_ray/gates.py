@@ -26,6 +26,17 @@ class PrePushGateDecision:
     partial_blocked: bool = False
 
 
+@dataclass(frozen=True)
+class PrePushRetrySummary:
+    mode: str
+    fallback_reason: str = ""
+    new_blocking_findings: int = 0
+    still_blocking_carried_findings: int = 0
+    uncertain_carried_findings: int = 0
+    resolved_carried_findings: int = 0
+    carried_coverage_reasons: list[str] | None = None
+
+
 def evaluate_pre_push_gate(report: ReviewReport, config: PrePushGateConfig) -> PrePushGateDecision:
     blocking_findings = _blocking_findings(report, config)
     reasons: list[str] = []
@@ -63,6 +74,7 @@ def render_pre_push_gate_stdout(
     base: str,
     config: PrePushGateConfig,
     previous_decision: PrePushGateDecision | None = None,
+    retry_summary: PrePushRetrySummary | None = None,
 ) -> str:
     title = "APEX RAY GATE: BLOCKED" if decision.blocked else "APEX RAY GATE: PASSED"
     lines = [
@@ -75,6 +87,9 @@ def render_pre_push_gate_stdout(
     ]
     if previous_decision is not None:
         lines.extend(_render_delta(decision, previous_decision))
+        lines.append("")
+    if retry_summary is not None:
+        lines.extend(_render_retry_summary(retry_summary))
         lines.append("")
     if decision.reasons:
         lines.append("Reasons:")
@@ -155,6 +170,23 @@ def _render_delta(current: PrePushGateDecision, previous: PrePushGateDecision) -
         f"- Still blocking findings: {len(current_keys & previous_keys)}",
         f"- Resolved blocking findings: {len(previous_keys - current_keys)}",
     ]
+
+
+def _render_retry_summary(summary: PrePushRetrySummary) -> list[str]:
+    lines = [f"Mode: {summary.mode}"]
+    if summary.fallback_reason:
+        lines.append(f"Fallback reason: {summary.fallback_reason}")
+    lines.extend(
+        [
+            f"New blocking findings: {summary.new_blocking_findings}",
+            f"Still blocking carried findings: {summary.still_blocking_carried_findings}",
+            f"Uncertain carried findings: {summary.uncertain_carried_findings}",
+            f"Resolved carried findings: {summary.resolved_carried_findings}",
+        ]
+    )
+    if summary.carried_coverage_reasons:
+        lines.append(f"Carried coverage debt: {len(summary.carried_coverage_reasons)}")
+    return lines
 
 
 def _render_findings(findings: list[Finding], max_findings: int) -> list[str]:

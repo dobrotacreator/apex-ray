@@ -274,6 +274,12 @@ class ReportsConfig(StrictApexModel):
     retention: int | None = Field(default=20, ge=1)
 
 
+class IncrementalPrePushRetryConfig(StrictApexModel):
+    enabled: bool = False
+    state_path: str = ".apex-ray/reports/pre-push-state.json"
+    fallback_on_uncertain_resolution: Literal["block"] = "block"
+
+
 class PrePushGateConfig(StrictApexModel):
     enabled: bool = True
     min_finding_severity: FindingSeverity | None = FindingSeverity.HIGH
@@ -285,6 +291,7 @@ class PrePushGateConfig(StrictApexModel):
     auto_followup_p0: bool = True
     progress: ProgressMode = ProgressMode.AUTO
     progress_interval_seconds: float = Field(default=5.0, ge=0.0)
+    incremental_retry: IncrementalPrePushRetryConfig = Field(default_factory=IncrementalPrePushRetryConfig)
 
 
 class GatesConfig(StrictApexModel):
@@ -739,6 +746,29 @@ class FindingVerification(ApexModel):
     approved: bool
     confidence: FindingConfidence
     reason: str
+
+
+class FindingResolutionStatus(StrEnum):
+    RESOLVED = "resolved"
+    STILL_PRESENT = "still_present"
+    UNCERTAIN = "uncertain"
+
+
+class FindingResolutionResponse(StrictApexModel):
+    status: FindingResolutionStatus
+    confidence: FindingConfidence
+    reason: str
+    evidence: str = ""
+    suggested_next_action: str = ""
+
+
+class FindingResolution(ApexModel):
+    finding: Finding
+    status: FindingResolutionStatus
+    confidence: FindingConfidence
+    reason: str
+    evidence: str = ""
+    suggested_next_action: str = ""
 
 
 class LLMUsage(ApexModel):

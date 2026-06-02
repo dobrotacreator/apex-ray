@@ -13,11 +13,18 @@ from apex_ray.llm.cli import (
     resolve_codex_path,
 )
 from apex_ray.llm.errors import LLMProviderError
-from apex_ray.llm.prompts import build_review_prompt, build_shallow_review_prompt, build_verifier_batch_prompt
+from apex_ray.llm.prompts import (
+    build_resolution_prompt,
+    build_review_prompt,
+    build_shallow_review_prompt,
+    build_verifier_batch_prompt,
+)
 from apex_ray.llm.responses import (
     finding_response_schema,
     parse_finding_response,
+    parse_resolution_response,
     parse_verification_batch_response,
+    resolution_response_schema,
     verification_batch_response_schema,
 )
 from apex_ray.llm.usage import parse_claude_usage_from_json, parse_codex_usage_from_jsonl
@@ -25,11 +32,14 @@ from apex_ray.models import (
     ContextPack,
     Finding,
     FindingConfidence,
+    FindingResolution,
+    FindingResolutionStatus,
     FindingVerification,
     LLMConfig,
     LLMProviderName,
     LLMReviewResult,
     LLMVerificationResult,
+    ReviewReport,
 )
 
 
@@ -38,19 +48,30 @@ class LLMProvider(Protocol):
 
     def verify_finding(self, finding: Finding, pack: ContextPack, repo_root: Path) -> FindingVerification: ...
 
+    def resolve_finding(
+        self,
+        finding: Finding,
+        previous_pack: ContextPack | None,
+        delta_report: ReviewReport,
+        repo_root: Path,
+    ) -> FindingResolution: ...
+
 
 class FakeLLMProvider:
     def __init__(
         self,
         findings: list[Finding] | None = None,
         verification_approvals: list[bool] | None = None,
+        resolution_statuses: list[FindingResolutionStatus | str] | None = None,
     ) -> None:
         self.findings = findings or []
         self.verification_approvals = verification_approvals or []
+        self.resolution_statuses = resolution_statuses or []
         self.reviewed_pack_ids: list[str] = []
         self.verified_batch_pack_ids: list[str] = []
         self.verified_batches: list[list[str]] = []
         self.verified_finding_titles: list[str] = []
+        self.resolved_finding_titles: list[str] = []
 
     def review_context_pack(self, pack: ContextPack, repo_root: Path) -> list[Finding]:
         self.reviewed_pack_ids.append(pack.id)
@@ -73,6 +94,27 @@ class FakeLLMProvider:
         self.verified_batch_pack_ids.append(pack.id)
         self.verified_batches.append([finding.title for finding in findings])
         return [self.verify_finding(finding, pack, repo_root) for finding in findings]
+
+    def resolve_finding(
+        self,
+        finding: Finding,
+        previous_pack: ContextPack | None,
+        delta_report: ReviewReport,
+        repo_root: Path,
+    ) -> FindingResolution:
+        self.resolved_finding_titles.append(finding.title)
+        resolution_index = len(self.resolved_finding_titles) - 1
+        status = (
+            self.resolution_statuses[resolution_index]
+            if resolution_index < len(self.resolution_statuses)
+            else FindingResolutionStatus.UNCERTAIN
+        )
+        return FindingResolution(
+            finding=finding,
+            status=FindingResolutionStatus(status),
+            confidence=FindingConfidence.HIGH,
+            reason=f"Fake resolver returned {status}.",
+        )
 
 
 class CodexCLIProvider:
@@ -175,6 +217,50 @@ class CodexCLIProvider:
                 usage=parse_codex_usage_from_jsonl(proc.stdout),
             )
 
+    def resolve_finding(
+        self,
+        finding: Finding,
+        previous_pack: ContextPack | None,
+        delta_report: ReviewReport,
+        repo_root: Path,
+    ) -> FindingResolution:
+        codex_path = resolve_codex_path(self.config.codex_path, repo_root)
+        prompt = build_resolution_prompt(finding, previous_pack, delta_report)
+
+        with tempfile.TemporaryDirectory(prefix="apex-ray-codex-resolve-") as tmp:
+            tmp_path = Path(tmp)
+            schema_path = tmp_path / "resolution_schema.json"
+            output_path = tmp_path / "resolution.json"
+            schema_path.write_text(
+                json.dumps(resolution_response_schema(), indent=2),
+                encoding="utf-8",
+            )
+
+            command = build_codex_command(
+                codex_path=codex_path,
+                schema_path=schema_path,
+                output_path=output_path,
+                model=self.config.model,
+                effort=self.config.effort,
+            )
+            proc = subprocess.run(
+                command,
+                cwd=tmp_path,
+                input=prompt,
+                text=True,
+                capture_output=True,
+                timeout=self.config.timeout_seconds,
+                check=False,
+            )
+
+            if proc.returncode != 0:
+                details = proc.stderr.strip() or proc.stdout.strip()
+                raise LLMProviderError(f"Codex CLI resolver failed with exit {proc.returncode}: {details}")
+            if not output_path.exists():
+                raise LLMProviderError("Codex CLI resolver did not write an output message.")
+
+            return parse_resolution_response(output_path.read_text(encoding="utf-8"), finding)
+
 
 class ClaudeCodeCLIProvider:
     def __init__(self, config: LLMConfig) -> None:
@@ -255,6 +341,40 @@ class ClaudeCodeCLIProvider:
                 verifications=parse_verification_batch_response(response_text, findings),
                 usage=parse_claude_usage_from_json(proc.stdout),
             )
+
+    def resolve_finding(
+        self,
+        finding: Finding,
+        previous_pack: ContextPack | None,
+        delta_report: ReviewReport,
+        repo_root: Path,
+    ) -> FindingResolution:
+        claude_path = resolve_claude_path(self.config.claude_path, repo_root)
+        prompt = build_resolution_prompt(finding, previous_pack, delta_report)
+
+        with tempfile.TemporaryDirectory(prefix="apex-ray-claude-resolve-") as tmp:
+            tmp_path = Path(tmp)
+            command = build_claude_command(
+                claude_path=claude_path,
+                schema=resolution_response_schema(),
+                model=self.config.model,
+                effort=self.config.effort,
+            )
+            proc = subprocess.run(
+                command,
+                cwd=tmp_path,
+                input=prompt,
+                text=True,
+                capture_output=True,
+                timeout=self.config.timeout_seconds,
+                check=False,
+            )
+
+            if proc.returncode != 0:
+                details = proc.stderr.strip() or proc.stdout.strip()
+                raise LLMProviderError(f"Claude Code CLI resolver failed with exit {proc.returncode}: {details}")
+            response_text = claude_result_text(proc.stdout)
+            return parse_resolution_response(response_text, finding)
 
 
 def provider_from_config(config: LLMConfig) -> LLMProvider:

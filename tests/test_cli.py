@@ -7,12 +7,15 @@ from typer.testing import CliRunner
 
 from apex_ray import __version__
 from apex_ray.cli import app
+from apex_ray.diff import parse_unified_diff
 from apex_ray.llm.cache import REVIEW_PROMPT_VERSION
+from apex_ray.llm.providers import FakeLLMProvider
 from apex_ray.models import (
     DiffStats,
     DiffSummary,
     Finding,
     FindingConfidence,
+    FindingResolutionStatus,
     FindingSeverity,
     FindingVerification,
     ProjectProfile,
@@ -401,6 +404,251 @@ def test_gate_pre_push_blocks_critical_partial_coverage(tmp_path: Path, monkeypa
 
     assert result.exit_code == 1
     assert "Partial coverage is critical" in result.stdout
+
+
+def test_gate_pre_push_incremental_retry_reviews_previous_head_delta(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    _write_incremental_gate_config(tmp_path)
+    diff_calls: list[str] = []
+    heads = iter(["head-1", "head-2"])
+
+    def fake_run_review_pipeline(root, diff_text, target_mode, config, **kwargs):
+        diff_calls.append(diff_text)
+        return build_report(
+            ProjectProfile(root=str(root), is_git_repo=True),
+            config,
+            parse_unified_diff(diff_text, target_mode=target_mode, base=kwargs.get("base")),
+        )
+
+    monkeypatch.setattr("apex_ray.cli.gate.git.repo_root", lambda _cwd: tmp_path)
+    monkeypatch.setattr("apex_ray.cli.gate.git.is_git_repo", lambda _root: True)
+    monkeypatch.setattr("apex_ray.cli.gate.git.rev_parse", lambda _root, _ref: next(heads))
+    monkeypatch.setattr("apex_ray.cli.gate.git.merge_base", lambda _root, _base, _head: "base-1")
+    monkeypatch.setattr("apex_ray.cli.gate.git.object_exists", lambda _root, _ref: True)
+    monkeypatch.setattr(
+        "apex_ray.cli.gate.git.diff_base", lambda _root, _base: _diff_for("src/orders.ts", "old", "full")
+    )
+    monkeypatch.setattr(
+        "apex_ray.cli.gate.git.diff_range",
+        lambda _root, old, new: _diff_for("src/orders.ts", old, new),
+    )
+    monkeypatch.setattr("apex_ray.cli.gate.run_review_pipeline", fake_run_review_pipeline)
+    monkeypatch.setattr("apex_ray.cli.gate.continue_review_from_report", lambda report, **_kwargs: (report, []))
+
+    first = runner.invoke(app, ["gate", "pre-push"], catch_exceptions=False)
+    second = runner.invoke(app, ["gate", "pre-push"], catch_exceptions=False)
+
+    assert first.exit_code == 0
+    assert second.exit_code == 0
+    assert diff_calls == [_diff_for("src/orders.ts", "old", "full"), _diff_for("src/orders.ts", "head-1", "HEAD")]
+    assert "Mode: incremental" in second.stdout
+
+
+def test_gate_pre_push_incremental_retry_carries_blocker_when_unrelated_delta(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    _write_incremental_gate_config(tmp_path)
+    finding = _blocking_finding()
+    heads = iter(["head-1", "head-2"])
+    diff_texts: list[str] = []
+
+    def fake_run_review_pipeline(root, diff_text, target_mode, config, **kwargs):
+        diff_texts.append(diff_text)
+        report_finding = finding if len(diff_texts) == 1 else None
+        return _gate_report(root, config, diff_text, target_mode, kwargs.get("base"), report_finding)
+
+    monkeypatch.setattr("apex_ray.cli.gate.git.repo_root", lambda _cwd: tmp_path)
+    monkeypatch.setattr("apex_ray.cli.gate.git.is_git_repo", lambda _root: True)
+    monkeypatch.setattr("apex_ray.cli.gate.git.rev_parse", lambda _root, _ref: next(heads))
+    monkeypatch.setattr("apex_ray.cli.gate.git.merge_base", lambda _root, _base, _head: "base-1")
+    monkeypatch.setattr("apex_ray.cli.gate.git.object_exists", lambda _root, _ref: True)
+    monkeypatch.setattr(
+        "apex_ray.cli.gate.git.diff_base", lambda _root, _base: _diff_for("src/orders.ts", "old", "full")
+    )
+    monkeypatch.setattr(
+        "apex_ray.cli.gate.git.diff_range",
+        lambda _root, _old, _new: _diff_for("src/other.ts", "before", "after"),
+    )
+    monkeypatch.setattr("apex_ray.cli.gate.run_review_pipeline", fake_run_review_pipeline)
+    monkeypatch.setattr("apex_ray.cli.gate.continue_review_from_report", lambda report, **_kwargs: (report, []))
+
+    first = runner.invoke(app, ["gate", "pre-push"])
+    second = runner.invoke(app, ["gate", "pre-push"])
+
+    assert first.exit_code == 1
+    assert second.exit_code == 1
+    assert "Still blocking carried findings: 1" in second.stdout
+    assert "Missing tenant predicate" in second.stdout
+
+
+def test_gate_pre_push_incremental_retry_resolved_carried_blocker_passes(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    _write_incremental_gate_config(tmp_path)
+    finding = _blocking_finding()
+    heads = iter(["head-1", "head-2"])
+    run_count = 0
+
+    def fake_run_review_pipeline(root, diff_text, target_mode, config, **kwargs):
+        nonlocal run_count
+        run_count += 1
+        report_finding = finding if run_count == 1 else None
+        return _gate_report(root, config, diff_text, target_mode, kwargs.get("base"), report_finding)
+
+    monkeypatch.setattr("apex_ray.cli.gate.git.repo_root", lambda _cwd: tmp_path)
+    monkeypatch.setattr("apex_ray.cli.gate.git.is_git_repo", lambda _root: True)
+    monkeypatch.setattr("apex_ray.cli.gate.git.rev_parse", lambda _root, _ref: next(heads))
+    monkeypatch.setattr("apex_ray.cli.gate.git.merge_base", lambda _root, _base, _head: "base-1")
+    monkeypatch.setattr("apex_ray.cli.gate.git.object_exists", lambda _root, _ref: True)
+    monkeypatch.setattr(
+        "apex_ray.cli.gate.git.diff_base", lambda _root, _base: _diff_for("src/orders.ts", "old", "full")
+    )
+    monkeypatch.setattr(
+        "apex_ray.cli.gate.git.diff_range",
+        lambda _root, _old, _new: _diff_for("src/orders.ts", "before", "after"),
+    )
+    monkeypatch.setattr("apex_ray.cli.gate.run_review_pipeline", fake_run_review_pipeline)
+    monkeypatch.setattr("apex_ray.cli.gate.continue_review_from_report", lambda report, **_kwargs: (report, []))
+    monkeypatch.setattr("apex_ray.cli.gate.resolve_carried_findings", lambda *args, **kwargs: [])
+
+    first = runner.invoke(app, ["gate", "pre-push"])
+    second = runner.invoke(app, ["gate", "pre-push"], catch_exceptions=False)
+
+    assert first.exit_code == 1
+    assert second.exit_code == 0
+    assert "Resolved carried findings: 1" in second.stdout
+
+
+def test_gate_pre_push_incremental_retry_uncertain_resolution_blocks(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    _write_incremental_gate_config(tmp_path)
+    finding = _blocking_finding()
+    heads = iter(["head-1", "head-2"])
+    run_count = 0
+
+    def fake_run_review_pipeline(root, diff_text, target_mode, config, **kwargs):
+        nonlocal run_count
+        run_count += 1
+        report_finding = finding if run_count == 1 else None
+        return _gate_report(root, config, diff_text, target_mode, kwargs.get("base"), report_finding)
+
+    monkeypatch.setattr("apex_ray.cli.gate.git.repo_root", lambda _cwd: tmp_path)
+    monkeypatch.setattr("apex_ray.cli.gate.git.is_git_repo", lambda _root: True)
+    monkeypatch.setattr("apex_ray.cli.gate.git.rev_parse", lambda _root, _ref: next(heads))
+    monkeypatch.setattr("apex_ray.cli.gate.git.merge_base", lambda _root, _base, _head: "base-1")
+    monkeypatch.setattr("apex_ray.cli.gate.git.object_exists", lambda _root, _ref: True)
+    monkeypatch.setattr(
+        "apex_ray.cli.gate.git.diff_base", lambda _root, _base: _diff_for("src/orders.ts", "old", "full")
+    )
+    monkeypatch.setattr(
+        "apex_ray.cli.gate.git.diff_range",
+        lambda _root, _old, _new: _diff_for("src/orders.ts", "before", "after"),
+    )
+    monkeypatch.setattr("apex_ray.cli.gate.run_review_pipeline", fake_run_review_pipeline)
+    monkeypatch.setattr("apex_ray.cli.gate.continue_review_from_report", lambda report, **_kwargs: (report, []))
+
+    first = runner.invoke(app, ["gate", "pre-push"])
+    second = runner.invoke(app, ["gate", "pre-push"])
+
+    assert first.exit_code == 1
+    assert second.exit_code == 1
+    assert "Uncertain carried findings: 1" in second.stdout
+    assert "Missing tenant predicate" in second.stdout
+
+
+def test_gate_pre_push_incremental_retry_uses_resolution_provider(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    _write_incremental_gate_config(tmp_path, llm_enabled=True)
+    finding = _blocking_finding()
+    provider = FakeLLMProvider(resolution_statuses=[FindingResolutionStatus.RESOLVED])
+    heads = iter(["head-1", "head-2"])
+    run_count = 0
+
+    def fake_run_review_pipeline(root, diff_text, target_mode, config, **kwargs):
+        nonlocal run_count
+        run_count += 1
+        report_finding = finding if run_count == 1 else None
+        return _gate_report(root, config, diff_text, target_mode, kwargs.get("base"), report_finding)
+
+    monkeypatch.setattr("apex_ray.cli.gate.git.repo_root", lambda _cwd: tmp_path)
+    monkeypatch.setattr("apex_ray.cli.gate.git.is_git_repo", lambda _root: True)
+    monkeypatch.setattr("apex_ray.cli.gate.git.rev_parse", lambda _root, _ref: next(heads))
+    monkeypatch.setattr("apex_ray.cli.gate.git.merge_base", lambda _root, _base, _head: "base-1")
+    monkeypatch.setattr("apex_ray.cli.gate.git.object_exists", lambda _root, _ref: True)
+    monkeypatch.setattr(
+        "apex_ray.cli.gate.git.diff_base", lambda _root, _base: _diff_for("src/orders.ts", "old", "full")
+    )
+    monkeypatch.setattr(
+        "apex_ray.cli.gate.git.diff_range",
+        lambda _root, _old, _new: _diff_for("src/orders.ts", "before", "after"),
+    )
+    monkeypatch.setattr("apex_ray.cli.gate.run_review_pipeline", fake_run_review_pipeline)
+    monkeypatch.setattr("apex_ray.cli.gate.continue_review_from_report", lambda report, **_kwargs: (report, []))
+    monkeypatch.setattr("apex_ray.cli.gate.provider_from_config", lambda _config: provider)
+
+    first = runner.invoke(app, ["gate", "pre-push"])
+    second = runner.invoke(app, ["gate", "pre-push"], catch_exceptions=False)
+
+    assert first.exit_code == 1
+    assert second.exit_code == 0
+    assert provider.resolved_finding_titles == ["Missing tenant predicate"]
+
+
+def _write_incremental_gate_config(root: Path, *, llm_enabled: bool = False) -> None:
+    config = root / ".apex-ray" / "config.yml"
+    config.parent.mkdir(parents=True)
+    llm_text = "  llm:\n    enabled: true\n    provider: fake\n" if llm_enabled else ""
+    config.write_text(
+        f"review:\n{llm_text}  gates:\n    pre_push:\n      incremental_retry:\n        enabled: true\n",
+        encoding="utf-8",
+    )
+
+
+def _diff_for(path: str, old_value: str, new_value: str) -> str:
+    return f"diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n@@ -1 +1 @@\n-{old_value}\n+{new_value}\n"
+
+
+def _blocking_finding() -> Finding:
+    return Finding(
+        title="Missing tenant predicate",
+        severity=FindingSeverity.HIGH,
+        confidence=FindingConfidence.HIGH,
+        file="src/orders.ts",
+        line=84,
+        failure_mode="The changed query can return another tenant's order.",
+        evidence="The diff removes tenantId from the lookup predicate.",
+        suggested_fix="Restore the tenantId predicate.",
+        suggested_test="Add a cross-tenant lookup regression test.",
+        context_pack_id="src/orders.ts#getOrder:1",
+    )
+
+
+def _gate_report(
+    root: Path,
+    config: ReviewConfig,
+    diff_text: str,
+    target_mode: TargetMode,
+    base: str | None,
+    finding: Finding | None,
+):
+    findings = [finding] if finding is not None else []
+    verifications = (
+        [
+            FindingVerification(
+                finding=finding,
+                approved=True,
+                confidence=FindingConfidence.HIGH,
+                reason="Concrete diff-caused issue.",
+            )
+        ]
+        if finding is not None
+        else []
+    )
+    return build_report(
+        ProjectProfile(root=str(root), is_git_repo=True),
+        config,
+        parse_unified_diff(diff_text, target_mode=target_mode, base=base),
+        findings=findings,
+        verifications=verifications,
+    )
 
 
 def test_review_patch_reports_explicit_config_path(tmp_path: Path, monkeypatch) -> None:
