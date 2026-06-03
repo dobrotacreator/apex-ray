@@ -3,12 +3,16 @@ import json
 from apex_ray.memory import pack_prompt_payload
 from apex_ray.models import ContextPack, Finding, ReviewReport
 
+PYTHON_FILE_SUFFIXES = (".py", ".pyi")
+TS_JS_FILE_SUFFIXES = (".ts", ".tsx", ".js", ".jsx", ".mts", ".cts", ".mjs", ".cjs")
+
 
 def build_review_prompt(pack: ContextPack) -> str:
     payload = pack_prompt_payload(pack, "review", depth="deep")
     return (
         "You are Apex Ray, a strict senior code reviewer.\n"
-        "Review exactly one context pack from a TypeScript/JavaScript diff.\n"
+        "Review exactly one context pack from a code diff.\n"
+        f"{_language_review_guidance(pack)}\n"
         "Report only concrete issues caused by the diff. Do not report style nits, generic advice, or CI/linter findings.\n"
         "Start from diff_snippet and changed_snippets, then use impact_notes only as navigation hints.\n"
         "Use context layers deliberately: references/reference_snippets show callers and consumers; callee_snippets show called contracts, ports, state machines, and side-effect boundaries; contract_snippets show schemas, DTOs, and type contracts; metadata_snippets show framework boundaries such as routes, guards, permissions, DI, request parameters, and module providers; related_test_snippets show intended behavior.\n"
@@ -31,7 +35,8 @@ def build_shallow_review_prompt(pack: ContextPack) -> str:
     payload = pack_prompt_payload(pack, "review", depth="shallow")
     return (
         "You are Apex Ray's fast shallow code-review pass.\n"
-        "Review exactly one compact TypeScript/JavaScript context pack from a diff.\n"
+        "Review exactly one compact code context pack from a diff.\n"
+        f"{_language_shallow_review_guidance(pack)}\n"
         "Use only the supplied diff_snippet, changed_snippets, risk_signals, rules, and memory hints.\n"
         "This pass optimizes breadth and recall on large PRs; report only concrete diff-caused issues visible in this compact context.\n"
         "Do not infer from missing callers, missing schemas, or absent files. Do not report style nits, generic advice, or CI/linter findings.\n"
@@ -57,6 +62,7 @@ def build_verifier_prompt(finding: Finding, pack: ContextPack) -> str:
         "Treat impact_notes as navigation hints only; reject if the concrete diff/snippet evidence does not support the finding.\n"
         "Reject if context_pack_id differs from the supplied context pack id, or if finding.file is not present in any supplied context layer: changed snippets, references, callees, contracts, metadata, or related tests.\n"
         "Use context layers deliberately: references show consumers, callees show called contracts and side-effect boundaries, contracts show schemas/DTO/type requirements, metadata shows framework/route/permission/DI boundaries, and related tests show intended behavior.\n"
+        f"{_language_verifier_guidance(pack)}\n"
         "If rules or rule_matches are supplied, use them as project-specific review criteria. A strict rule can establish review significance when the diff and snippets concretely show a violation, but it cannot replace missing evidence that the changed code exists or that an external behavior assumption is true.\n"
         "If memory_matches are supplied, use them as project-specific calibration, including known false-positive and severity-calibration entries. Reject findings that match known false positives unless the diff evidence materially differs.\n"
         "When consumers, contracts, metadata, or related tests are supplied, approve only when the failure mode is connected to at least one concrete supplied layer and the changed code can realistically trigger it.\n"
@@ -82,6 +88,7 @@ def build_verifier_batch_prompt(findings: list[Finding], pack: ContextPack) -> s
         "Treat impact_notes as navigation hints only; reject if the concrete diff/snippet evidence does not support the finding.\n"
         "Reject if context_pack_id differs from the supplied context pack id, or if finding.file is not present in any supplied context layer: changed snippets, references, callees, contracts, metadata, or related tests.\n"
         "Use context layers deliberately: references show consumers, callees show called contracts and side-effect boundaries, contracts show schemas/DTO/type requirements, metadata shows framework/route/permission/DI boundaries, and related tests show intended behavior.\n"
+        f"{_language_verifier_guidance(pack)}\n"
         "If rules or rule_matches are supplied, use them as project-specific review criteria. A strict rule can establish review significance when the diff and snippets concretely show a violation, but it cannot replace missing evidence that the changed code exists or that an external behavior assumption is true.\n"
         "If memory_matches are supplied, use them as project-specific calibration, including known false-positive and severity-calibration entries. Reject findings that match known false positives unless the diff evidence materially differs.\n"
         "When consumers, contracts, metadata, or related tests are supplied, approve only when the failure mode is connected to at least one concrete supplied layer and the changed code can realistically trigger it.\n"
@@ -123,3 +130,82 @@ def build_resolution_prompt(
         "Delta report JSON:\n"
         f"{json.dumps(delta_payload, indent=2)}\n"
     )
+
+
+def _language_review_guidance(pack: ContextPack) -> str:
+    language = _pack_language_hint(pack)
+    if language == "Python":
+        return (
+            "Language hint: Python.\n"
+            "For Python packs, pay extra attention to FastAPI route/dependency/auth boundaries, "
+            "Pydantic model/settings/validator/schema changes, "
+            "SQLAlchemy session/transaction/commit/rollback boundaries, Alembic migrations, "
+            "async worker/event idempotency and enqueue-after-commit behavior, "
+            "external HTTP/cloud/Redis client timeout/retry/lifecycle behavior, "
+            "pytest/unittest fixture and override coverage, and dataclass/TypedDict/Protocol/ABC contracts."
+        )
+    if language == "TypeScript/JavaScript":
+        return (
+            "Language hint: TypeScript/JavaScript.\n"
+            "For TypeScript/JavaScript packs, pay extra attention to NestJS decorators/modules/providers/guards, "
+            "DTO/schema validators, route parameter/body contracts, DI/provider registration, "
+            "enum/const collection fanout, object/array guard changes, and workspace import/export/member references."
+        )
+    return (
+        f"Language hint: {language}.\n"
+        "For fallback or unknown-language packs, prioritize generic boundary, auth, validation, persistence, "
+        "serialization, path, shell, cache, and concurrency risks that are directly visible in the supplied context."
+    )
+
+
+def _language_shallow_review_guidance(pack: ContextPack) -> str:
+    language = _pack_language_hint(pack)
+    if language == "Python":
+        return (
+            "Language hint: Python.\n"
+            "For Python boundary risks, look for direct evidence of "
+            "FastAPI/Pydantic/SQLAlchemy/Alembic, async worker/event, external I/O, "
+            "and pytest/unittest fixture changes in the supplied snippets."
+        )
+    if language == "TypeScript/JavaScript":
+        return (
+            "Language hint: TypeScript/JavaScript.\n"
+            "For TypeScript/JavaScript boundary risks, look for direct evidence of "
+            "NestJS/DTO/schema/DI/provider/route/cache changes in the supplied snippets."
+        )
+    return (
+        f"Language hint: {language}.\n"
+        "For fallback or unknown-language boundary risks, use only directly visible auth, validation, persistence, "
+        "serialization, path, shell, cache, or concurrency evidence."
+    )
+
+
+def _language_verifier_guidance(pack: ContextPack) -> str:
+    language = _pack_language_hint(pack)
+    if language == "Python":
+        return (
+            "Language hint: Python.\n"
+            "For Python-specific findings, approve only when the failure mode is grounded in supplied Python context "
+            "such as FastAPI/Pydantic/SQLAlchemy/Alembic/pytest boundaries, async worker/event behavior, "
+            "external I/O, or dataclass/TypedDict/Protocol contracts."
+        )
+    if language == "TypeScript/JavaScript":
+        return (
+            "Language hint: TypeScript/JavaScript.\n"
+            "For TypeScript/JavaScript-specific findings, approve only when the failure mode is grounded in supplied "
+            "TS/JS context such as NestJS/DTO/schema/DI/provider/route/cache boundaries or workspace references."
+        )
+    return (
+        f"Language hint: {language}.\n"
+        "For fallback or unknown-language findings, approve only when the generic boundary risk is directly supported "
+        "by changed snippets or supplied context layers."
+    )
+
+
+def _pack_language_hint(pack: ContextPack) -> str:
+    path = pack.file.lower()
+    if path.endswith(PYTHON_FILE_SUFFIXES):
+        return "Python"
+    if path.endswith(TS_JS_FILE_SUFFIXES):
+        return "TypeScript/JavaScript"
+    return "unknown"

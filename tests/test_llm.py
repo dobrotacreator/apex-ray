@@ -79,6 +79,26 @@ def make_pack() -> ContextPack:
     )
 
 
+def make_python_pack() -> ContextPack:
+    return ContextPack(
+        id="src/routes.py#create_resource:1",
+        file="src/routes.py",
+        changed_lines=[(12, 14)],
+        impact_notes=[
+            "Changed symbols: exported function create_resource lines 12-18.",
+            "Reference impact: 1 total reference (call=1); 1 non-import usage reference across 1 file.",
+        ],
+        symbol=AnalyzerSymbol(
+            name="create_resource",
+            kind="function",
+            startLine=12,
+            endLine=18,
+            exported=True,
+            signature="def create_resource(payload: ResourceCreate) -> ResourceRead",
+        ),
+    )
+
+
 def test_fake_provider_returns_findings_with_pack_id() -> None:
     finding = Finding(
         title="Potential incorrect total",
@@ -1728,6 +1748,8 @@ def test_review_prompt_contains_context_pack() -> None:
     prompt = build_review_prompt(pack)
 
     assert "calculateTotal" in prompt
+    assert "Language hint: TypeScript/JavaScript." in prompt
+    assert "NestJS decorators/modules/providers/guards" in prompt
     assert "impact_notes only as navigation hints" in prompt
     assert "contract_snippets show schemas" in prompt
     assert "metadata_snippets show framework boundaries" in prompt
@@ -1742,6 +1764,29 @@ def test_review_prompt_contains_context_pack() -> None:
     assert "Prefer an empty findings array over weak" in prompt
     assert "Reference impact" in prompt
     assert "Return only JSON" in prompt
+
+
+def test_review_prompt_is_language_neutral_and_python_aware() -> None:
+    prompt = build_review_prompt(make_python_pack())
+
+    assert "Review exactly one context pack from a code diff." in prompt
+    assert "TypeScript/JavaScript diff" not in prompt
+    assert "Language hint: Python." in prompt
+    assert "FastAPI route/dependency/auth boundaries" in prompt
+    assert "Pydantic model/settings/validator/schema changes" in prompt
+    assert "SQLAlchemy session/transaction/commit/rollback boundaries" in prompt
+    assert "Alembic migrations" in prompt
+    assert "pytest/unittest fixture" in prompt
+
+
+def test_shallow_review_prompt_is_language_neutral_and_python_aware() -> None:
+    prompt = build_shallow_review_prompt(make_python_pack())
+
+    assert "compact code context pack from a diff" in prompt
+    assert "TypeScript/JavaScript context pack" not in prompt
+    assert "Language hint: Python." in prompt
+    assert "Python boundary risks" in prompt
+    assert "FastAPI/Pydantic/SQLAlchemy/Alembic" in prompt
 
 
 def test_verifier_prompt_contains_finding_and_context() -> None:
@@ -1774,6 +1819,28 @@ def test_verifier_prompt_contains_finding_and_context() -> None:
     assert "concretely show a violation" in prompt
 
 
+def test_verifier_prompt_is_language_neutral_and_python_aware() -> None:
+    finding = Finding(
+        title="Resource validation bypass",
+        severity=FindingSeverity.HIGH,
+        confidence=FindingConfidence.HIGH,
+        file="src/routes.py",
+        line=14,
+        failure_mode="The route can persist invalid resource data.",
+        evidence="The changed code bypasses ResourceCreate validation.",
+        suggested_fix="Validate through the request model before persistence.",
+        suggested_test="Add a route test for invalid payloads.",
+        context_pack_id="src/routes.py#create_resource:1",
+    )
+
+    prompt = build_verifier_prompt(finding, make_python_pack())
+
+    assert "Language hint: Python." in prompt
+    assert "TypeScript/JavaScript diff" not in prompt
+    assert "Python-specific findings" in prompt
+    assert "FastAPI/Pydantic/SQLAlchemy/Alembic/pytest" in prompt
+
+
 def test_verifier_batch_prompt_contains_findings_and_context() -> None:
     finding = Finding(
         title="Cart totals ignore item quantity",
@@ -1796,3 +1863,24 @@ def test_verifier_batch_prompt_contains_findings_and_context() -> None:
     assert "Cart totals ignore item quantity" in prompt
     assert "calculateTotal" in prompt
     assert "Evaluate each candidate independently" in prompt
+
+
+def test_verifier_batch_prompt_is_language_neutral_and_python_aware() -> None:
+    finding = Finding(
+        title="Resource validation bypass",
+        severity=FindingSeverity.HIGH,
+        confidence=FindingConfidence.HIGH,
+        file="src/routes.py",
+        line=14,
+        failure_mode="The route can persist invalid resource data.",
+        evidence="The changed code bypasses ResourceCreate validation.",
+        suggested_fix="Validate through the request model before persistence.",
+        suggested_test="Add a route test for invalid payloads.",
+        context_pack_id="src/routes.py#create_resource:1",
+    )
+
+    prompt = build_verifier_batch_prompt([finding], make_python_pack())
+
+    assert "Language hint: Python." in prompt
+    assert "Python-specific findings" in prompt
+    assert "FastAPI/Pydantic/SQLAlchemy/Alembic/pytest" in prompt
