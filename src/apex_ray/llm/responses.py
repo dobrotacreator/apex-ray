@@ -110,10 +110,7 @@ def resolution_response_schema() -> dict[str, object]:
 
 
 def parse_finding_response(text: str, context_pack_id: str) -> FindingResponse:
-    try:
-        raw = json.loads(text)
-    except json.JSONDecodeError:
-        raw = json.loads(extract_json_object(text))
+    raw = _load_json_response(text, "finding")
 
     try:
         response = FindingResponse.model_validate(raw)
@@ -129,10 +126,7 @@ def parse_finding_response(text: str, context_pack_id: str) -> FindingResponse:
 
 
 def parse_verification_response(text: str, finding: Finding) -> FindingVerification:
-    try:
-        raw = json.loads(text)
-    except json.JSONDecodeError:
-        raw = json.loads(extract_json_object(text))
+    raw = _load_json_response(text, "verification")
 
     try:
         response = VerificationResponse.model_validate(raw)
@@ -148,10 +142,7 @@ def parse_verification_response(text: str, finding: Finding) -> FindingVerificat
 
 
 def parse_verification_batch_response(text: str, findings: list[Finding]) -> list[FindingVerification]:
-    try:
-        raw = json.loads(text)
-    except json.JSONDecodeError:
-        raw = json.loads(extract_json_object(text))
+    raw = _load_json_response(text, "verification")
 
     try:
         response = VerificationBatchResponse.model_validate(raw)
@@ -184,10 +175,7 @@ def parse_verification_batch_response(text: str, findings: list[Finding]) -> lis
 
 
 def parse_resolution_response(text: str, finding: Finding) -> FindingResolution:
-    try:
-        raw = json.loads(text)
-    except json.JSONDecodeError:
-        raw = json.loads(extract_json_object(text))
+    raw = _load_json_response(text, "resolution")
 
     try:
         response = FindingResolutionResponse.model_validate(raw)
@@ -210,3 +198,18 @@ def extract_json_object(text: str) -> str:
     if start == -1 or end == -1 or end <= start:
         raise LLMProviderError("LLM response did not contain a JSON object.")
     return text[start : end + 1]
+
+
+def _load_json_response(text: str, response_kind: str) -> object:
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        extracted = extract_json_object(text)
+
+    try:
+        return json.loads(extracted)
+    except json.JSONDecodeError as exc:
+        raise LLMProviderError(
+            f"LLM {response_kind} response contained invalid JSON: "
+            f"{exc.msg} at line {exc.lineno} column {exc.colno} (char {exc.pos})."
+        ) from exc

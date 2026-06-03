@@ -482,6 +482,7 @@ def test_report_treats_failed_review_run_as_unreviewed_pack() -> None:
     assert data["llm_coverage"]["reviewed_context_packs"] == 0
     assert data["llm_coverage"]["failed_review_runs"] == 1
     assert data["llm_coverage"]["partial_severity"] == "critical"
+    assert "1 review run(s) failed (failed_quota: 1)" in data["llm_coverage"]["partial_reasons"]
     assert data["llm_coverage"]["unreviewed_context_pack_reasons"] == {"src/auth.ts#login:1": "failed_quota"}
     assert data["llm_coverage"]["pack_statuses"][0]["status"] == "failed_quota"
 
