@@ -354,7 +354,7 @@ def test_python_analyzer_respects_empty_dunder_all(tmp_path: Path) -> None:
     assert result.files[0].exports == []
 
 
-def test_python_analyzer_uses_file_level_fallback_for_deleted_symbol_before_kept_symbol(tmp_path: Path) -> None:
+def test_python_analyzer_synthesizes_deleted_symbol_before_kept_symbol(tmp_path: Path) -> None:
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "handlers.py").write_text(
         "def kept() -> bool:\n    return True\n",
@@ -386,7 +386,8 @@ def test_python_analyzer_uses_file_level_fallback_for_deleted_symbol_before_kept
 
     assert result is not None
     assert [symbol.name for symbol in result.files[0].symbols] == ["kept"]
-    assert result.files[0].changed_symbols == []
+    assert [symbol.name for symbol in result.files[0].changed_symbols] == ["removed"]
+    assert result.files[0].changed_symbols[0].signature == "removed Python function: def removed() -> bool:"
 
 
 def test_python_analyzer_collects_nested_class_method_changed_symbols(tmp_path: Path) -> None:
@@ -419,6 +420,487 @@ def test_python_analyzer_collects_nested_class_method_changed_symbols(tmp_path: 
     assert result is not None
     assert "Outer.Inner.handle" in {symbol.name for symbol in result.files[0].symbols}
     assert "Outer.Inner.handle" in {symbol.name for symbol in result.files[0].changed_symbols}
+
+
+def test_python_analyzer_collects_workspace_references_and_callees(tmp_path: Path) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "pricing.py").write_text(
+        "def apply_discount(amount: int) -> int:\n"
+        "    return amount\n\n"
+        "def calculate_total(price: int, quantity: int) -> int:\n"
+        "    subtotal = price * quantity\n"
+        "    return apply_discount(subtotal)\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "src" / "checkout.py").write_text(
+        "from pricing import calculate_total as total_for_cart\n\n"
+        "def checkout(price: int, quantity: int) -> int:\n"
+        "    return total_for_cart(price, quantity)\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "src" / "report.py").write_text(
+        "import pricing\n\n"
+        "def render(price: int, quantity: int) -> int:\n"
+        "    return pricing.calculate_total(price, quantity)\n",
+        encoding="utf-8",
+    )
+    changed = ChangedFile(
+        old_path="src/pricing.py",
+        new_path="src/pricing.py",
+        language="python",
+        file_kind=FileKind.SOURCE,
+        hunks=[
+            {
+                "old_start": 5,
+                "old_lines": 2,
+                "new_start": 5,
+                "new_lines": 2,
+                "lines": [
+                    {"kind": "delete", "content": "    subtotal = price"},
+                    {"kind": "add", "content": "    subtotal = price * quantity"},
+                    {"kind": "context", "content": "    return apply_discount(subtotal)"},
+                ],
+            }
+        ],
+    )
+
+    result = run_python_analyzer(tmp_path, [changed])
+
+    assert result is not None
+    symbol = result.files[0].changed_symbols[0]
+    assert symbol.name == "calculate_total"
+    assert {(reference.file, reference.kind, reference.text) for reference in symbol.references} == {
+        ("src/checkout.py", "call", "total_for_cart(price, quantity)"),
+        ("src/report.py", "call", "pricing.calculate_total(price, quantity)"),
+    }
+    assert [(callee.file, callee.kind, callee.text) for callee in symbol.callees] == [
+        ("src/pricing.py", "callee", "def apply_discount(amount: int) -> int")
+    ]
+
+
+def test_python_analyzer_resolves_relative_and_package_module_import_references(tmp_path: Path) -> None:
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app" / "__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "app" / "pricing.py").write_text(
+        "def calculate_total(price: int, quantity: int) -> int:\n    return price * quantity\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "app" / "checkout.py").write_text(
+        "from .pricing import calculate_total as total\n"
+        "from app import pricing as pricing_module\n\n"
+        "def checkout(price: int, quantity: int) -> int:\n"
+        "    subtotal = total(price, quantity)\n"
+        "    return subtotal + pricing_module.calculate_total(price, quantity)\n",
+        encoding="utf-8",
+    )
+    changed = ChangedFile(
+        old_path="app/pricing.py",
+        new_path="app/pricing.py",
+        language="python",
+        file_kind=FileKind.SOURCE,
+        hunks=[
+            {
+                "old_start": 2,
+                "old_lines": 1,
+                "new_start": 2,
+                "new_lines": 1,
+                "lines": [
+                    {"kind": "delete", "content": "    return price"},
+                    {"kind": "add", "content": "    return price * quantity"},
+                ],
+            }
+        ],
+    )
+
+    result = run_python_analyzer(tmp_path, [changed])
+
+    assert result is not None
+    symbol = result.files[0].changed_symbols[0]
+    assert symbol.name == "calculate_total"
+    assert {(reference.file, reference.kind, reference.text) for reference in symbol.references} == {
+        ("app/checkout.py", "call", "total(price, quantity)"),
+        ("app/checkout.py", "call", "pricing_module.calculate_total(price, quantity)"),
+    }
+
+
+def test_python_analyzer_resolves_function_local_import_references(tmp_path: Path) -> None:
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app" / "__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "app" / "pricing.py").write_text(
+        "def calculate_total(price: int, quantity: int) -> int:\n    return price * quantity\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "app" / "checkout.py").write_text(
+        "def checkout(price: int, quantity: int) -> int:\n"
+        "    from .pricing import calculate_total as total\n"
+        "    from app import pricing as pricing_module\n\n"
+        "    subtotal = total(price, quantity)\n"
+        "    return subtotal + pricing_module.calculate_total(price, quantity)\n",
+        encoding="utf-8",
+    )
+    changed = ChangedFile(
+        old_path="app/pricing.py",
+        new_path="app/pricing.py",
+        language="python",
+        file_kind=FileKind.SOURCE,
+        hunks=[
+            {
+                "old_start": 2,
+                "old_lines": 1,
+                "new_start": 2,
+                "new_lines": 1,
+                "lines": [
+                    {"kind": "delete", "content": "    return price"},
+                    {"kind": "add", "content": "    return price * quantity"},
+                ],
+            }
+        ],
+    )
+
+    result = run_python_analyzer(tmp_path, [changed])
+
+    assert result is not None
+    symbol = result.files[0].changed_symbols[0]
+    assert symbol.name == "calculate_total"
+    assert {(reference.file, reference.kind, reference.text) for reference in symbol.references} == {
+        ("app/checkout.py", "call", "total(price, quantity)"),
+        ("app/checkout.py", "call", "pricing_module.calculate_total(price, quantity)"),
+    }
+
+
+def test_python_analyzer_collects_method_references_from_instances_and_class_calls(tmp_path: Path) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "handlers.py").write_text(
+        "class ResourceHandler:\n    def handle(self, value: str) -> str:\n        return value.strip()\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "src" / "routes.py").write_text(
+        "from handlers import ResourceHandler\n\n"
+        "def route(value: str) -> str:\n"
+        "    handler = ResourceHandler()\n"
+        "    return handler.handle(value)\n",
+        encoding="utf-8",
+    )
+    changed = ChangedFile(
+        old_path="src/handlers.py",
+        new_path="src/handlers.py",
+        language="python",
+        file_kind=FileKind.SOURCE,
+        hunks=[
+            {
+                "old_start": 3,
+                "old_lines": 1,
+                "new_start": 3,
+                "new_lines": 1,
+                "lines": [
+                    {"kind": "delete", "content": "        return value"},
+                    {"kind": "add", "content": "        return value.strip()"},
+                ],
+            }
+        ],
+    )
+
+    result = run_python_analyzer(tmp_path, [changed])
+
+    assert result is not None
+    method = next(symbol for symbol in result.files[0].changed_symbols if symbol.name == "ResourceHandler.handle")
+    assert [(reference.file, reference.kind, reference.text) for reference in method.references] == [
+        ("src/routes.py", "call", "handler.handle(value)")
+    ]
+
+
+def test_python_analyzer_resolves_instance_references_to_imported_class_identity(tmp_path: Path) -> None:
+    (tmp_path / "app").mkdir()
+    (tmp_path / "other").mkdir()
+    (tmp_path / "app" / "__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "other" / "__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "app" / "handlers.py").write_text(
+        "class ResourceHandler:\n    def handle(self, value: str) -> str:\n        return value.strip()\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "other" / "handlers.py").write_text(
+        "class ResourceHandler:\n    def handle(self, value: str) -> str:\n        return value.upper()\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "app" / "routes.py").write_text(
+        "from app.handlers import ResourceHandler\n\n"
+        "def route(value: str) -> str:\n"
+        "    handler: ResourceHandler = ResourceHandler()\n"
+        "    return handler.handle(value)\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "other" / "routes.py").write_text(
+        "from other.handlers import ResourceHandler\n\n"
+        "def route(value: str) -> str:\n"
+        "    handler = ResourceHandler()\n"
+        "    return handler.handle(value)\n",
+        encoding="utf-8",
+    )
+    changed = ChangedFile(
+        old_path="app/handlers.py",
+        new_path="app/handlers.py",
+        language="python",
+        file_kind=FileKind.SOURCE,
+        hunks=[
+            {
+                "old_start": 3,
+                "old_lines": 1,
+                "new_start": 3,
+                "new_lines": 1,
+                "lines": [
+                    {"kind": "delete", "content": "        return value"},
+                    {"kind": "add", "content": "        return value.strip()"},
+                ],
+            }
+        ],
+    )
+
+    result = run_python_analyzer(tmp_path, [changed])
+
+    assert result is not None
+    method = next(symbol for symbol in result.files[0].changed_symbols if symbol.name == "ResourceHandler.handle")
+    assert [(reference.file, reference.kind, reference.text) for reference in method.references] == [
+        ("app/routes.py", "call", "handler.handle(value)")
+    ]
+
+
+def test_python_analyzer_does_not_leak_instance_types_across_function_scopes(tmp_path: Path) -> None:
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app" / "__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "app" / "handlers.py").write_text(
+        "class ResourceHandler:\n    def handle(self, value: str) -> str:\n        return value.strip()\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "app" / "routes.py").write_text(
+        "from app.handlers import ResourceHandler\n\n"
+        "def build(value: str) -> str:\n"
+        "    handler = ResourceHandler()\n"
+        "    return handler.handle(value)\n\n"
+        "def route(handler, value: str) -> str:\n"
+        "    return handler.handle(value)\n",
+        encoding="utf-8",
+    )
+    changed = ChangedFile(
+        old_path="app/handlers.py",
+        new_path="app/handlers.py",
+        language="python",
+        file_kind=FileKind.SOURCE,
+        hunks=[
+            {
+                "old_start": 3,
+                "old_lines": 1,
+                "new_start": 3,
+                "new_lines": 1,
+                "lines": [
+                    {"kind": "delete", "content": "        return value"},
+                    {"kind": "add", "content": "        return value.strip()"},
+                ],
+            }
+        ],
+    )
+
+    result = run_python_analyzer(tmp_path, [changed])
+
+    assert result is not None
+    method = next(symbol for symbol in result.files[0].changed_symbols if symbol.name == "ResourceHandler.handle")
+    assert [(reference.file, reference.kind, reference.text) for reference in method.references] == [
+        ("app/routes.py", "call", "handler.handle(value)")
+    ]
+
+
+def test_python_analyzer_does_not_guess_unknown_attribute_callees(tmp_path: Path) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "service.py").write_text(
+        "def get() -> int:\n    return 1\n\ndef process(client) -> int:\n    return client.get() + 1\n",
+        encoding="utf-8",
+    )
+    changed = ChangedFile(
+        old_path="src/service.py",
+        new_path="src/service.py",
+        language="python",
+        file_kind=FileKind.SOURCE,
+        hunks=[
+            {
+                "old_start": 5,
+                "old_lines": 1,
+                "new_start": 5,
+                "new_lines": 1,
+                "lines": [
+                    {"kind": "delete", "content": "    return client.get()"},
+                    {"kind": "add", "content": "    return client.get() + 1"},
+                ],
+            }
+        ],
+    )
+
+    result = run_python_analyzer(tmp_path, [changed])
+
+    assert result is not None
+    process = result.files[0].changed_symbols[0]
+    assert process.name == "process"
+    assert process.callees == []
+
+
+def test_python_analyzer_synthesizes_deleted_function_symbols(tmp_path: Path) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "handlers.py").write_text(
+        "def kept() -> bool:\n    return True\n",
+        encoding="utf-8",
+    )
+    changed = ChangedFile(
+        old_path="src/handlers.py",
+        new_path="src/handlers.py",
+        language="python",
+        file_kind=FileKind.SOURCE,
+        hunks=[
+            {
+                "old_start": 1,
+                "old_lines": 5,
+                "new_start": 1,
+                "new_lines": 2,
+                "lines": [
+                    {"kind": "delete", "content": "def removed(value: str) -> str:"},
+                    {"kind": "delete", "content": "    return value"},
+                    {"kind": "delete", "content": ""},
+                    {"kind": "context", "content": "def kept() -> bool:"},
+                    {"kind": "context", "content": "    return True"},
+                ],
+            }
+        ],
+    )
+
+    result = run_python_analyzer(tmp_path, [changed])
+
+    assert result is not None
+    assert [symbol.name for symbol in result.files[0].symbols] == ["kept"]
+    assert [symbol.name for symbol in result.files[0].changed_symbols] == ["removed"]
+    assert result.files[0].changed_symbols[0].signature == "removed Python function: def removed(value: str) -> str:"
+
+
+def test_python_analyzer_synthesizes_deleted_method_symbols_with_class_context(tmp_path: Path) -> None:
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app" / "__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "app" / "handlers.py").write_text(
+        "class ResourceHandler:\n    pass\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "app" / "routes.py").write_text(
+        "from app.handlers import ResourceHandler\n\n"
+        "def route(value: str) -> str:\n"
+        "    handler = ResourceHandler()\n"
+        "    return handler.handle(value)\n",
+        encoding="utf-8",
+    )
+    changed = ChangedFile(
+        old_path="app/handlers.py",
+        new_path="app/handlers.py",
+        language="python",
+        file_kind=FileKind.SOURCE,
+        hunks=[
+            {
+                "old_start": 1,
+                "old_lines": 3,
+                "new_start": 1,
+                "new_lines": 2,
+                "lines": [
+                    {"kind": "context", "content": "class ResourceHandler:"},
+                    {"kind": "delete", "content": "    def handle(self, value: str) -> str:"},
+                    {"kind": "delete", "content": "        return value"},
+                    {"kind": "add", "content": "    pass"},
+                ],
+            }
+        ],
+    )
+
+    result = run_python_analyzer(tmp_path, [changed])
+
+    assert result is not None
+    deleted_method = next(
+        symbol for symbol in result.files[0].changed_symbols if symbol.name == "ResourceHandler.handle"
+    )
+    assert deleted_method.kind == "method"
+    assert deleted_method.signature == "removed Python method: def handle(self, value: str) -> str:"
+    assert [(reference.file, reference.kind, reference.text) for reference in deleted_method.references] == [
+        ("app/routes.py", "call", "handler.handle(value)")
+    ]
+
+
+def test_python_analyzer_marks_workspace_scan_partial_when_file_limit_is_reached(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tmp_path / "a.py").write_text("def changed() -> bool:\n    return True\n", encoding="utf-8")
+    (tmp_path / "z.py").write_text("def other() -> bool:\n    return True\n", encoding="utf-8")
+    monkeypatch.setattr("apex_ray.analyzers.PYTHON_WORKSPACE_FILE_LIMIT", 1, raising=False)
+    changed = ChangedFile(
+        old_path="a.py",
+        new_path="a.py",
+        language="python",
+        file_kind=FileKind.SOURCE,
+        hunks=[
+            {
+                "old_start": 2,
+                "old_lines": 1,
+                "new_start": 2,
+                "new_lines": 1,
+                "lines": [
+                    {"kind": "delete", "content": "    return False"},
+                    {"kind": "add", "content": "    return True"},
+                ],
+            }
+        ],
+    )
+
+    result = run_python_analyzer(tmp_path, [changed])
+
+    assert result is not None
+    assert result.files[0].path == "a.py"
+    assert result.partial is True
+    assert any("Python workspace scan reached file limit (1)" in warning for warning in result.warnings)
+
+
+def test_python_analyzer_scores_related_tests_with_import_aliases(tmp_path: Path) -> None:
+    (tmp_path / "app").mkdir()
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "app" / "__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "app" / "pricing.py").write_text(
+        "def calculate_total(price: int, quantity: int) -> int:\n    return price * quantity\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "tests" / "test_pricing_alias.py").write_text(
+        "from app.pricing import calculate_total as total\n\ndef test_total() -> None:\n    assert total(2, 3) == 6\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "tests" / "test_pricing_name_only.py").write_text(
+        "def test_name_only() -> None:\n    assert 'pricing' == 'pricing'\n",
+        encoding="utf-8",
+    )
+    changed = ChangedFile(
+        old_path="app/pricing.py",
+        new_path="app/pricing.py",
+        language="python",
+        file_kind=FileKind.SOURCE,
+        hunks=[
+            {
+                "old_start": 2,
+                "old_lines": 1,
+                "new_start": 2,
+                "new_lines": 1,
+                "lines": [
+                    {"kind": "delete", "content": "    return price"},
+                    {"kind": "add", "content": "    return price * quantity"},
+                ],
+            }
+        ],
+    )
+
+    result = run_python_analyzer(tmp_path, [changed])
+
+    assert result is not None
+    assert result.files[0].related_tests[:2] == [
+        "tests/test_pricing_alias.py",
+        "tests/test_pricing_name_only.py",
+    ]
 
 
 def test_typescript_analyzer_resolves_workspace_tsconfig_extends(
