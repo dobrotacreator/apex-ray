@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from apex_ray.analyzers import run_typescript_analyzer
+from apex_ray.analyzers import run_python_analyzer, run_typescript_analyzer
 from apex_ray.classify import classify_diff
 from apex_ray.context import _estimated_pack_chars, _finalize_pack, _risk_signals_for_symbols, build_context_packs
 from apex_ray.diff import parse_unified_diff
@@ -60,6 +60,57 @@ def test_typescript_analyzer_builds_context_pack(built_ts_analyzer: None) -> Non
     assert packs[0].stats.diff_lines == len(packs[0].diff_snippet)
     assert packs[0].stats.estimated_chars > 0
     assert packs[0].stats.policy_key
+
+
+def test_python_analyzer_builds_context_pack(tmp_path: Path) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "src" / "calculator.py").write_text(
+        "from decimal import Decimal\n\n"
+        "RATE: Decimal = Decimal('1.10')\n\n"
+        "def helper(value: Decimal) -> Decimal:\n"
+        "    return value * RATE\n\n"
+        "def calculate_total(price: Decimal, quantity: int) -> Decimal:\n"
+        "    subtotal = price * quantity\n"
+        "    return helper(subtotal)\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "tests" / "test_calculator.py").write_text(
+        "from decimal import Decimal\n"
+        "from calculator import calculate_total\n\n"
+        "def test_calculate_total() -> None:\n"
+        "    assert calculate_total(Decimal('2'), 3)\n",
+        encoding="utf-8",
+    )
+    diff = parse_unified_diff(
+        """diff --git a/src/calculator.py b/src/calculator.py
+--- a/src/calculator.py
++++ b/src/calculator.py
+@@ -8,3 +8,3 @@
+ def calculate_total(price: Decimal, quantity: int) -> Decimal:
+-    subtotal = price
++    subtotal = price * quantity
+     return helper(subtotal)
+""",
+        TargetMode.PATCH,
+    )
+    diff = classify_diff(diff, ignore_patterns=[])
+
+    result = run_python_analyzer(tmp_path, diff.files)
+    packs = build_context_packs([result], diff.files, ReviewConfig(), repo_root=tmp_path) if result else []
+
+    assert len(packs) == 1
+    assert packs[0].symbol is not None
+    assert packs[0].symbol.name == "calculate_total"
+    assert packs[0].imports == ["from decimal import Decimal"]
+    assert {"RATE", "helper", "calculate_total"} <= set(packs[0].exports)
+    assert packs[0].related_tests == ["tests/test_calculator.py"]
+    assert any("Changed symbols:" in note and "calculate_total" in note for note in packs[0].impact_notes)
+    assert any("Related tests:" in note and "tests/test_calculator.py" in note for note in packs[0].impact_notes)
+    assert packs[0].changed_snippets[0].file == "src/calculator.py"
+    assert "def calculate_total" in packs[0].changed_snippets[0].code
+    assert packs[0].related_test_snippets[0].file == "tests/test_calculator.py"
+    assert "calculate_total(Decimal('2'), 3)" in packs[0].related_test_snippets[0].code
 
 
 def test_context_pack_includes_matching_custom_rule() -> None:

@@ -1,9 +1,12 @@
+import ast
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
 import time
+import tokenize
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,10 +16,14 @@ from pydantic import ValidationError
 
 from apex_ray.models import (
     AnalyzerConfig,
+    AnalyzerFile,
     AnalyzerIndexCacheStats,
+    AnalyzerReference,
     AnalyzerResult,
     AnalyzerShardFailure,
+    AnalyzerSymbol,
     ChangedFile,
+    ChangedHunk,
     FileKind,
 )
 
@@ -26,6 +33,25 @@ class AnalyzerError(RuntimeError):
 
 
 TS_JS_LANGUAGES = {"typescript", "javascript"}
+PYTHON_LANGUAGES = {"python"}
+PYTHON_READ_ERRORS = (OSError, UnicodeDecodeError, SyntaxError)
+PYTHON_RELATED_TEST_LIMIT = 10
+PYTHON_SCAN_IGNORED_DIRS = {
+    ".git",
+    ".hg",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".tox",
+    ".venv",
+    "__pycache__",
+    "build",
+    "dist",
+    "htmlcov",
+    "node_modules",
+    "site-packages",
+}
+PYTHON_DELETED_SYMBOL_RE = re.compile(r"^\s*(?:async\s+def|def|class)\s+[A-Za-z_]\w*")
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,7 +158,14 @@ def _analyzer_backends() -> list[_AnalyzerBackend]:
             changed_files=ts_js_changed_files,
             run=run_typescript_analyzer,
             partial_fallback_reason="TypeScript analyzer shard failed; using diff-only fallback context.",
-        )
+        ),
+        _AnalyzerBackend(
+            name="python",
+            display_name="Python",
+            changed_files=python_changed_files,
+            run=run_python_analyzer,
+            partial_fallback_reason="Python analyzer failed; using diff-only fallback context.",
+        ),
     ]
 
 
@@ -149,6 +182,518 @@ def ts_js_changed_files(files: list[ChangedFile]) -> list[ChangedFile]:
         and not file.is_ignored
         and file.new_path is not None
     ]
+
+
+def has_python_changes(files: list[ChangedFile]) -> bool:
+    return bool(python_changed_files(files))
+
+
+def python_changed_files(files: list[ChangedFile]) -> list[ChangedFile]:
+    return [
+        file
+        for file in files
+        if file.language in PYTHON_LANGUAGES
+        and file.file_kind in {FileKind.SOURCE, FileKind.TEST}
+        and not file.is_ignored
+        and file.new_path is not None
+    ]
+
+
+def run_python_analyzer(
+    repo_root: Path,
+    files: list[ChangedFile],
+    config: AnalyzerConfig | None = None,
+) -> AnalyzerResult | None:
+    changed_files = python_changed_files(files)
+    if not changed_files:
+        return None
+
+    analyzed_files: list[AnalyzerFile] = []
+    warnings: list[str] = []
+    failed_files: list[str] = []
+
+    for changed_file in changed_files:
+        path = changed_file.path
+        source_path = _resolve_python_repo_path(repo_root, path)
+        if source_path is None:
+            warnings.append(f"Unsafe Python file path {path}; using diff-only fallback context.")
+            failed_files.append(path)
+            continue
+        try:
+            source = _read_python_source(source_path)
+        except PYTHON_READ_ERRORS as exc:
+            warnings.append(f"Unable to read Python file {path}: {exc}")
+            failed_files.append(path)
+            continue
+
+        try:
+            module = ast.parse(source, filename=path)
+        except SyntaxError as exc:
+            location = f" at line {exc.lineno}" if exc.lineno else ""
+            warnings.append(f"Unable to parse Python file {path}{location}: {exc.msg}")
+            failed_files.append(path)
+            continue
+
+        symbols = _collect_python_symbols(path, source, module)
+        changed_symbols = _changed_python_symbols(changed_file, symbols)
+        related_tests = _python_related_tests(repo_root, changed_file, symbols)
+        analyzed_files.append(
+            AnalyzerFile(
+                path=path,
+                tsconfigPath=None,
+                symbols=symbols,
+                imports=_python_imports(source, module),
+                exports=_python_exports(module, symbols),
+                relatedTests=related_tests,
+                changedSymbols=changed_symbols,
+            )
+        )
+
+    return AnalyzerResult(
+        language="python",
+        projectRoot=str(repo_root),
+        tsconfigPath=None,
+        files=analyzed_files,
+        warnings=warnings,
+        indexCache=None,
+        partial=bool(failed_files),
+        failedFiles=failed_files,
+        shardFailures=[],
+    )
+
+
+def _resolve_python_repo_path(repo_root: Path, rel_path: str) -> Path | None:
+    candidate = Path(rel_path)
+    if candidate.is_absolute():
+        return None
+
+    resolved_root = repo_root.resolve()
+    resolved_path = (resolved_root / candidate).resolve()
+    try:
+        resolved_path.relative_to(resolved_root)
+    except ValueError:
+        return None
+    return resolved_path
+
+
+def _read_python_source(path: Path) -> str:
+    with tokenize.open(path) as source_file:
+        return source_file.read()
+
+
+def _collect_python_symbols(path: str, source: str, module: ast.Module) -> list[AnalyzerSymbol]:
+    lines = source.splitlines()
+    return sorted(
+        _collect_python_body_symbols(
+            path,
+            source,
+            lines,
+            module.body,
+            parent_name=None,
+            parent_exported=True,
+            scope_kind="module",
+        ),
+        key=lambda symbol: (symbol.start_line, symbol.end_line, symbol.name),
+    )
+
+
+def _collect_python_body_symbols(
+    path: str,
+    source: str,
+    lines: list[str],
+    body: list[ast.stmt],
+    *,
+    parent_name: str | None,
+    parent_exported: bool,
+    scope_kind: Literal["module", "class", "function"],
+) -> list[AnalyzerSymbol]:
+    symbols: list[AnalyzerSymbol] = []
+    for node in body:
+        if isinstance(node, ast.ClassDef):
+            name = _qualified_python_name(parent_name, node.name)
+            exported = scope_kind != "function" and parent_exported and not node.name.startswith("_")
+            class_symbol = _python_class_symbol(path, source, lines, node, name=name, exported=exported)
+            symbols.append(class_symbol)
+            symbols.extend(
+                _collect_python_body_symbols(
+                    path,
+                    source,
+                    lines,
+                    node.body,
+                    parent_name=name,
+                    parent_exported=exported,
+                    scope_kind="class",
+                )
+            )
+        elif isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            name = _qualified_python_name(parent_name, node.name)
+            exported = (
+                not node.name.startswith("_")
+                if scope_kind == "module"
+                else scope_kind == "class" and parent_exported and not node.name.startswith("_")
+            )
+            symbols.append(
+                _python_function_symbol(
+                    path,
+                    source,
+                    lines,
+                    node,
+                    name=name,
+                    exported=exported,
+                    kind="method" if scope_kind == "class" else "function",
+                )
+            )
+            symbols.extend(
+                _collect_python_body_symbols(
+                    path,
+                    source,
+                    lines,
+                    node.body,
+                    parent_name=name,
+                    parent_exported=False,
+                    scope_kind="function",
+                )
+            )
+        elif scope_kind == "module" and isinstance(node, ast.Assign | ast.AnnAssign):
+            symbols.extend(_python_assignment_symbols(path, source, lines, node))
+    return symbols
+
+
+def _qualified_python_name(parent_name: str | None, name: str) -> str:
+    return f"{parent_name}.{name}" if parent_name else name
+
+
+def _python_function_symbol(
+    path: str,
+    source: str,
+    lines: list[str],
+    node: ast.FunctionDef | ast.AsyncFunctionDef,
+    *,
+    name: str,
+    exported: bool,
+    kind: str,
+) -> AnalyzerSymbol:
+    return AnalyzerSymbol(
+        name=name,
+        kind=kind,
+        startLine=_python_node_start_line(node),
+        endLine=_python_node_end_line(node),
+        exported=exported,
+        signature=_python_signature(source, lines, node),
+        references=[],
+        callees=[],
+        contracts=[],
+        metadata=_python_decorator_references(path, source, node.decorator_list),
+    )
+
+
+def _python_class_symbol(
+    path: str,
+    source: str,
+    lines: list[str],
+    node: ast.ClassDef,
+    *,
+    name: str,
+    exported: bool,
+) -> AnalyzerSymbol:
+    return AnalyzerSymbol(
+        name=name,
+        kind="class",
+        startLine=_python_node_start_line(node),
+        endLine=_python_node_end_line(node),
+        exported=exported,
+        signature=_python_signature(source, lines, node),
+        references=[],
+        callees=[],
+        contracts=_python_base_references(path, source, node.bases),
+        metadata=_python_decorator_references(path, source, node.decorator_list),
+    )
+
+
+def _python_assignment_symbols(
+    path: str,
+    source: str,
+    lines: list[str],
+    node: ast.Assign | ast.AnnAssign,
+) -> list[AnalyzerSymbol]:
+    names = _python_assignment_target_names(node)
+    if not names:
+        return []
+    return [
+        AnalyzerSymbol(
+            name=name,
+            kind="variable",
+            startLine=_python_node_start_line(node),
+            endLine=_python_node_end_line(node),
+            exported=not name.startswith("_"),
+            signature=_python_signature(source, lines, node),
+            references=[],
+            callees=[],
+            contracts=_python_annotation_references(path, source, node),
+            metadata=[],
+        )
+        for name in names
+    ]
+
+
+def _python_assignment_target_names(node: ast.Assign | ast.AnnAssign) -> list[str]:
+    targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+    names: list[str] = []
+    for target in targets:
+        names.extend(_python_target_names(target))
+    return names
+
+
+def _python_target_names(target: ast.expr) -> list[str]:
+    if isinstance(target, ast.Name):
+        return [target.id]
+    if isinstance(target, ast.Tuple | ast.List):
+        names: list[str] = []
+        for element in target.elts:
+            names.extend(_python_target_names(element))
+        return names
+    return []
+
+
+def _changed_python_symbols(changed_file: ChangedFile, symbols: list[AnalyzerSymbol]) -> list[AnalyzerSymbol]:
+    changed_ranges = _changed_python_line_ranges(changed_file)
+    return [
+        symbol
+        for symbol in symbols
+        if any(_ranges_overlap(symbol.start_line, symbol.end_line, start, end) for start, end in changed_ranges)
+    ]
+
+
+def _changed_python_line_ranges(file: ChangedFile) -> list[tuple[int, int]]:
+    ranges: list[tuple[int, int]] = []
+    for hunk in file.hunks:
+        added_lines = sorted(line.new_line for line in hunk.lines if line.new_line is not None and line.kind == "add")
+        if added_lines:
+            ranges.extend(_collapse_ranges(added_lines))
+        elif not _deletes_python_symbol_definition(hunk):
+            ranges.append((hunk.new_start, hunk.new_start))
+    return ranges
+
+
+def _deletes_python_symbol_definition(hunk: ChangedHunk) -> bool:
+    return any(line.kind == "delete" and PYTHON_DELETED_SYMBOL_RE.match(line.content) for line in hunk.lines)
+
+
+def _ranges_overlap(a_start: int, a_end: int, b_start: int, b_end: int) -> bool:
+    return a_start <= b_end and b_start <= a_end
+
+
+def _python_imports(source: str, module: ast.Module) -> list[str]:
+    imports: list[str] = []
+    seen: set[str] = set()
+    for node in ast.walk(module):
+        if not isinstance(node, ast.Import | ast.ImportFrom):
+            continue
+        text = _python_node_text(source, node)
+        if text and text not in seen:
+            seen.add(text)
+            imports.append(text)
+    return imports
+
+
+def _python_exports(module: ast.Module, symbols: list[AnalyzerSymbol]) -> list[str]:
+    explicit_exports = _python_dunder_all(module)
+    if explicit_exports is not None:
+        return explicit_exports
+    return sorted(symbol.name for symbol in symbols if symbol.exported and "." not in symbol.name)
+
+
+def _python_dunder_all(module: ast.Module) -> list[str] | None:
+    for node in module.body:
+        value: ast.expr | None = None
+        if isinstance(node, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id == "__all__" for target in node.targets
+        ):
+            value = node.value
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.target.id == "__all__":
+            value = node.value
+        if value is None:
+            continue
+        try:
+            parsed = ast.literal_eval(value)
+        except ValueError:
+            continue
+        except SyntaxError:
+            continue
+        if isinstance(parsed, list | tuple) and all(isinstance(item, str) for item in parsed):
+            return sorted(parsed)
+    return None
+
+
+def _python_related_tests(repo_root: Path, changed_file: ChangedFile, symbols: list[AnalyzerSymbol]) -> list[str]:
+    if changed_file.file_kind == FileKind.TEST:
+        return []
+
+    changed_path = changed_file.path
+    module_name = _python_module_name(changed_path)
+    short_module_name = module_name.removeprefix("src.") if module_name.startswith("src.") else module_name
+    stem = Path(changed_path).stem
+    symbol_names = {symbol.name.split(".")[-1] for symbol in symbols}
+    candidates: list[tuple[int, str]] = []
+
+    for test_path in _iter_python_test_files(repo_root):
+        if test_path == changed_path:
+            continue
+        score = _python_related_test_score(repo_root, test_path, stem, module_name, short_module_name, symbol_names)
+        if score:
+            candidates.append((score, test_path))
+
+    return [path for _, path in sorted(candidates, key=lambda item: (-item[0], item[1]))[:PYTHON_RELATED_TEST_LIMIT]]
+
+
+def _python_related_test_score(
+    repo_root: Path,
+    test_path: str,
+    stem: str,
+    module_name: str,
+    short_module_name: str,
+    symbol_names: set[str],
+) -> int:
+    score = 0
+    test_name = Path(test_path).name
+    if test_name in {f"test_{stem}.py", f"{stem}_test.py"} or f"/{stem}/" in f"/{test_path}/":
+        score += 40
+
+    source_path = _resolve_python_repo_path(repo_root, test_path)
+    if source_path is None:
+        return 0
+
+    try:
+        text = _read_python_source(source_path)
+    except PYTHON_READ_ERRORS:
+        return score
+
+    import_needles = {
+        f"from {module_name} import",
+        f"import {module_name}",
+        f"from {short_module_name} import",
+        f"import {short_module_name}",
+    }
+    if any(needle in text for needle in import_needles):
+        score += 60
+    if stem in text:
+        score += 10
+    if any(name and name in text for name in symbol_names):
+        score += 20
+    return score
+
+
+def _iter_python_test_files(repo_root: Path) -> list[str]:
+    paths: list[str] = []
+    for current_root, dirnames, filenames in os.walk(repo_root):
+        dirnames[:] = [dirname for dirname in dirnames if dirname not in PYTHON_SCAN_IGNORED_DIRS]
+        current_path = Path(current_root)
+        for filename in filenames:
+            if not filename.endswith(".py"):
+                continue
+            path = current_path / filename
+            rel_path = path.relative_to(repo_root).as_posix()
+            if _is_python_test_path(rel_path):
+                paths.append(rel_path)
+    return sorted(paths)
+
+
+def _is_python_test_path(path: str) -> bool:
+    parts = Path(path).parts
+    name = Path(path).name
+    return "tests" in parts or "test" in parts or name.startswith("test_") or name.endswith("_test.py")
+
+
+def _python_module_name(path: str) -> str:
+    without_suffix = path.removesuffix(".py").replace("/", ".")
+    if without_suffix.endswith(".__init__"):
+        without_suffix = without_suffix.removesuffix(".__init__")
+    if without_suffix.startswith("src."):
+        return without_suffix.removeprefix("src.")
+    return without_suffix
+
+
+def _python_decorator_references(path: str, source: str, decorators: list[ast.expr]) -> list[AnalyzerReference]:
+    references: list[AnalyzerReference] = []
+    for decorator in decorators:
+        text = _python_node_text(source, decorator)
+        if not text:
+            continue
+        references.append(
+            AnalyzerReference(
+                file=path,
+                line=_python_node_start_line(decorator),
+                endLine=_python_node_end_line(decorator),
+                text=f"@{text}",
+                kind="metadata",
+            )
+        )
+    return references
+
+
+def _python_base_references(path: str, source: str, bases: list[ast.expr]) -> list[AnalyzerReference]:
+    references: list[AnalyzerReference] = []
+    for base in bases:
+        text = _python_node_text(source, base)
+        if not text:
+            continue
+        references.append(
+            AnalyzerReference(
+                file=path,
+                line=_python_node_start_line(base),
+                endLine=_python_node_end_line(base),
+                text=text,
+                kind="contract",
+            )
+        )
+    return references
+
+
+def _python_annotation_references(path: str, source: str, node: ast.Assign | ast.AnnAssign) -> list[AnalyzerReference]:
+    if not isinstance(node, ast.AnnAssign):
+        return []
+    text = _python_node_text(source, node.annotation)
+    if not text:
+        return []
+    return [
+        AnalyzerReference(
+            file=path,
+            line=_python_node_start_line(node.annotation),
+            endLine=_python_node_end_line(node.annotation),
+            text=text,
+            kind="contract",
+        )
+    ]
+
+
+def _python_signature(
+    source: str,
+    lines: list[str],
+    node: ast.AST,
+) -> str:
+    segment = _python_node_text(source, node)
+    if segment:
+        first_line = segment.splitlines()[0].strip()
+        return first_line.removesuffix(":")
+    line_number = _python_node_start_line(node)
+    if 1 <= line_number <= len(lines):
+        return lines[line_number - 1].strip().removesuffix(":")
+    return ""
+
+
+def _python_node_text(source: str, node: ast.AST) -> str:
+    return (ast.get_source_segment(source, node) or "").strip()
+
+
+def _python_node_start_line(node: ast.AST) -> int:
+    lines = [getattr(node, "lineno", 1)]
+    if isinstance(node, ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef):
+        lines.extend(getattr(decorator, "lineno", getattr(node, "lineno", 1)) for decorator in node.decorator_list)
+    return min(line for line in lines if line is not None)
+
+
+def _python_node_end_line(node: ast.AST) -> int:
+    return getattr(node, "end_lineno", getattr(node, "lineno", 1)) or getattr(node, "lineno", 1)
 
 
 def run_typescript_analyzer(

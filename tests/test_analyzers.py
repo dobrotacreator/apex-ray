@@ -4,7 +4,13 @@ from pathlib import Path
 
 import pytest
 
-from apex_ray.analyzers import AnalyzerError, run_analyzers, run_typescript_analyzer, typescript_analyzer_script
+from apex_ray.analyzers import (
+    AnalyzerError,
+    run_analyzers,
+    run_python_analyzer,
+    run_typescript_analyzer,
+    typescript_analyzer_script,
+)
 from apex_ray.models import AnalyzerConfig, AnalyzerFile, AnalyzerResult, ChangedFile, FileKind
 
 
@@ -67,6 +73,8 @@ def test_run_analyzers_scopes_unavailable_backend_fallback_to_matching_files(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "review.py").write_text("def review() -> bool:\n    return True\n", encoding="utf-8")
     changed = [
         ChangedFile(
             old_path="src/cart.ts",
@@ -89,7 +97,7 @@ def test_run_analyzers_scopes_unavailable_backend_fallback_to_matching_files(
 
     result = run_analyzers(tmp_path, changed)
 
-    assert result.results == []
+    assert [analyzer_result.language for analyzer_result in result.results] == ["python"]
     assert result.warnings == ["TypeScript analyzer unavailable: boom"]
     assert result.fallback_reasons_by_path == {
         "src/cart.ts": "TypeScript analyzer unavailable: boom; using diff-only fallback context."
@@ -97,6 +105,8 @@ def test_run_analyzers_scopes_unavailable_backend_fallback_to_matching_files(
     assert result.backend_runs[0].name == "typescript"
     assert result.backend_runs[0].changed_files_count == 1
     assert result.backend_runs[0].warning == "TypeScript analyzer unavailable: boom"
+    assert result.backend_runs[1].name == "python"
+    assert result.backend_runs[1].changed_files_count == 1
 
 
 def test_run_analyzers_returns_backend_results_and_partial_fallbacks(
@@ -132,6 +142,283 @@ def test_run_analyzers_returns_backend_results_and_partial_fallbacks(
         "src/cart.ts": "TypeScript analyzer shard failed; using diff-only fallback context."
     }
     assert result.backend_runs[0].result == analyzer_result
+
+
+def test_python_analyzer_collects_changed_symbols_imports_exports_and_related_tests(tmp_path: Path) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "src" / "calculator.py").write_text(
+        "from decimal import Decimal\n\n"
+        "RATE: Decimal = Decimal('1.10')\n\n"
+        "def helper(value: Decimal) -> Decimal:\n"
+        "    return value * RATE\n\n"
+        "def calculate_total(price: Decimal, quantity: int) -> Decimal:\n"
+        "    subtotal = price * quantity\n"
+        "    return helper(subtotal)\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "tests" / "test_calculator.py").write_text(
+        "from calculator import calculate_total\n\n"
+        "def test_calculate_total() -> None:\n"
+        "    assert calculate_total(Decimal('2'), 3)\n",
+        encoding="utf-8",
+    )
+    changed = ChangedFile(
+        old_path="src/calculator.py",
+        new_path="src/calculator.py",
+        language="python",
+        file_kind=FileKind.SOURCE,
+        hunks=[
+            {
+                "old_start": 8,
+                "old_lines": 3,
+                "new_start": 8,
+                "new_lines": 3,
+                "lines": [
+                    {"kind": "context", "content": "def calculate_total(price: Decimal, quantity: int) -> Decimal:"},
+                    {"kind": "delete", "content": "    subtotal = price"},
+                    {"kind": "add", "content": "    subtotal = price * quantity"},
+                    {"kind": "context", "content": "    return helper(subtotal)"},
+                ],
+            }
+        ],
+    )
+
+    result = run_python_analyzer(tmp_path, [changed])
+
+    assert result is not None
+    assert result.language == "python"
+    assert result.files[0].path == "src/calculator.py"
+    assert "from decimal import Decimal" in result.files[0].imports
+    assert {"RATE", "helper", "calculate_total"} <= set(result.files[0].exports)
+    assert [symbol.name for symbol in result.files[0].changed_symbols] == ["calculate_total"]
+    assert (
+        result.files[0].changed_symbols[0].signature == "def calculate_total(price: Decimal, quantity: int) -> Decimal"
+    )
+    assert result.files[0].related_tests == ["tests/test_calculator.py"]
+
+
+def test_python_analyzer_collects_class_methods_decorators_and_base_contracts(tmp_path: Path) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "handlers.py").write_text(
+        "class BaseHandler:\n"
+        "    pass\n\n"
+        "class ResourceHandler(BaseHandler):\n"
+        "    @classmethod\n"
+        "    def build(cls, value: str) -> 'ResourceHandler':\n"
+        "        return cls()\n",
+        encoding="utf-8",
+    )
+    changed = ChangedFile(
+        old_path="src/handlers.py",
+        new_path="src/handlers.py",
+        language="python",
+        file_kind=FileKind.SOURCE,
+        hunks=[
+            {
+                "old_start": 6,
+                "old_lines": 2,
+                "new_start": 6,
+                "new_lines": 2,
+                "lines": [
+                    {"kind": "context", "content": "    def build(cls, value: str) -> 'ResourceHandler':"},
+                    {"kind": "delete", "content": "        return ResourceHandler()"},
+                    {"kind": "add", "content": "        return cls()"},
+                ],
+            }
+        ],
+    )
+
+    result = run_python_analyzer(tmp_path, [changed])
+
+    assert result is not None
+    file_result = result.files[0]
+    class_symbol = next(symbol for symbol in file_result.symbols if symbol.name == "ResourceHandler")
+    method_symbol = next(symbol for symbol in file_result.symbols if symbol.name == "ResourceHandler.build")
+    assert class_symbol.contracts[0].text == "BaseHandler"
+    assert method_symbol.metadata[0].text == "@classmethod"
+    assert [symbol.name for symbol in file_result.changed_symbols] == ["ResourceHandler", "ResourceHandler.build"]
+
+
+def test_run_analyzers_adds_python_partial_fallback_for_syntax_errors(tmp_path: Path) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "broken.py").write_text("def broken(:\n    return True\n", encoding="utf-8")
+    changed = [
+        ChangedFile(
+            old_path="src/broken.py",
+            new_path="src/broken.py",
+            language="python",
+            file_kind=FileKind.SOURCE,
+        )
+    ]
+
+    result = run_analyzers(tmp_path, changed)
+
+    assert result.results[0].language == "python"
+    assert result.results[0].partial is True
+    assert result.results[0].failed_files == ["src/broken.py"]
+    assert any("Unable to parse Python file src/broken.py" in warning for warning in result.results[0].warnings)
+    assert result.fallback_reasons_by_path == {
+        "src/broken.py": "Python analyzer failed; using diff-only fallback context."
+    }
+
+
+def test_python_analyzer_rejects_paths_outside_repo(tmp_path: Path) -> None:
+    outside = tmp_path.parent / "outside.py"
+    outside.write_text("def leaked_secret() -> str:\n    return 'secret'\n", encoding="utf-8")
+    changed = ChangedFile(
+        old_path="../outside.py",
+        new_path="../outside.py",
+        language="python",
+        file_kind=FileKind.SOURCE,
+    )
+
+    result = run_python_analyzer(tmp_path, [changed])
+
+    assert result is not None
+    assert result.files == []
+    assert result.partial is True
+    assert result.failed_files == ["../outside.py"]
+    assert result.warnings == ["Unsafe Python file path ../outside.py; using diff-only fallback context."]
+
+
+def test_python_analyzer_treats_invalid_source_encoding_as_partial_fallback(tmp_path: Path) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "binary.py").write_bytes(b"\xff\xfe\xfa")
+    changed = ChangedFile(
+        old_path="src/binary.py",
+        new_path="src/binary.py",
+        language="python",
+        file_kind=FileKind.SOURCE,
+    )
+
+    result = run_python_analyzer(tmp_path, [changed])
+
+    assert result is not None
+    assert result.files == []
+    assert result.partial is True
+    assert result.failed_files == ["src/binary.py"]
+    assert any("Unable to read Python file src/binary.py" in warning for warning in result.warnings)
+
+
+def test_python_analyzer_handles_invalid_related_test_encoding(tmp_path: Path) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "src" / "calculator.py").write_text(
+        "def calculate_total(price: int, quantity: int) -> int:\n    return price * quantity\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "tests" / "test_calculator.py").write_bytes(b"\xff\xfe\xfa")
+    changed = ChangedFile(
+        old_path="src/calculator.py",
+        new_path="src/calculator.py",
+        language="python",
+        file_kind=FileKind.SOURCE,
+        hunks=[
+            {
+                "old_start": 2,
+                "old_lines": 1,
+                "new_start": 2,
+                "new_lines": 1,
+                "lines": [
+                    {"kind": "delete", "content": "    return price"},
+                    {"kind": "add", "content": "    return price * quantity"},
+                ],
+            }
+        ],
+    )
+
+    result = run_python_analyzer(tmp_path, [changed])
+
+    assert result is not None
+    assert result.partial is False
+    assert result.files[0].related_tests == ["tests/test_calculator.py"]
+
+
+def test_python_analyzer_respects_empty_dunder_all(tmp_path: Path) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "exports.py").write_text(
+        "__all__ = []\n\ndef public_helper() -> bool:\n    return True\n",
+        encoding="utf-8",
+    )
+    changed = ChangedFile(
+        old_path="src/exports.py",
+        new_path="src/exports.py",
+        language="python",
+        file_kind=FileKind.SOURCE,
+    )
+
+    result = run_python_analyzer(tmp_path, [changed])
+
+    assert result is not None
+    assert result.files[0].exports == []
+
+
+def test_python_analyzer_uses_file_level_fallback_for_deleted_symbol_before_kept_symbol(tmp_path: Path) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "handlers.py").write_text(
+        "def kept() -> bool:\n    return True\n",
+        encoding="utf-8",
+    )
+    changed = ChangedFile(
+        old_path="src/handlers.py",
+        new_path="src/handlers.py",
+        language="python",
+        file_kind=FileKind.SOURCE,
+        hunks=[
+            {
+                "old_start": 1,
+                "old_lines": 5,
+                "new_start": 1,
+                "new_lines": 2,
+                "lines": [
+                    {"kind": "delete", "content": "def removed() -> bool:"},
+                    {"kind": "delete", "content": "    return True"},
+                    {"kind": "delete", "content": ""},
+                    {"kind": "context", "content": "def kept() -> bool:"},
+                    {"kind": "context", "content": "    return True"},
+                ],
+            }
+        ],
+    )
+
+    result = run_python_analyzer(tmp_path, [changed])
+
+    assert result is not None
+    assert [symbol.name for symbol in result.files[0].symbols] == ["kept"]
+    assert result.files[0].changed_symbols == []
+
+
+def test_python_analyzer_collects_nested_class_method_changed_symbols(tmp_path: Path) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "nested.py").write_text(
+        "class Outer:\n    class Inner:\n        def handle(self, value: int) -> int:\n            return value + 1\n",
+        encoding="utf-8",
+    )
+    changed = ChangedFile(
+        old_path="src/nested.py",
+        new_path="src/nested.py",
+        language="python",
+        file_kind=FileKind.SOURCE,
+        hunks=[
+            {
+                "old_start": 4,
+                "old_lines": 1,
+                "new_start": 4,
+                "new_lines": 1,
+                "lines": [
+                    {"kind": "delete", "content": "            return value"},
+                    {"kind": "add", "content": "            return value + 1"},
+                ],
+            }
+        ],
+    )
+
+    result = run_python_analyzer(tmp_path, [changed])
+
+    assert result is not None
+    assert "Outer.Inner.handle" in {symbol.name for symbol in result.files[0].symbols}
+    assert "Outer.Inner.handle" in {symbol.name for symbol in result.files[0].changed_symbols}
 
 
 def test_typescript_analyzer_resolves_workspace_tsconfig_extends(
