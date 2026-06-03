@@ -101,6 +101,12 @@ def claude_result_text(text: str) -> str:
         if raw.get("is_error"):
             message = raw.get("result") or raw.get("error") or stripped
             raise LLMProviderError(f"Claude Code CLI returned an error: {message}")
+        subtype = str(raw.get("subtype") or "")
+        if subtype.startswith("error_"):
+            message = raw.get("error") or raw.get("result") or subtype
+            raise LLMProviderError(f"Claude Code CLI structured output failed: {subtype}: {message}")
+        if "structured_output" in raw:
+            return json.dumps(raw["structured_output"])
         result = raw.get("result")
         if isinstance(result, str):
             return result

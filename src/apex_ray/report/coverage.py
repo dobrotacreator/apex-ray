@@ -122,6 +122,8 @@ def _build_llm_coverage(
         shallow_only_high_risk_count=len(shallow_only_high_risk_ids),
         failed_review_runs=len(failed_review_runs),
         failed_verify_runs=len(failed_verify_runs),
+        failed_review_status_counts=dict(sorted(Counter(run.status for run in failed_review_runs).items())),
+        failed_verify_status_counts=dict(sorted(Counter(run.status for run in failed_verify_runs).items())),
         unreviewed_count=len(unreviewed_pack_ids),
     )
     pack_statuses = _build_pack_statuses(
@@ -346,6 +348,8 @@ def _coverage_partial_severity(
     shallow_only_high_risk_count: int,
     failed_review_runs: int,
     failed_verify_runs: int,
+    failed_review_status_counts: dict[str, int] | None = None,
+    failed_verify_status_counts: dict[str, int] | None = None,
     unreviewed_count: int,
 ) -> tuple[Literal["none", "minor", "major", "critical"], list[str]]:
     if not enabled or total_context_packs == 0:
@@ -358,9 +362,9 @@ def _coverage_partial_severity(
     if shallow_only_high_risk_count:
         reasons.append(f"{shallow_only_high_risk_count} high-risk context pack(s) only reviewed shallowly")
     if failed_review_runs:
-        reasons.append(f"{failed_review_runs} review run(s) failed")
+        reasons.append(_format_failed_run_reason("review", failed_review_runs, failed_review_status_counts))
     if failed_verify_runs:
-        reasons.append(f"{failed_verify_runs} verifier run(s) failed")
+        reasons.append(_format_failed_run_reason("verifier", failed_verify_runs, failed_verify_status_counts))
     if coverage_ratio < 1.0 and not reasons:
         reasons.append(f"{unreviewed_count} context pack(s) unreviewed")
 
@@ -373,6 +377,12 @@ def _coverage_partial_severity(
     if coverage_ratio < 1.0:
         return "minor", reasons
     return "none", []
+
+
+def _format_failed_run_reason(kind: str, total: int, status_counts: dict[str, int] | None) -> str:
+    details = ", ".join(f"{status}: {count}" for status, count in (status_counts or {}).items())
+    suffix = f" ({details})" if details else ""
+    return f"{total} {kind} run(s) failed{suffix}"
 
 
 def _residual_risk_summary(pack: ContextPack, reason: str) -> LLMResidualRiskSummary:

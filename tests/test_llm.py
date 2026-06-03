@@ -33,6 +33,7 @@ from apex_ray.llm import (
     verify_findings,
 )
 from apex_ray.llm.cache import REVIEW_PROMPT_VERSION, REVIEW_SHALLOW_PROMPT_VERSION, VERIFIER_PROMPT_VERSION, LLMCache
+from apex_ray.llm.cli import claude_result_text
 from apex_ray.llm.usage import parse_claude_usage_from_json, parse_codex_usage_from_jsonl
 from apex_ray.models import (
     AnalyzerReference,
@@ -1497,6 +1498,54 @@ def test_claude_provider_resolves_relative_claude_path_before_changing_cwd(
     assert seen_command[0] == str(claude.resolve())
 
 
+def test_claude_provider_prefers_structured_output_over_text_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = tmp_path / "repo"
+    claude = repo / "tools" / "claude"
+    claude.parent.mkdir(parents=True)
+    claude.write_text("#!/bin/sh\n", encoding="utf-8")
+
+    def fake_run(
+        command: list[str],
+        cwd: Path,
+        input: str,
+        text: bool,
+        capture_output: bool,
+        timeout: int,
+        check: bool,
+    ) -> subprocess.CompletedProcess[str]:
+        stdout = json.dumps(
+            {
+                "type": "result",
+                "subtype": "success",
+                "result": "{findings: []}",
+                "structured_output": {"findings": []},
+            }
+        )
+        return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr("apex_ray.llm.providers.subprocess.run", fake_run)
+
+    provider = ClaudeCodeCLIProvider(LLMConfig(provider=LLMProviderName.CLAUDE_CODE_CLI, claude_path="tools/claude"))
+
+    assert provider.review_context_pack(make_pack(), repo) == []
+
+
+def test_claude_result_text_reports_structured_output_retry_failure() -> None:
+    stdout = json.dumps(
+        {
+            "type": "result",
+            "subtype": "error_max_structured_output_retries",
+            "result": "Could not produce valid output.",
+        }
+    )
+
+    with pytest.raises(LLMProviderError, match="error_max_structured_output_retries"):
+        claude_result_text(stdout)
+
+
 def test_claude_provider_verifies_findings_in_one_batch(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1575,6 +1624,11 @@ def test_parse_finding_response_fills_context_pack_id() -> None:
     )
 
     assert response.findings[0].context_pack_id == "pack-1"
+
+
+def test_parse_finding_response_wraps_invalid_json_as_provider_error() -> None:
+    with pytest.raises(LLMProviderError, match="LLM finding response contained invalid JSON"):
+        parse_finding_response("{findings: []}", "pack-1")
 
 
 def test_finding_response_schema_is_strict() -> None:

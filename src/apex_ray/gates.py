@@ -1,3 +1,4 @@
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -47,6 +48,9 @@ def evaluate_pre_push_gate(report: ReviewReport, config: PrePushGateConfig) -> P
     if quality_gate_failed:
         details = "; ".join(report.llm_coverage.quality_gate_reasons)
         reasons.append(f"Coverage quality gate failed{f': {details}' if details else ''}")
+        failed_review_details = _failed_review_status_details(report)
+        if failed_review_details:
+            reasons.append(f"LLM review run failures: {failed_review_details}")
 
     partial_blocked = _partial_severity_blocks(
         report.llm_coverage.partial_severity,
@@ -139,6 +143,15 @@ def _partial_severity_blocks(
     if threshold in {None, "none"}:
         return False
     return _PARTIAL_SEVERITY_RANK.get(current, 0) >= _PARTIAL_SEVERITY_RANK[str(threshold)]
+
+
+def _failed_review_status_details(report: ReviewReport) -> str:
+    failed_counts = Counter(
+        run.status
+        for run in report.llm_runs
+        if run.kind in {"review", "review_shallow"} and run.status != "ok" and run.status.startswith("failed_")
+    )
+    return ", ".join(f"{status}: {count}" for status, count in sorted(failed_counts.items()))
 
 
 def _finding_identity(finding: object) -> tuple[object, ...]:
