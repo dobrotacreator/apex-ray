@@ -1,10 +1,12 @@
 import ast
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
 import time
+import tokenize
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,6 +23,7 @@ from apex_ray.models import (
     AnalyzerShardFailure,
     AnalyzerSymbol,
     ChangedFile,
+    ChangedHunk,
     FileKind,
 )
 
@@ -31,7 +34,8 @@ class AnalyzerError(RuntimeError):
 
 TS_JS_LANGUAGES = {"typescript", "javascript"}
 PYTHON_LANGUAGES = {"python"}
-PYTHON_TEST_LIMIT = 16
+PYTHON_READ_ERRORS = (OSError, UnicodeDecodeError, SyntaxError)
+PYTHON_RELATED_TEST_LIMIT = 10
 PYTHON_SCAN_IGNORED_DIRS = {
     ".git",
     ".hg",
@@ -47,6 +51,7 @@ PYTHON_SCAN_IGNORED_DIRS = {
     "node_modules",
     "site-packages",
 }
+PYTHON_DELETED_SYMBOL_RE = re.compile(r"^\s*(?:async\s+def|def|class)\s+[A-Za-z_]\w*")
 
 
 @dataclass(frozen=True, slots=True)
@@ -209,10 +214,14 @@ def run_python_analyzer(
 
     for changed_file in changed_files:
         path = changed_file.path
-        source_path = repo_root / path
+        source_path = _resolve_python_repo_path(repo_root, path)
+        if source_path is None:
+            warnings.append(f"Unsafe Python file path {path}; using diff-only fallback context.")
+            failed_files.append(path)
+            continue
         try:
-            source = source_path.read_text(encoding="utf-8")
-        except OSError as exc:
+            source = _read_python_source(source_path)
+        except PYTHON_READ_ERRORS as exc:
             warnings.append(f"Unable to read Python file {path}: {exc}")
             failed_files.append(path)
             continue
@@ -253,42 +262,105 @@ def run_python_analyzer(
     )
 
 
+def _resolve_python_repo_path(repo_root: Path, rel_path: str) -> Path | None:
+    candidate = Path(rel_path)
+    if candidate.is_absolute():
+        return None
+
+    resolved_root = repo_root.resolve()
+    resolved_path = (resolved_root / candidate).resolve()
+    try:
+        resolved_path.relative_to(resolved_root)
+    except ValueError:
+        return None
+    return resolved_path
+
+
+def _read_python_source(path: Path) -> str:
+    with tokenize.open(path) as source_file:
+        return source_file.read()
+
+
 def _collect_python_symbols(path: str, source: str, module: ast.Module) -> list[AnalyzerSymbol]:
     lines = source.splitlines()
+    return sorted(
+        _collect_python_body_symbols(
+            path,
+            source,
+            lines,
+            module.body,
+            parent_name=None,
+            parent_exported=True,
+            scope_kind="module",
+        ),
+        key=lambda symbol: (symbol.start_line, symbol.end_line, symbol.name),
+    )
+
+
+def _collect_python_body_symbols(
+    path: str,
+    source: str,
+    lines: list[str],
+    body: list[ast.stmt],
+    *,
+    parent_name: str | None,
+    parent_exported: bool,
+    scope_kind: Literal["module", "class", "function"],
+) -> list[AnalyzerSymbol]:
     symbols: list[AnalyzerSymbol] = []
-    for node in module.body:
+    for node in body:
         if isinstance(node, ast.ClassDef):
-            class_symbol = _python_class_symbol(path, source, lines, node)
+            name = _qualified_python_name(parent_name, node.name)
+            exported = scope_kind != "function" and parent_exported and not node.name.startswith("_")
+            class_symbol = _python_class_symbol(path, source, lines, node, name=name, exported=exported)
             symbols.append(class_symbol)
-            class_exported = class_symbol.exported
-            for child in node.body:
-                if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef):
-                    symbols.append(
-                        _python_function_symbol(
-                            path,
-                            source,
-                            lines,
-                            child,
-                            class_name=node.name,
-                            exported=class_exported and not child.name.startswith("_"),
-                            kind="method",
-                        )
-                    )
+            symbols.extend(
+                _collect_python_body_symbols(
+                    path,
+                    source,
+                    lines,
+                    node.body,
+                    parent_name=name,
+                    parent_exported=exported,
+                    scope_kind="class",
+                )
+            )
         elif isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            name = _qualified_python_name(parent_name, node.name)
+            exported = (
+                not node.name.startswith("_")
+                if scope_kind == "module"
+                else scope_kind == "class" and parent_exported and not node.name.startswith("_")
+            )
             symbols.append(
                 _python_function_symbol(
                     path,
                     source,
                     lines,
                     node,
-                    class_name=None,
-                    exported=not node.name.startswith("_"),
-                    kind="function",
+                    name=name,
+                    exported=exported,
+                    kind="method" if scope_kind == "class" else "function",
                 )
             )
-        elif isinstance(node, ast.Assign | ast.AnnAssign):
+            symbols.extend(
+                _collect_python_body_symbols(
+                    path,
+                    source,
+                    lines,
+                    node.body,
+                    parent_name=name,
+                    parent_exported=False,
+                    scope_kind="function",
+                )
+            )
+        elif scope_kind == "module" and isinstance(node, ast.Assign | ast.AnnAssign):
             symbols.extend(_python_assignment_symbols(path, source, lines, node))
-    return sorted(symbols, key=lambda symbol: (symbol.start_line, symbol.end_line, symbol.name))
+    return symbols
+
+
+def _qualified_python_name(parent_name: str | None, name: str) -> str:
+    return f"{parent_name}.{name}" if parent_name else name
 
 
 def _python_function_symbol(
@@ -297,11 +369,10 @@ def _python_function_symbol(
     lines: list[str],
     node: ast.FunctionDef | ast.AsyncFunctionDef,
     *,
-    class_name: str | None,
+    name: str,
     exported: bool,
     kind: str,
 ) -> AnalyzerSymbol:
-    name = f"{class_name}.{node.name}" if class_name else node.name
     return AnalyzerSymbol(
         name=name,
         kind=kind,
@@ -316,13 +387,21 @@ def _python_function_symbol(
     )
 
 
-def _python_class_symbol(path: str, source: str, lines: list[str], node: ast.ClassDef) -> AnalyzerSymbol:
+def _python_class_symbol(
+    path: str,
+    source: str,
+    lines: list[str],
+    node: ast.ClassDef,
+    *,
+    name: str,
+    exported: bool,
+) -> AnalyzerSymbol:
     return AnalyzerSymbol(
-        name=node.name,
+        name=name,
         kind="class",
         startLine=_python_node_start_line(node),
         endLine=_python_node_end_line(node),
-        exported=not node.name.startswith("_"),
+        exported=exported,
         signature=_python_signature(source, lines, node),
         references=[],
         callees=[],
@@ -377,12 +456,27 @@ def _python_target_names(target: ast.expr) -> list[str]:
 
 
 def _changed_python_symbols(changed_file: ChangedFile, symbols: list[AnalyzerSymbol]) -> list[AnalyzerSymbol]:
-    changed_ranges = _changed_new_line_ranges(changed_file)
+    changed_ranges = _changed_python_line_ranges(changed_file)
     return [
         symbol
         for symbol in symbols
         if any(_ranges_overlap(symbol.start_line, symbol.end_line, start, end) for start, end in changed_ranges)
     ]
+
+
+def _changed_python_line_ranges(file: ChangedFile) -> list[tuple[int, int]]:
+    ranges: list[tuple[int, int]] = []
+    for hunk in file.hunks:
+        added_lines = sorted(line.new_line for line in hunk.lines if line.new_line is not None and line.kind == "add")
+        if added_lines:
+            ranges.extend(_collapse_ranges(added_lines))
+        elif not _deletes_python_symbol_definition(hunk):
+            ranges.append((hunk.new_start, hunk.new_start))
+    return ranges
+
+
+def _deletes_python_symbol_definition(hunk: ChangedHunk) -> bool:
+    return any(line.kind == "delete" and PYTHON_DELETED_SYMBOL_RE.match(line.content) for line in hunk.lines)
 
 
 def _ranges_overlap(a_start: int, a_end: int, b_start: int, b_end: int) -> bool:
@@ -404,12 +498,12 @@ def _python_imports(source: str, module: ast.Module) -> list[str]:
 
 def _python_exports(module: ast.Module, symbols: list[AnalyzerSymbol]) -> list[str]:
     explicit_exports = _python_dunder_all(module)
-    if explicit_exports:
+    if explicit_exports is not None:
         return explicit_exports
     return sorted(symbol.name for symbol in symbols if symbol.exported and "." not in symbol.name)
 
 
-def _python_dunder_all(module: ast.Module) -> list[str]:
+def _python_dunder_all(module: ast.Module) -> list[str] | None:
     for node in module.body:
         value: ast.expr | None = None
         if isinstance(node, ast.Assign) and any(
@@ -428,7 +522,7 @@ def _python_dunder_all(module: ast.Module) -> list[str]:
             continue
         if isinstance(parsed, list | tuple) and all(isinstance(item, str) for item in parsed):
             return sorted(parsed)
-    return []
+    return None
 
 
 def _python_related_tests(repo_root: Path, changed_file: ChangedFile, symbols: list[AnalyzerSymbol]) -> list[str]:
@@ -449,7 +543,7 @@ def _python_related_tests(repo_root: Path, changed_file: ChangedFile, symbols: l
         if score:
             candidates.append((score, test_path))
 
-    return [path for _, path in sorted(candidates, key=lambda item: (-item[0], item[1]))[:PYTHON_TEST_LIMIT]]
+    return [path for _, path in sorted(candidates, key=lambda item: (-item[0], item[1]))[:PYTHON_RELATED_TEST_LIMIT]]
 
 
 def _python_related_test_score(
@@ -465,9 +559,13 @@ def _python_related_test_score(
     if test_name in {f"test_{stem}.py", f"{stem}_test.py"} or f"/{stem}/" in f"/{test_path}/":
         score += 40
 
+    source_path = _resolve_python_repo_path(repo_root, test_path)
+    if source_path is None:
+        return 0
+
     try:
-        text = (repo_root / test_path).read_text(encoding="utf-8")
-    except OSError:
+        text = _read_python_source(source_path)
+    except PYTHON_READ_ERRORS:
         return score
 
     import_needles = {
