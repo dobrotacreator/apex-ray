@@ -71,7 +71,7 @@ The package root `apex_ray.pipeline` re-exports the stable pipeline API. Impleme
 
 ### TypeScript Analyzer
 
-The analyzer under `analyzers/typescript/src/` is a Node/TypeScript program bundled into the Python package. It builds repository-aware context for TS/JS changes:
+The analyzer under `analyzer-runtimes/typescript/src/` is a Node/TypeScript program bundled into the Python package. It builds repository-aware context for TS/JS changes:
 
 - changed symbols and changed line ranges;
 - references, callers, callees, and related tests;

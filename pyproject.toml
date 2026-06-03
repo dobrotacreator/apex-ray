@@ -54,22 +54,22 @@ requires = ["hatchling>=1.29.0"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel.force-include]
-"analyzers/typescript/dist" = "apex_ray/_bundled/typescript"
-"analyzers/typescript/package.json" = "apex_ray/_bundled/typescript/package.json"
-"analyzers/typescript/package-lock.json" = "apex_ray/_bundled/typescript/package-lock.json"
-"analyzers/typescript/node_modules/typescript" = "apex_ray/_bundled/typescript/node_modules/typescript"
+"analyzer-runtimes/typescript/dist" = "apex_ray/_bundled/typescript"
+"analyzer-runtimes/typescript/package.json" = "apex_ray/_bundled/typescript/package.json"
+"analyzer-runtimes/typescript/package-lock.json" = "apex_ray/_bundled/typescript/package-lock.json"
+"analyzer-runtimes/typescript/node_modules/typescript" = "apex_ray/_bundled/typescript/node_modules/typescript"
 
 [tool.hatch.build.targets.sdist]
 include = [
     "/src",
     "/tests",
     "/docs",
-    "/analyzers/typescript/src",
-    "/analyzers/typescript/test",
-    "/analyzers/typescript/tsconfig.json",
-    "/analyzers/typescript/tsconfig.test.json",
-    "/analyzers/typescript/package.json",
-    "/analyzers/typescript/package-lock.json",
+    "/analyzer-runtimes/typescript/src",
+    "/analyzer-runtimes/typescript/test",
+    "/analyzer-runtimes/typescript/tsconfig.json",
+    "/analyzer-runtimes/typescript/tsconfig.test.json",
+    "/analyzer-runtimes/typescript/package.json",
+    "/analyzer-runtimes/typescript/package-lock.json",
     "/README.md",
     "/CHANGELOG.md",
     "/CONTRIBUTING.md",
@@ -77,8 +77,8 @@ include = [
     "/pyproject.toml",
 ]
 artifacts = [
-    "/analyzers/typescript/dist",
-    "/analyzers/typescript/node_modules/typescript",
+    "/analyzer-runtimes/typescript/dist",
+    "/analyzer-runtimes/typescript/node_modules/typescript",
 ]
 
 [tool.coverage.run]

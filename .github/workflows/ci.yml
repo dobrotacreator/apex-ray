@@ -32,24 +32,24 @@ jobs:
         with:
           node-version: "24"
           cache: npm
-          cache-dependency-path: analyzers/typescript/package-lock.json
+          cache-dependency-path: analyzer-runtimes/typescript/package-lock.json
 
       - uses: astral-sh/setup-uv@v7
 
       - name: Install TypeScript analyzer dependencies
-        working-directory: analyzers/typescript
+        working-directory: analyzer-runtimes/typescript
         run: npm ci
 
       - name: Typecheck TypeScript analyzer
-        working-directory: analyzers/typescript
+        working-directory: analyzer-runtimes/typescript
         run: npm run typecheck
 
       - name: Test TypeScript analyzer
-        working-directory: analyzers/typescript
+        working-directory: analyzer-runtimes/typescript
         run: npm test
 
       - name: Measure TypeScript analyzer coverage
-        working-directory: analyzers/typescript
+        working-directory: analyzer-runtimes/typescript
         run: npm run coverage
 
       - name: Install Python dependencies
