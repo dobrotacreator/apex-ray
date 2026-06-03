@@ -1,10 +1,15 @@
 import json
+from pathlib import Path
 
+from apex_ray.discovery import LANGUAGE_EXTENSIONS
 from apex_ray.memory import pack_prompt_payload
 from apex_ray.models import ContextPack, Finding, ReviewReport
 
-PYTHON_FILE_SUFFIXES = (".py", ".pyi")
-TS_JS_FILE_SUFFIXES = (".ts", ".tsx", ".js", ".jsx", ".mts", ".cts", ".mjs", ".cjs")
+LANGUAGE_HINTS = {
+    "javascript": "TypeScript/JavaScript",
+    "python": "Python",
+    "typescript": "TypeScript/JavaScript",
+}
 
 
 def build_review_prompt(pack: ContextPack) -> str:
@@ -203,9 +208,5 @@ def _language_verifier_guidance(pack: ContextPack) -> str:
 
 
 def _pack_language_hint(pack: ContextPack) -> str:
-    path = pack.file.lower()
-    if path.endswith(PYTHON_FILE_SUFFIXES):
-        return "Python"
-    if path.endswith(TS_JS_FILE_SUFFIXES):
-        return "TypeScript/JavaScript"
-    return "unknown"
+    language = LANGUAGE_EXTENSIONS.get(Path(pack.file).suffix.lower(), "unknown")
+    return LANGUAGE_HINTS.get(language, "unknown")

@@ -99,6 +99,23 @@ def make_python_pack() -> ContextPack:
     )
 
 
+def make_unknown_language_pack(file: str = "src/module.mts") -> ContextPack:
+    return ContextPack(
+        id=f"{file}#changed:1",
+        file=file,
+        changed_lines=[(3, 4)],
+        impact_notes=["Changed symbols: changed lines 3-4."],
+        symbol=AnalyzerSymbol(
+            name="changed",
+            kind="function",
+            startLine=3,
+            endLine=4,
+            exported=True,
+            signature="changed()",
+        ),
+    )
+
+
 def test_fake_provider_returns_findings_with_pack_id() -> None:
     finding = Finding(
         title="Potential incorrect total",
@@ -296,6 +313,8 @@ def test_shallow_review_uses_compact_prompt_and_cheap_route() -> None:
     assert runs[0].prompt_version == REVIEW_SHALLOW_PROMPT_VERSION
     assert runs[0].model == "codex-cheap"
     assert runs[0].route_reason == "shallow:profile:cheap"
+    assert "Language hint: TypeScript/JavaScript." in shallow_prompt
+    assert "NestJS/DTO/schema/DI/provider/route/cache changes" in shallow_prompt
     assert "src/checkout.ts" not in shallow_prompt
 
 
@@ -1789,6 +1808,16 @@ def test_shallow_review_prompt_is_language_neutral_and_python_aware() -> None:
     assert "FastAPI/Pydantic/SQLAlchemy/Alembic" in prompt
 
 
+@pytest.mark.parametrize("file", ["src/module.mts", "src/module.cts", "src/types.pyi"])
+def test_review_prompt_uses_unknown_guidance_for_unclassified_suffixes(file: str) -> None:
+    prompt = build_review_prompt(make_unknown_language_pack(file))
+
+    assert "Language hint: unknown." in prompt
+    assert "fallback or unknown-language packs" in prompt
+    assert "Language hint: Python." not in prompt
+    assert "Language hint: TypeScript/JavaScript." not in prompt
+
+
 def test_verifier_prompt_contains_finding_and_context() -> None:
     finding = Finding(
         title="Cart totals ignore item quantity",
@@ -1815,6 +1844,9 @@ def test_verifier_prompt_contains_finding_and_context() -> None:
     assert "finding.file is not present in any supplied context layer" in prompt
     assert "contracts show schemas" in prompt
     assert "metadata shows framework" in prompt
+    assert "Language hint: TypeScript/JavaScript." in prompt
+    assert "TypeScript/JavaScript-specific findings" in prompt
+    assert "NestJS/DTO/schema/DI/provider/route/cache boundaries" in prompt
     assert "project-specific review criteria" in prompt
     assert "concretely show a violation" in prompt
 
@@ -1862,6 +1894,9 @@ def test_verifier_batch_prompt_contains_findings_and_context() -> None:
     assert "Candidate findings JSON" in prompt
     assert "Cart totals ignore item quantity" in prompt
     assert "calculateTotal" in prompt
+    assert "Language hint: TypeScript/JavaScript." in prompt
+    assert "TypeScript/JavaScript-specific findings" in prompt
+    assert "NestJS/DTO/schema/DI/provider/route/cache boundaries" in prompt
     assert "Evaluate each candidate independently" in prompt
 
 
