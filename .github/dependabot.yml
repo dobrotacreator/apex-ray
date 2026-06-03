@@ -7,7 +7,7 @@ updates:
     open-pull-requests-limit: 5
 
   - package-ecosystem: "npm"
-    directory: "/analyzers/typescript"
+    directory: "/analyzer-runtimes/typescript"
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 5

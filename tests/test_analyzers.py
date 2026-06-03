@@ -5,6 +5,10 @@ from pathlib import Path
 import pytest
 
 from apex_ray.analyzers import (
+    PYTHON_DELETED_SYMBOL_RE,
+    PYTHON_LANGUAGES,
+    PYTHON_READ_ERRORS,
+    PYTHON_SCAN_IGNORED_DIRS,
     AnalyzerError,
     run_analyzers,
     run_python_analyzer,
@@ -12,6 +16,13 @@ from apex_ray.analyzers import (
     typescript_analyzer_script,
 )
 from apex_ray.models import AnalyzerConfig, AnalyzerFile, AnalyzerResult, ChangedFile, FileKind
+
+
+def test_analyzers_public_exports_keep_legacy_python_constants() -> None:
+    assert PYTHON_LANGUAGES == {"python"}
+    assert PYTHON_READ_ERRORS == (OSError, UnicodeDecodeError, SyntaxError)
+    assert ".git" in PYTHON_SCAN_IGNORED_DIRS
+    assert PYTHON_DELETED_SYMBOL_RE.match("def removed()") is not None
 
 
 def test_typescript_analyzer_uses_configured_script_path(tmp_path: Path) -> None:
@@ -40,7 +51,7 @@ def test_typescript_analyzer_resolves_relative_script_path_against_repo_root(
     seen_command: list[str] | None = None
 
     monkeypatch.chdir(subdir)
-    monkeypatch.setattr("apex_ray.analyzers.shutil.which", lambda name: "/usr/bin/node")
+    monkeypatch.setattr("apex_ray.analyzers.typescript.shutil.which", lambda name: "/usr/bin/node")
 
     def fake_run(
         args: list[str],
@@ -60,7 +71,7 @@ def test_typescript_analyzer_resolves_relative_script_path_against_repo_root(
         }
         return subprocess.CompletedProcess(args, 0, stdout=json.dumps(payload), stderr="")
 
-    monkeypatch.setattr("apex_ray.analyzers._run_analyzer_process", fake_run)
+    monkeypatch.setattr("apex_ray.analyzers.typescript._run_analyzer_process", fake_run)
 
     result = run_typescript_analyzer(repo, [changed], AnalyzerConfig(script_path="tools/analyze.js"))
 
@@ -831,7 +842,7 @@ def test_python_analyzer_marks_workspace_scan_partial_when_file_limit_is_reached
 ) -> None:
     (tmp_path / "a.py").write_text("def changed() -> bool:\n    return True\n", encoding="utf-8")
     (tmp_path / "z.py").write_text("def other() -> bool:\n    return True\n", encoding="utf-8")
-    monkeypatch.setattr("apex_ray.analyzers.PYTHON_WORKSPACE_FILE_LIMIT", 1, raising=False)
+    monkeypatch.setattr("apex_ray.analyzers.python.PYTHON_WORKSPACE_FILE_LIMIT", 1, raising=False)
     changed = ChangedFile(
         old_path="a.py",
         new_path="a.py",
@@ -1033,7 +1044,7 @@ def test_typescript_analyzer_returns_partial_result_when_a_shard_times_out(
     ]
     seen_shards: list[list[str]] = []
 
-    monkeypatch.setattr("apex_ray.analyzers.shutil.which", lambda name: "/usr/bin/node")
+    monkeypatch.setattr("apex_ray.analyzers.typescript.shutil.which", lambda name: "/usr/bin/node")
 
     def fake_run(
         args: list[str],
@@ -1060,7 +1071,7 @@ def test_typescript_analyzer_returns_partial_result_when_a_shard_times_out(
         }
         return subprocess.CompletedProcess(args, 0, stdout=json.dumps(payload), stderr="")
 
-    monkeypatch.setattr("apex_ray.analyzers._run_analyzer_process", fake_run)
+    monkeypatch.setattr("apex_ray.analyzers.typescript._run_analyzer_process", fake_run)
 
     result = run_typescript_analyzer(
         tmp_path,
@@ -1100,8 +1111,8 @@ def test_typescript_analyzer_respects_total_timeout_across_shards(
     seen_shards: list[list[str]] = []
     monotonic_values = iter([0.0, 0.0, 2.1])
 
-    monkeypatch.setattr("apex_ray.analyzers.shutil.which", lambda name: "/usr/bin/node")
-    monkeypatch.setattr("apex_ray.analyzers.time.monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr("apex_ray.analyzers.typescript.shutil.which", lambda name: "/usr/bin/node")
+    monkeypatch.setattr("apex_ray.analyzers.typescript.time.monotonic", lambda: next(monotonic_values))
 
     def fake_run(
         args: list[str],
@@ -1126,7 +1137,7 @@ def test_typescript_analyzer_respects_total_timeout_across_shards(
         }
         return subprocess.CompletedProcess(args, 0, stdout=json.dumps(payload), stderr="")
 
-    monkeypatch.setattr("apex_ray.analyzers._run_analyzer_process", fake_run)
+    monkeypatch.setattr("apex_ray.analyzers.typescript._run_analyzer_process", fake_run)
 
     result = run_typescript_analyzer(
         tmp_path,
@@ -1160,7 +1171,7 @@ def test_typescript_analyzer_adaptive_sharding_uses_smaller_large_change_shards(
     ]
     seen_shards: list[list[str]] = []
 
-    monkeypatch.setattr("apex_ray.analyzers.shutil.which", lambda name: "/usr/bin/node")
+    monkeypatch.setattr("apex_ray.analyzers.typescript.shutil.which", lambda name: "/usr/bin/node")
 
     def fake_run(
         args: list[str],
@@ -1185,7 +1196,7 @@ def test_typescript_analyzer_adaptive_sharding_uses_smaller_large_change_shards(
         }
         return subprocess.CompletedProcess(args, 0, stdout=json.dumps(payload), stderr="")
 
-    monkeypatch.setattr("apex_ray.analyzers._run_analyzer_process", fake_run)
+    monkeypatch.setattr("apex_ray.analyzers.typescript._run_analyzer_process", fake_run)
 
     result = run_typescript_analyzer(
         tmp_path,
@@ -1223,12 +1234,12 @@ def test_typescript_analyzer_raises_when_all_shards_fail(
         for index in range(2)
     ]
 
-    monkeypatch.setattr("apex_ray.analyzers.shutil.which", lambda name: "/usr/bin/node")
+    monkeypatch.setattr("apex_ray.analyzers.typescript.shutil.which", lambda name: "/usr/bin/node")
 
     def fake_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(args, 1, stdout="", stderr="boom")
 
-    monkeypatch.setattr("apex_ray.analyzers._run_analyzer_process", fake_run)
+    monkeypatch.setattr("apex_ray.analyzers.typescript._run_analyzer_process", fake_run)
 
     with pytest.raises(AnalyzerError) as exc:
         run_typescript_analyzer(
@@ -1251,12 +1262,12 @@ def test_typescript_analyzer_timeout_is_reported(tmp_path: Path, monkeypatch: py
         file_kind=FileKind.SOURCE,
     )
 
-    monkeypatch.setattr("apex_ray.analyzers.shutil.which", lambda name: "/usr/bin/node")
+    monkeypatch.setattr("apex_ray.analyzers.typescript.shutil.which", lambda name: "/usr/bin/node")
 
     def fake_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
         raise subprocess.TimeoutExpired(cmd=["node", str(script)], timeout=1)
 
-    monkeypatch.setattr("apex_ray.analyzers._run_analyzer_process", fake_run)
+    monkeypatch.setattr("apex_ray.analyzers.typescript._run_analyzer_process", fake_run)
 
     with pytest.raises(AnalyzerError) as exc:
         run_typescript_analyzer(

@@ -118,8 +118,8 @@ For local development from source:
 git clone git@github.com:dobrotacreator/apex-ray.git
 cd apex-ray
 uv sync --all-groups
-npm --prefix analyzers/typescript ci
-npm --prefix analyzers/typescript run build
+npm --prefix analyzer-runtimes/typescript ci
+npm --prefix analyzer-runtimes/typescript run build
 ```
 
 Useful checks:
@@ -127,9 +127,9 @@ Useful checks:
 ```bash
 uv run coverage run -m pytest -q
 uv run coverage report -m
-npm --prefix analyzers/typescript run typecheck
-npm --prefix analyzers/typescript test
-npm --prefix analyzers/typescript run coverage
+npm --prefix analyzer-runtimes/typescript run typecheck
+npm --prefix analyzer-runtimes/typescript test
+npm --prefix analyzer-runtimes/typescript run coverage
 git diff --check
 ```
 
