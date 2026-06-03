@@ -36,6 +36,10 @@ TS_JS_LANGUAGES = {"typescript", "javascript"}
 PYTHON_LANGUAGES = {"python"}
 PYTHON_READ_ERRORS = (OSError, UnicodeDecodeError, SyntaxError)
 PYTHON_RELATED_TEST_LIMIT = 10
+PYTHON_REFERENCE_LIMIT = 24
+PYTHON_CALLEE_LIMIT = 16
+PYTHON_WORKSPACE_FILE_LIMIT = 4000
+PYTHON_WORKSPACE_FILE_SIZE_LIMIT = 1_000_000
 PYTHON_SCAN_IGNORED_DIRS = {
     ".git",
     ".hg",
@@ -51,7 +55,9 @@ PYTHON_SCAN_IGNORED_DIRS = {
     "node_modules",
     "site-packages",
 }
-PYTHON_DELETED_SYMBOL_RE = re.compile(r"^\s*(?:async\s+def|def|class)\s+[A-Za-z_]\w*")
+PYTHON_DELETED_SYMBOL_RE = re.compile(
+    r"^(?P<indent>\s*)(?P<definition_kind>async\s+def|def|class)\s+(?P<name>[A-Za-z_]\w*)"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,6 +84,30 @@ class _AnalyzerBackend:
     changed_files: Callable[[list[ChangedFile]], list[ChangedFile]]
     run: Callable[[Path, list[ChangedFile], AnalyzerConfig], AnalyzerResult | None]
     partial_fallback_reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class _PythonWorkspaceFile:
+    path: str
+    module_name: str
+    source: str
+    module: ast.Module
+    symbols: list[AnalyzerSymbol]
+
+
+@dataclass(frozen=True, slots=True)
+class _PythonWorkspaceScan:
+    files: dict[str, _PythonWorkspaceFile]
+    warnings: list[str]
+    partial: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _PythonIndexedSymbol:
+    path: str
+    module_name: str
+    identity: str
+    symbol: AnalyzerSymbol
 
 
 def run_analyzers(
@@ -211,31 +241,53 @@ def run_python_analyzer(
     analyzed_files: list[AnalyzerFile] = []
     warnings: list[str] = []
     failed_files: list[str] = []
+    workspace_scan = _build_python_workspace(repo_root)
+    workspace = workspace_scan.files
+    warnings.extend(workspace_scan.warnings)
 
     for changed_file in changed_files:
         path = changed_file.path
-        source_path = _resolve_python_repo_path(repo_root, path)
-        if source_path is None:
+        workspace_file = workspace.get(path)
+        if workspace_file is None:
+            source_path = _resolve_python_repo_path(repo_root, path)
+            if source_path is None:
+                warnings.append(f"Unsafe Python file path {path}; using diff-only fallback context.")
+                failed_files.append(path)
+                continue
+            try:
+                source = _read_python_source(source_path)
+            except PYTHON_READ_ERRORS as exc:
+                warnings.append(f"Unable to read Python file {path}: {exc}")
+                failed_files.append(path)
+                continue
+
+            try:
+                module = ast.parse(source, filename=path)
+            except SyntaxError as exc:
+                location = f" at line {exc.lineno}" if exc.lineno else ""
+                warnings.append(f"Unable to parse Python file {path}{location}: {exc.msg}")
+                failed_files.append(path)
+                continue
+
+            symbols = _collect_python_symbols(path, source, module)
+            workspace_file = _PythonWorkspaceFile(
+                path=path,
+                module_name=_python_module_name(path),
+                source=source,
+                module=module,
+                symbols=symbols,
+            )
+            workspace[path] = workspace_file
+        elif _resolve_python_repo_path(repo_root, path) is None:
             warnings.append(f"Unsafe Python file path {path}; using diff-only fallback context.")
             failed_files.append(path)
             continue
-        try:
-            source = _read_python_source(source_path)
-        except PYTHON_READ_ERRORS as exc:
-            warnings.append(f"Unable to read Python file {path}: {exc}")
-            failed_files.append(path)
-            continue
 
-        try:
-            module = ast.parse(source, filename=path)
-        except SyntaxError as exc:
-            location = f" at line {exc.lineno}" if exc.lineno else ""
-            warnings.append(f"Unable to parse Python file {path}{location}: {exc.msg}")
-            failed_files.append(path)
-            continue
-
-        symbols = _collect_python_symbols(path, source, module)
+        source = workspace_file.source
+        module = workspace_file.module
+        symbols = workspace_file.symbols
         changed_symbols = _changed_python_symbols(changed_file, symbols)
+        _populate_python_symbol_graph(workspace_file, changed_symbols, workspace)
         related_tests = _python_related_tests(repo_root, changed_file, symbols)
         analyzed_files.append(
             AnalyzerFile(
@@ -256,7 +308,7 @@ def run_python_analyzer(
         files=analyzed_files,
         warnings=warnings,
         indexCache=None,
-        partial=bool(failed_files),
+        partial=bool(failed_files) or workspace_scan.partial,
         failedFiles=failed_files,
         shardFailures=[],
     )
@@ -279,6 +331,47 @@ def _resolve_python_repo_path(repo_root: Path, rel_path: str) -> Path | None:
 def _read_python_source(path: Path) -> str:
     with tokenize.open(path) as source_file:
         return source_file.read()
+
+
+def _build_python_workspace(repo_root: Path) -> _PythonWorkspaceScan:
+    workspace: dict[str, _PythonWorkspaceFile] = {}
+    warnings: list[str] = []
+    partial = False
+    for index, path in enumerate(_iter_python_files(repo_root)):
+        if index >= PYTHON_WORKSPACE_FILE_LIMIT:
+            warnings.append(
+                f"Python workspace scan reached file limit ({PYTHON_WORKSPACE_FILE_LIMIT}); "
+                "reference context may be incomplete."
+            )
+            partial = True
+            break
+        source_path = _resolve_python_repo_path(repo_root, path)
+        if source_path is None:
+            continue
+        try:
+            source_size = source_path.stat().st_size
+        except OSError:
+            continue
+        if source_size > PYTHON_WORKSPACE_FILE_SIZE_LIMIT:
+            warnings.append(
+                f"Skipping Python workspace file {path}: size {source_size} bytes exceeds "
+                f"limit {PYTHON_WORKSPACE_FILE_SIZE_LIMIT} bytes; reference context may be incomplete."
+            )
+            partial = True
+            continue
+        try:
+            source = _read_python_source(source_path)
+            module = ast.parse(source, filename=path)
+        except PYTHON_READ_ERRORS:
+            continue
+        workspace[path] = _PythonWorkspaceFile(
+            path=path,
+            module_name=_python_module_name(path),
+            source=source,
+            module=module,
+            symbols=_collect_python_symbols(path, source, module),
+        )
+    return _PythonWorkspaceScan(files=workspace, warnings=warnings, partial=partial)
 
 
 def _collect_python_symbols(path: str, source: str, module: ast.Module) -> list[AnalyzerSymbol]:
@@ -457,11 +550,24 @@ def _python_target_names(target: ast.expr) -> list[str]:
 
 def _changed_python_symbols(changed_file: ChangedFile, symbols: list[AnalyzerSymbol]) -> list[AnalyzerSymbol]:
     changed_ranges = _changed_python_line_ranges(changed_file)
-    return [
+    changed_symbols = [
         symbol
         for symbol in symbols
         if any(_ranges_overlap(symbol.start_line, symbol.end_line, start, end) for start, end in changed_ranges)
     ]
+    return _dedupe_python_symbols([*_deleted_python_symbols(changed_file), *changed_symbols])
+
+
+def _dedupe_python_symbols(symbols: list[AnalyzerSymbol]) -> list[AnalyzerSymbol]:
+    seen: set[tuple[str, int, str]] = set()
+    deduped: list[AnalyzerSymbol] = []
+    for symbol in symbols:
+        key = (symbol.name, symbol.start_line, symbol.signature)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(symbol)
+    return deduped
 
 
 def _changed_python_line_ranges(file: ChangedFile) -> list[tuple[int, int]]:
@@ -479,8 +585,649 @@ def _deletes_python_symbol_definition(hunk: ChangedHunk) -> bool:
     return any(line.kind == "delete" and PYTHON_DELETED_SYMBOL_RE.match(line.content) for line in hunk.lines)
 
 
+def _deleted_python_symbols(changed_file: ChangedFile) -> list[AnalyzerSymbol]:
+    symbols: list[AnalyzerSymbol] = []
+    for hunk in changed_file.hunks:
+        class_context: list[tuple[int, str]] = []
+        line_number = max(1, hunk.new_start)
+        for line in hunk.lines:
+            match = PYTHON_DELETED_SYMBOL_RE.match(line.content)
+            if line.kind != "delete":
+                _update_deleted_python_class_context(line.content, class_context)
+                if line.new_line is not None:
+                    line_number = line.new_line + 1
+                continue
+            if not match:
+                continue
+            stripped = line.content.strip()
+            raw_name = match.group("name")
+            definition_kind = match.group("definition_kind")
+            indent = _python_line_indent(line.content)
+            parent_class = _deleted_python_parent_class(class_context, indent)
+            if definition_kind == "class":
+                name = raw_name
+                kind = "class"
+            elif parent_class:
+                name = f"{parent_class}.{raw_name}"
+                kind = "method"
+            else:
+                name = raw_name
+                kind = "function"
+            symbols.append(
+                AnalyzerSymbol(
+                    name=name,
+                    kind=kind,
+                    startLine=line_number,
+                    endLine=line_number,
+                    exported=not raw_name.startswith("_"),
+                    signature=f"removed Python {kind}: {stripped}",
+                    references=[],
+                    callees=[],
+                    contracts=[],
+                    metadata=[],
+                )
+            )
+            _update_deleted_python_class_context(line.content, class_context)
+    return symbols
+
+
+def _update_deleted_python_class_context(content: str, class_context: list[tuple[int, str]]) -> None:
+    if not content.strip():
+        return
+    indent = _python_line_indent(content)
+    while class_context and indent <= class_context[-1][0]:
+        class_context.pop()
+    match = PYTHON_DELETED_SYMBOL_RE.match(content)
+    if match is None or match.group("definition_kind") != "class":
+        return
+    raw_name = match.group("name")
+    parent_name = class_context[-1][1] if class_context else None
+    class_context.append((indent, _qualified_python_name(parent_name, raw_name)))
+
+
+def _deleted_python_parent_class(class_context: list[tuple[int, str]], indent: int) -> str | None:
+    for class_indent, class_name in reversed(class_context):
+        if class_indent < indent:
+            return class_name
+    return None
+
+
+def _python_line_indent(content: str) -> int:
+    return len(content) - len(content.lstrip())
+
+
 def _ranges_overlap(a_start: int, a_end: int, b_start: int, b_end: int) -> bool:
     return a_start <= b_end and b_start <= a_end
+
+
+def _populate_python_symbol_graph(
+    changed_file: _PythonWorkspaceFile,
+    symbols: list[AnalyzerSymbol],
+    workspace: dict[str, _PythonWorkspaceFile],
+) -> None:
+    if not symbols:
+        return
+    symbol_nodes = _python_symbol_nodes(changed_file.module)
+    indexed_symbols = _python_indexed_symbols(workspace)
+    workspace_module_names = {file.module_name for file in workspace.values()}
+    for symbol in symbols:
+        symbol.references = _python_workspace_references(symbol, changed_file, workspace, workspace_module_names)
+        node = symbol_nodes.get(symbol.name)
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            symbol.callees = _python_callees_for_function(
+                changed_file,
+                node,
+                symbol,
+                indexed_symbols,
+                workspace_module_names,
+            )
+
+
+def _python_indexed_symbols(workspace: dict[str, _PythonWorkspaceFile]) -> list[_PythonIndexedSymbol]:
+    return [
+        _PythonIndexedSymbol(
+            path=file.path,
+            module_name=file.module_name,
+            identity=_python_symbol_identity(file.module_name, symbol.name),
+            symbol=symbol,
+        )
+        for file in sorted(workspace.values(), key=lambda item: item.path)
+        for symbol in file.symbols
+    ]
+
+
+def _python_workspace_references(
+    target: AnalyzerSymbol,
+    target_file: _PythonWorkspaceFile,
+    workspace: dict[str, _PythonWorkspaceFile],
+    workspace_module_names: set[str],
+) -> list[AnalyzerReference]:
+    references: list[AnalyzerReference] = []
+    seen: set[tuple[str, int, str]] = set()
+    for file in sorted(workspace.values(), key=lambda item: item.path):
+        for call_site in _python_call_sites(file, workspace_module_names):
+            call = call_site.call
+            if file.path == target_file.path and _ranges_overlap(
+                target.start_line,
+                target.end_line,
+                _python_node_start_line(call),
+                _python_node_end_line(call),
+            ):
+                continue
+            if not _python_call_references_symbol(
+                call,
+                target,
+                target_file,
+                file,
+                call_site.context.bindings,
+                call_site.context.instance_types,
+            ):
+                continue
+            text = _python_node_text(file.source, call)
+            if not text:
+                continue
+            key = (file.path, _python_node_start_line(call), text)
+            if key in seen:
+                continue
+            seen.add(key)
+            references.append(
+                AnalyzerReference(
+                    file=file.path,
+                    line=_python_node_start_line(call),
+                    endLine=_python_node_end_line(call),
+                    text=text,
+                    kind="call",
+                )
+            )
+            if len(references) >= PYTHON_REFERENCE_LIMIT:
+                return references
+    return references
+
+
+def _python_callees_for_function(
+    file: _PythonWorkspaceFile,
+    node: ast.FunctionDef | ast.AsyncFunctionDef,
+    target: AnalyzerSymbol,
+    workspace_symbols: list[_PythonIndexedSymbol],
+    workspace_module_names: set[str],
+) -> list[AnalyzerReference]:
+    callees: list[AnalyzerReference] = []
+    seen: set[tuple[str, int, str]] = set()
+    symbols_by_identity = {
+        indexed.identity: indexed
+        for indexed in workspace_symbols
+        if indexed.symbol.kind in {"function", "method", "class"}
+    }
+    target_identity = _python_symbol_identity(file.module_name, target.name)
+    for call_site in _python_call_sites(file, workspace_module_names):
+        call = call_site.call
+        if not _ranges_overlap(
+            _python_node_start_line(node),
+            _python_node_end_line(node),
+            _python_node_start_line(call),
+            _python_node_end_line(call),
+        ):
+            continue
+        selected = next(
+            (
+                symbols_by_identity[identity]
+                for identity in _python_resolved_call_identities(
+                    call,
+                    file,
+                    call_site.context.bindings,
+                    call_site.context.instance_types,
+                )
+                if identity != target_identity and identity in symbols_by_identity
+            ),
+            None,
+        )
+        if selected is None:
+            continue
+        selected_symbol = selected.symbol
+        key = (selected.path, selected_symbol.start_line, selected_symbol.signature)
+        if key in seen:
+            continue
+        seen.add(key)
+        callees.append(
+            AnalyzerReference(
+                file=selected.path,
+                line=selected_symbol.start_line,
+                endLine=selected_symbol.end_line,
+                text=selected_symbol.signature,
+                kind="callee",
+            )
+        )
+        if len(callees) >= PYTHON_CALLEE_LIMIT:
+            break
+    return callees
+
+
+def _python_call_references_symbol(
+    call: ast.Call,
+    target: AnalyzerSymbol,
+    target_file: _PythonWorkspaceFile,
+    file: _PythonWorkspaceFile,
+    bindings: _PythonImportBindings,
+    instance_types: dict[str, str],
+) -> bool:
+    target_identity = _python_symbol_identity(target_file.module_name, target.name)
+    return target_identity in _python_resolved_call_identities(call, file, bindings, instance_types)
+
+
+@dataclass(frozen=True, slots=True)
+class _PythonImportBindings:
+    direct_imports: dict[str, set[str]]
+    module_imports: dict[str, str]
+
+
+@dataclass(frozen=True, slots=True)
+class _PythonCallContext:
+    bindings: _PythonImportBindings
+    instance_types: dict[str, str]
+
+
+@dataclass(frozen=True, slots=True)
+class _PythonCallSite:
+    call: ast.Call
+    context: _PythonCallContext
+
+
+def _python_call_sites(file: _PythonWorkspaceFile, workspace_module_names: set[str]) -> list[_PythonCallSite]:
+    call_sites: list[_PythonCallSite] = []
+    _visit_python_body(
+        file.module.body,
+        file,
+        workspace_module_names,
+        _empty_python_call_context(),
+        call_sites,
+    )
+    return call_sites
+
+
+def _visit_python_body(
+    body: list[ast.stmt],
+    file: _PythonWorkspaceFile,
+    workspace_module_names: set[str],
+    context: _PythonCallContext,
+    call_sites: list[_PythonCallSite],
+) -> None:
+    for statement in body:
+        _visit_python_statement(statement, file, workspace_module_names, context, call_sites)
+
+
+def _visit_python_statement(
+    statement: ast.stmt,
+    file: _PythonWorkspaceFile,
+    workspace_module_names: set[str],
+    context: _PythonCallContext,
+    call_sites: list[_PythonCallSite],
+) -> None:
+    if isinstance(statement, ast.Import | ast.ImportFrom):
+        _apply_python_import_statement(context, file, workspace_module_names, statement)
+    elif isinstance(statement, ast.Assign):
+        _visit_python_expression(statement.value, context, call_sites)
+        _assign_python_instance_types(statement.targets, statement.value, file, context)
+    elif isinstance(statement, ast.AnnAssign):
+        _visit_python_expression(statement.annotation, context, call_sites)
+        if statement.value is not None:
+            _visit_python_expression(statement.value, context, call_sites)
+        _assign_python_instance_types([statement.target], statement.value, file, context)
+    elif isinstance(statement, ast.FunctionDef | ast.AsyncFunctionDef):
+        _visit_python_function_definition(statement, file, workspace_module_names, context, call_sites)
+    elif isinstance(statement, ast.ClassDef):
+        _visit_python_class_definition(statement, file, workspace_module_names, context, call_sites)
+    elif isinstance(statement, ast.Return):
+        if statement.value is not None:
+            _visit_python_expression(statement.value, context, call_sites)
+    elif isinstance(statement, ast.Expr):
+        _visit_python_expression(statement.value, context, call_sites)
+    elif isinstance(statement, ast.If):
+        _visit_python_expression(statement.test, context, call_sites)
+        _visit_python_body(
+            statement.body,
+            file,
+            workspace_module_names,
+            _copy_python_call_context(context),
+            call_sites,
+        )
+        _visit_python_body(
+            statement.orelse,
+            file,
+            workspace_module_names,
+            _copy_python_call_context(context),
+            call_sites,
+        )
+    elif isinstance(statement, ast.For | ast.AsyncFor):
+        _visit_python_expression(statement.iter, context, call_sites)
+        body_context = _copy_python_call_context(context)
+        _python_shadow_names(body_context, _python_target_names(statement.target))
+        _visit_python_body(statement.body, file, workspace_module_names, body_context, call_sites)
+        _visit_python_body(
+            statement.orelse,
+            file,
+            workspace_module_names,
+            _copy_python_call_context(context),
+            call_sites,
+        )
+    elif isinstance(statement, ast.With | ast.AsyncWith):
+        body_context = _copy_python_call_context(context)
+        for item in statement.items:
+            _visit_python_expression(item.context_expr, context, call_sites)
+            if item.optional_vars is not None:
+                _python_shadow_names(body_context, _python_target_names(item.optional_vars))
+        _visit_python_body(statement.body, file, workspace_module_names, body_context, call_sites)
+    elif isinstance(statement, ast.Try):
+        _visit_python_body(
+            statement.body,
+            file,
+            workspace_module_names,
+            _copy_python_call_context(context),
+            call_sites,
+        )
+        for handler in statement.handlers:
+            handler_context = _copy_python_call_context(context)
+            if handler.type is not None:
+                _visit_python_expression(handler.type, context, call_sites)
+            if handler.name:
+                _python_shadow_names(handler_context, [handler.name])
+            _visit_python_body(handler.body, file, workspace_module_names, handler_context, call_sites)
+        _visit_python_body(
+            statement.orelse,
+            file,
+            workspace_module_names,
+            _copy_python_call_context(context),
+            call_sites,
+        )
+        _visit_python_body(
+            statement.finalbody,
+            file,
+            workspace_module_names,
+            _copy_python_call_context(context),
+            call_sites,
+        )
+    elif isinstance(statement, ast.Match):
+        _visit_python_expression(statement.subject, context, call_sites)
+        for case in statement.cases:
+            _visit_python_body(
+                case.body,
+                file,
+                workspace_module_names,
+                _copy_python_call_context(context),
+                call_sites,
+            )
+    elif isinstance(statement, ast.AugAssign):
+        _visit_python_expression(statement.value, context, call_sites)
+        _python_shadow_names(context, _python_target_names(statement.target))
+    else:
+        _visit_unknown_python_statement(statement, file, workspace_module_names, context, call_sites)
+
+
+def _visit_python_expression(
+    expression: ast.expr,
+    context: _PythonCallContext,
+    call_sites: list[_PythonCallSite],
+) -> None:
+    for node in ast.walk(expression):
+        if isinstance(node, ast.Call):
+            call_sites.append(_PythonCallSite(call=node, context=_copy_python_call_context(context)))
+
+
+def _visit_python_function_definition(
+    statement: ast.FunctionDef | ast.AsyncFunctionDef,
+    file: _PythonWorkspaceFile,
+    workspace_module_names: set[str],
+    context: _PythonCallContext,
+    call_sites: list[_PythonCallSite],
+) -> None:
+    for decorator in statement.decorator_list:
+        _visit_python_expression(decorator, context, call_sites)
+    for default in [*statement.args.defaults, *[default for default in statement.args.kw_defaults if default]]:
+        _visit_python_expression(default, context, call_sites)
+    if statement.returns is not None:
+        _visit_python_expression(statement.returns, context, call_sites)
+
+    function_context = _copy_python_call_context(context)
+    _python_shadow_names(function_context, _python_argument_names(statement.args))
+    _visit_python_body(statement.body, file, workspace_module_names, function_context, call_sites)
+    _python_shadow_names(context, [statement.name])
+
+
+def _visit_python_class_definition(
+    statement: ast.ClassDef,
+    file: _PythonWorkspaceFile,
+    workspace_module_names: set[str],
+    context: _PythonCallContext,
+    call_sites: list[_PythonCallSite],
+) -> None:
+    for decorator in statement.decorator_list:
+        _visit_python_expression(decorator, context, call_sites)
+    for base in statement.bases:
+        _visit_python_expression(base, context, call_sites)
+    for keyword in statement.keywords:
+        _visit_python_expression(keyword.value, context, call_sites)
+
+    class_context = _copy_python_call_context(context)
+    _visit_python_body(statement.body, file, workspace_module_names, class_context, call_sites)
+    _python_shadow_names(context, [statement.name])
+
+
+def _visit_unknown_python_statement(
+    statement: ast.stmt,
+    file: _PythonWorkspaceFile,
+    workspace_module_names: set[str],
+    context: _PythonCallContext,
+    call_sites: list[_PythonCallSite],
+) -> None:
+    for child in ast.iter_child_nodes(statement):
+        if isinstance(child, ast.expr):
+            _visit_python_expression(child, context, call_sites)
+        elif isinstance(child, ast.stmt):
+            _visit_python_statement(child, file, workspace_module_names, context, call_sites)
+
+
+def _assign_python_instance_types(
+    targets: list[ast.expr],
+    value: ast.expr | None,
+    file: _PythonWorkspaceFile,
+    context: _PythonCallContext,
+) -> None:
+    target_names = [name for target in targets for name in _python_target_names(target)]
+    if not target_names:
+        return
+    constructor_identities = (
+        _python_resolved_call_identities(value, file, context.bindings, context.instance_types)
+        if isinstance(value, ast.Call)
+        else []
+    )
+    _python_shadow_names(context, target_names)
+    if not constructor_identities:
+        return
+    resolved_class = constructor_identities[0]
+    for target_name in target_names:
+        context.instance_types[target_name] = resolved_class
+
+
+def _apply_python_import_statement(
+    context: _PythonCallContext,
+    file: _PythonWorkspaceFile,
+    workspace_module_names: set[str],
+    statement: ast.Import | ast.ImportFrom,
+) -> None:
+    if isinstance(statement, ast.ImportFrom):
+        module_name = _python_import_from_module_name(file, statement)
+        if module_name is None:
+            return
+        for alias in statement.names:
+            if alias.name == "*":
+                continue
+            local_name = alias.asname or alias.name
+            imported_module_name = _python_imported_module_name(module_name, alias.name)
+            if imported_module_name in workspace_module_names:
+                _python_bind_module_import(context, local_name, imported_module_name)
+            else:
+                _python_bind_direct_import(context, local_name, _python_symbol_identity(module_name, alias.name))
+    else:
+        for alias in statement.names:
+            local_name = alias.asname or alias.name.split(".", maxsplit=1)[0]
+            _python_bind_module_import(context, local_name, alias.name)
+
+
+def _python_bind_direct_import(context: _PythonCallContext, local_name: str, identity: str) -> None:
+    _python_shadow_names(context, [local_name])
+    context.bindings.direct_imports[local_name] = {identity}
+
+
+def _python_bind_module_import(context: _PythonCallContext, local_name: str, module_name: str) -> None:
+    _python_shadow_names(context, [local_name])
+    context.bindings.module_imports[local_name] = module_name
+
+
+def _python_shadow_names(context: _PythonCallContext, names: list[str]) -> None:
+    for name in names:
+        context.bindings.direct_imports.pop(name, None)
+        context.bindings.module_imports.pop(name, None)
+        context.instance_types.pop(name, None)
+
+
+def _python_argument_names(arguments: ast.arguments) -> list[str]:
+    names = [
+        argument.arg
+        for argument in [
+            *arguments.posonlyargs,
+            *arguments.args,
+            *arguments.kwonlyargs,
+        ]
+    ]
+    if arguments.vararg is not None:
+        names.append(arguments.vararg.arg)
+    if arguments.kwarg is not None:
+        names.append(arguments.kwarg.arg)
+    return names
+
+
+def _empty_python_call_context() -> _PythonCallContext:
+    return _PythonCallContext(
+        bindings=_PythonImportBindings(direct_imports={}, module_imports={}),
+        instance_types={},
+    )
+
+
+def _copy_python_call_context(context: _PythonCallContext) -> _PythonCallContext:
+    return _PythonCallContext(
+        bindings=_PythonImportBindings(
+            direct_imports={name: set(identities) for name, identities in context.bindings.direct_imports.items()},
+            module_imports=dict(context.bindings.module_imports),
+        ),
+        instance_types=dict(context.instance_types),
+    )
+
+
+def _python_resolved_call_identities(
+    call: ast.Call,
+    file: _PythonWorkspaceFile,
+    bindings: _PythonImportBindings,
+    instance_types: dict[str, str],
+) -> list[str]:
+    identities: list[str] = []
+    if isinstance(call.func, ast.Name):
+        local_name = call.func.id
+        for imported_identity in sorted(bindings.direct_imports.get(local_name, set())):
+            _append_unique(identities, imported_identity)
+        _append_unique(identities, _python_symbol_identity(file.module_name, local_name))
+    elif isinstance(call.func, ast.Attribute):
+        value = call.func.value
+        value_name = _python_attribute_name(value)
+        normalized_value_name = _python_normalized_attribute_name(value, bindings)
+        if normalized_value_name:
+            _append_unique(identities, f"{normalized_value_name}.{call.func.attr}")
+        if value_name:
+            _append_unique(identities, f"{value_name}.{call.func.attr}")
+            _append_unique(identities, _python_symbol_identity(file.module_name, f"{value_name}.{call.func.attr}"))
+        if isinstance(value, ast.Name):
+            for imported_identity in sorted(bindings.direct_imports.get(value.id, set())):
+                _append_unique(identities, f"{imported_identity}.{call.func.attr}")
+            instance_identity = instance_types.get(value.id)
+            if instance_identity:
+                _append_unique(identities, f"{instance_identity}.{call.func.attr}")
+    return identities
+
+
+def _append_unique(items: list[str], item: str) -> None:
+    if item and item not in items:
+        items.append(item)
+
+
+def _python_normalized_attribute_name(node: ast.AST, bindings: _PythonImportBindings) -> str:
+    if isinstance(node, ast.Name):
+        return bindings.module_imports.get(node.id, node.id)
+    if isinstance(node, ast.Attribute):
+        prefix = _python_normalized_attribute_name(node.value, bindings)
+        return f"{prefix}.{node.attr}" if prefix else node.attr
+    return ""
+
+
+def _python_import_from_module_name(file: _PythonWorkspaceFile, node: ast.ImportFrom) -> str | None:
+    if node.level == 0:
+        return node.module or ""
+
+    package_name = _python_package_name(file.path, file.module_name)
+    package_parts = package_name.split(".") if package_name else []
+    ancestor_count = node.level - 1
+    if ancestor_count > len(package_parts):
+        return None
+
+    base_parts = package_parts[: len(package_parts) - ancestor_count]
+    if node.module:
+        base_parts.extend(part for part in node.module.split(".") if part)
+    return ".".join(base_parts)
+
+
+def _python_package_name(path: str, module_name: str) -> str:
+    if Path(path).name == "__init__.py":
+        return module_name
+    if "." not in module_name:
+        return ""
+    return module_name.rsplit(".", maxsplit=1)[0]
+
+
+def _python_imported_module_name(module_name: str, imported_name: str) -> str:
+    return f"{module_name}.{imported_name}" if module_name else imported_name
+
+
+def _python_symbol_identity(module_name: str, symbol_name: str) -> str:
+    return f"{module_name}.{symbol_name}" if module_name else symbol_name
+
+
+def _python_attribute_name(node: ast.AST) -> str:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        prefix = _python_attribute_name(node.value)
+        return f"{prefix}.{node.attr}" if prefix else node.attr
+    return ""
+
+
+def _python_symbol_nodes(module: ast.Module) -> dict[str, ast.AST]:
+    nodes: dict[str, ast.AST] = {}
+
+    def visit_body(
+        body: list[ast.stmt], parent_name: str | None, scope_kind: Literal["module", "class", "function"]
+    ) -> None:
+        for node in body:
+            if isinstance(node, ast.ClassDef):
+                name = _qualified_python_name(parent_name, node.name)
+                nodes[name] = node
+                visit_body(node.body, name, "class")
+            elif isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+                name = _qualified_python_name(parent_name, node.name)
+                nodes[name] = node
+                visit_body(node.body, name, "function")
+            elif scope_kind == "module" and isinstance(node, ast.Assign | ast.AnnAssign):
+                for name in _python_assignment_target_names(node):
+                    nodes[name] = node
+
+    visit_body(module.body, None, "module")
+    return nodes
 
 
 def _python_imports(source: str, module: ast.Module) -> list[str]:
@@ -584,6 +1331,10 @@ def _python_related_test_score(
 
 
 def _iter_python_test_files(repo_root: Path) -> list[str]:
+    return [path for path in _iter_python_files(repo_root) if _is_python_test_path(path)]
+
+
+def _iter_python_files(repo_root: Path) -> list[str]:
     paths: list[str] = []
     for current_root, dirnames, filenames in os.walk(repo_root):
         dirnames[:] = [dirname for dirname in dirnames if dirname not in PYTHON_SCAN_IGNORED_DIRS]
@@ -593,8 +1344,7 @@ def _iter_python_test_files(repo_root: Path) -> list[str]:
                 continue
             path = current_path / filename
             rel_path = path.relative_to(repo_root).as_posix()
-            if _is_python_test_path(rel_path):
-                paths.append(rel_path)
+            paths.append(rel_path)
     return sorted(paths)
 
 

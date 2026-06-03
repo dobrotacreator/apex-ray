@@ -113,6 +113,49 @@ def test_python_analyzer_builds_context_pack(tmp_path: Path) -> None:
     assert "calculate_total(Decimal('2'), 3)" in packs[0].related_test_snippets[0].code
 
 
+def test_python_context_pack_includes_reference_and_callee_snippets(tmp_path: Path) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "pricing.py").write_text(
+        "def apply_discount(amount: int) -> int:\n"
+        "    return amount\n\n"
+        "def calculate_total(price: int, quantity: int) -> int:\n"
+        "    subtotal = price * quantity\n"
+        "    return apply_discount(subtotal)\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "src" / "checkout.py").write_text(
+        "from pricing import calculate_total as total_for_cart\n\n"
+        "def checkout(price: int, quantity: int) -> int:\n"
+        "    return total_for_cart(price, quantity)\n",
+        encoding="utf-8",
+    )
+    diff = parse_unified_diff(
+        """diff --git a/src/pricing.py b/src/pricing.py
+--- a/src/pricing.py
++++ b/src/pricing.py
+@@ -5,2 +5,2 @@
+-    subtotal = price
++    subtotal = price * quantity
+     return apply_discount(subtotal)
+""",
+        TargetMode.PATCH,
+    )
+    diff = classify_diff(diff, ignore_patterns=[])
+
+    result = run_python_analyzer(tmp_path, diff.files)
+    packs = build_context_packs([result], diff.files, ReviewConfig(), repo_root=tmp_path) if result else []
+
+    assert len(packs) == 1
+    assert any(
+        "Reference impact:" in note and "1 non-import usage references" in note for note in packs[0].impact_notes
+    )
+    assert any("Callee contracts:" in note and "1 called definitions" in note for note in packs[0].impact_notes)
+    assert packs[0].reference_snippets[0].file == "src/checkout.py"
+    assert "return total_for_cart(price, quantity)" in packs[0].reference_snippets[0].code
+    assert packs[0].callee_snippets[0].file == "src/pricing.py"
+    assert "def apply_discount(amount: int) -> int:" in packs[0].callee_snippets[0].code
+
+
 def test_context_pack_includes_matching_custom_rule() -> None:
     diff = parse_unified_diff((TS_FIXTURE / "cart.diff").read_text(encoding="utf-8"), TargetMode.PATCH)
     diff = classify_diff(diff, ignore_patterns=[])
