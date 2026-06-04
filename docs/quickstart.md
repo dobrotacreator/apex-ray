@@ -23,7 +23,7 @@ apex-ray doctor
 
 ## Requirements
 
-Apex Ray can review git diffs through a language-agnostic pipeline. Enhanced analyzers currently cover TypeScript/JavaScript and Python:
+Apex Ray can review git diffs through a language-neutral pipeline. Enhanced analyzers currently cover TypeScript/JavaScript and Python:
 
 - Python 3.14+
 - git

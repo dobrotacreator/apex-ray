@@ -4,7 +4,7 @@
 
 # Apex Ray
 
-Local CLI-first, language-agnostic AI code review for git diffs.
+Local CLI-first AI code review for git diffs with analyzer-backed context.
 
 Apex Ray reads a git diff, builds compact context packs around changed code, runs optional LLM review through a local CLI provider, verifies findings, and writes Markdown, JSON, and HTML reports. It is designed for teams that want review intelligence locally, without depending on a hosted PR-review product.
 
@@ -25,7 +25,7 @@ Apex Ray reads a git diff, builds compact context packs around changed code, run
 ## What It Does
 
 - Builds context packs from changed files, symbols, callers, callees, contracts, metadata, and related tests.
-- Runs a language-agnostic diff -> context pack -> optional LLM review workflow.
+- Runs a language-neutral diff -> context pack -> optional LLM review workflow.
 - Uses enhanced analyzers for TypeScript/JavaScript and Python today, with Go and Rust analyzers planned next.
 - Supports project-specific rules and repo-committed review memory.
 - Runs without LLM calls, or with Codex CLI / Claude Code CLI when configured.
@@ -36,7 +36,7 @@ Apex Ray reads a git diff, builds compact context packs around changed code, run
 
 ## Analyzer Coverage
 
-Apex Ray's review pipeline is language-agnostic. It is strongest where an analyzer backend can build repository-aware context instead of relying only on diff hunks.
+Apex Ray's review pipeline is language-neutral. It is strongest where an analyzer backend can build repository-aware context instead of relying only on diff hunks.
 
 | Status | Language family | Strongest current surfaces |
 | --- | --- | --- |

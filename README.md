@@ -10,7 +10,7 @@
 [![Python 3.14+](https://img.shields.io/badge/python-3.14%2B-blue.svg)](https://github.com/dobrotacreator/apex-ray/blob/main/pyproject.toml)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-Local CLI-first, language-agnostic AI code review for git diffs.
+Local CLI-first AI code review for git diffs with analyzer-backed context.
 
 Full documentation: [dobrotacreator.github.io/apex-ray](https://dobrotacreator.github.io/apex-ray/)
 
@@ -87,7 +87,7 @@ See the full [Quick Start](https://dobrotacreator.github.io/apex-ray/quickstart/
 ## What It Does
 
 - Builds context packs from changed files, symbols, callers, callees, contracts, metadata, and related tests.
-- Runs a language-agnostic diff -> context pack -> optional LLM review workflow.
+- Runs a language-neutral diff -> context pack -> optional LLM review workflow.
 - Uses enhanced analyzers for TypeScript/JavaScript and Python today, with Go and Rust analyzers planned next.
 - Supports project-specific rules and repo-committed review memory.
 - Runs without LLM calls, or with Codex CLI / Claude Code CLI when configured.
@@ -98,7 +98,7 @@ See the full [Quick Start](https://dobrotacreator.github.io/apex-ray/quickstart/
 
 ## Analyzer Coverage
 
-Apex Ray's review pipeline is language-agnostic. It is strongest where an analyzer backend can build repository-aware context instead of relying only on diff hunks.
+Apex Ray's review pipeline is language-neutral. It is strongest where an analyzer backend can build repository-aware context instead of relying only on diff hunks.
 
 | Status | Language family | Strongest current surfaces |
 | --- | --- | --- |
