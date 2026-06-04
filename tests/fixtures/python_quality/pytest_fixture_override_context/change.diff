@@ -1,0 +1,10 @@
+diff --git a/tests/test_overrides.py b/tests/test_overrides.py
+index 1111111..2222222 100644
+--- a/tests/test_overrides.py
++++ b/tests/test_overrides.py
+@@ -6,4 +6,4 @@ from src.app import app, require_account
+ @pytest.fixture
+ def account_override():
+     def override_account() -> str:
+-        return "account-a"
++        return "account-test"

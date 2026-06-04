@@ -1,0 +1,24 @@
+name: python pytest fixture override context
+repo: ../fixtures/python_quality/pytest_fixture_override_context/repo
+diff: ../fixtures/python_quality/pytest_fixture_override_context/change.diff
+llm: false
+expected: []
+expected_context:
+  - pack_file: tests/test_overrides.py
+    pack_id_contains: account_override
+    metadata_file: tests/test_overrides.py
+    metadata_kind: metadata
+    metadata_text_contains: "@pytest.fixture"
+    metadata_snippet_contains: "@pytest.fixture"
+  - pack_file: tests/test_overrides.py
+    pack_id_contains: account_override
+    metadata_file: tests/test_overrides.py
+    metadata_kind: metadata
+    metadata_text_contains: "test fixture override: app.dependency_overrides[require_account] = override_account"
+    metadata_snippet_contains: "app.dependency_overrides[require_account] = override_account"
+  - pack_file: tests/test_overrides.py
+    pack_id_contains: account_override
+    metadata_file: tests/test_overrides.py
+    metadata_kind: metadata
+    metadata_text_contains: "test fixture consumer: def test_uses_override(account_override) -> None"
+    metadata_snippet_contains: "def test_uses_override(account_override) -> None"

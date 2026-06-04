@@ -1,0 +1,22 @@
+name: python event worker context
+repo: ../fixtures/python_quality/event_worker_context/repo
+diff: ../fixtures/python_quality/event_worker_context/change.diff
+llm: false
+expected: []
+expected_context:
+  - pack_file: src/worker.py
+    pack_id_contains: handle
+    contract_file: src/events.py
+    contract_kind: contract
+    contract_text_contains: "class ResourceEvent"
+    contract_snippet_contains: "class ResourceEvent"
+  - pack_file: src/worker.py
+    pack_id_contains: handle
+    metadata_file: src/worker.py
+    metadata_kind: metadata
+    metadata_text_contains: "worker/event boundary: await self._publisher.publish"
+    metadata_snippet_contains: "await self._publisher.publish"
+  - pack_file: src/worker.py
+    pack_id_contains: handle
+    related_test: tests/test_worker.py
+    related_test_snippet_contains: test_worker_publishes_resource_saved_event

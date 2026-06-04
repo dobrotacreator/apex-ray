@@ -21,7 +21,7 @@ def python_changed_files(files: list[ChangedFile]) -> list[ChangedFile]:
         file
         for file in files
         if file.language in PYTHON_LANGUAGES
-        and file.file_kind in {FileKind.SOURCE, FileKind.TEST}
+        and file.file_kind in {FileKind.MIGRATION, FileKind.SOURCE, FileKind.TEST}
         and not file.is_ignored
         and file.new_path is not None
     ]

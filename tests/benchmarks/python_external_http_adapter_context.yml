@@ -1,0 +1,21 @@
+name: python external http adapter context
+repo: ../fixtures/python_quality/external_http_adapter_context/repo
+diff: ../fixtures/python_quality/external_http_adapter_context/change.diff
+llm: false
+expected: []
+expected_context:
+  - pack_file: src/adapter.py
+    pack_id_contains: send_resource
+    metadata_file: src/adapter.py
+    metadata_kind: metadata
+    metadata_text_contains: 'external I/O call: await self._client.post("/resources", json=payload, timeout=5.0)'
+    metadata_snippet_contains: 'await self._client.post("/resources", json=payload, timeout=5.0)'
+  - pack_file: src/adapter.py
+    pack_id_contains: send_resource
+    callee_file: src/adapter.py
+    callee_kind: callee
+    callee_text_contains: "def _decode_response(response: httpx.Response) -> dict[str, Any]"
+  - pack_file: src/adapter.py
+    pack_id_contains: send_resource
+    related_test: tests/test_adapter.py
+    related_test_snippet_contains: test_send_resource_uses_timeout

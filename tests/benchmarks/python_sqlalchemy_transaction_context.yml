@@ -1,0 +1,22 @@
+name: python sqlalchemy transaction context
+repo: ../fixtures/python_quality/sqlalchemy_transaction_context/repo
+diff: ../fixtures/python_quality/sqlalchemy_transaction_context/change.diff
+llm: false
+expected: []
+expected_context:
+  - pack_file: src/repository.py
+    pack_id_contains: save_resource
+    contract_file: src/models.py
+    contract_kind: contract
+    contract_text_contains: "class ResourceRecord"
+    contract_snippet_contains: "class ResourceRecord"
+  - pack_file: src/repository.py
+    pack_id_contains: save_resource
+    metadata_file: src/repository.py
+    metadata_kind: metadata
+    metadata_text_contains: "transaction boundary: await self._session.commit()"
+    metadata_snippet_contains: "await self._session.commit()"
+  - pack_file: src/repository.py
+    pack_id_contains: save_resource
+    related_test: tests/test_repository.py
+    related_test_snippet_contains: test_save_resource_uses_pending_default_and_commits
