@@ -10,6 +10,7 @@ from apex_ray.analyzers import (
     PYTHON_READ_ERRORS,
     PYTHON_SCAN_IGNORED_DIRS,
     AnalyzerError,
+    python_changed_files,
     run_analyzers,
     run_python_analyzer,
     run_typescript_analyzer,
@@ -487,6 +488,213 @@ def test_python_analyzer_collects_workspace_references_and_callees(tmp_path: Pat
     assert [(callee.file, callee.kind, callee.text) for callee in symbol.callees] == [
         ("src/pricing.py", "callee", "def apply_discount(amount: int) -> int")
     ]
+
+
+def test_python_analyzer_does_not_treat_db_session_get_as_external_io(tmp_path: Path) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "repository.py").write_text(
+        "class ResourceRepository:\n"
+        "    def __init__(self, session):\n"
+        "        self._session = session\n\n"
+        "    async def load_resource(self, resource_id: str):\n"
+        "        record = await self._session.get(resource_id)\n"
+        "        await self._session.commit()\n"
+        "        return record\n",
+        encoding="utf-8",
+    )
+    changed = ChangedFile(
+        old_path="src/repository.py",
+        new_path="src/repository.py",
+        language="python",
+        file_kind=FileKind.SOURCE,
+        hunks=[
+            {
+                "old_start": 6,
+                "old_lines": 2,
+                "new_start": 6,
+                "new_lines": 2,
+                "lines": [
+                    {"kind": "delete", "content": "        record = await self._session.get(resource_id)"},
+                    {"kind": "add", "content": "        record = await self._session.get(resource_id)"},
+                    {"kind": "context", "content": "        await self._session.commit()"},
+                ],
+            }
+        ],
+    )
+
+    result = run_python_analyzer(tmp_path, [changed])
+
+    assert result is not None
+    symbol = next(
+        symbol for symbol in result.files[0].changed_symbols if symbol.name == "ResourceRepository.load_resource"
+    )
+    metadata_texts = [reference.text for reference in symbol.metadata]
+    assert "external I/O call: await self._session.get(resource_id)" not in metadata_texts
+    assert "transaction boundary: await self._session.commit()" in metadata_texts
+
+
+def test_python_analyzer_keeps_boundary_metadata_off_parent_classes(tmp_path: Path) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "service.py").write_text(
+        "class ResourceService:\n"
+        "    def __init__(self, session):\n"
+        "        self._session = session\n\n"
+        "    async def save(self) -> None:\n"
+        "        await self._session.commit()\n\n"
+        "    def display_name(self) -> str:\n"
+        "        return 'resource'\n",
+        encoding="utf-8",
+    )
+    changed = ChangedFile(
+        old_path="src/service.py",
+        new_path="src/service.py",
+        language="python",
+        file_kind=FileKind.SOURCE,
+        hunks=[
+            {
+                "old_start": 9,
+                "old_lines": 1,
+                "new_start": 9,
+                "new_lines": 1,
+                "lines": [
+                    {"kind": "delete", "content": "        return 'resource'"},
+                    {"kind": "add", "content": "        return 'resource'"},
+                ],
+            }
+        ],
+    )
+
+    result = run_python_analyzer(tmp_path, [changed])
+
+    assert result is not None
+    metadata_by_symbol = {
+        symbol.name: [reference.text for reference in symbol.metadata] for symbol in result.files[0].changed_symbols
+    }
+    assert metadata_by_symbol["ResourceService"] == []
+    assert metadata_by_symbol["ResourceService.display_name"] == []
+
+
+def test_python_analyzer_resolves_precise_migration_boundary_metadata(tmp_path: Path) -> None:
+    (tmp_path / "migrations" / "versions").mkdir(parents=True)
+    (tmp_path / "migrations" / "versions" / "resource_status.py").write_text(
+        "from alembic import op\n"
+        "from alembic.op import execute\n\n"
+        "def upgrade() -> None:\n"
+        "    execute('select 1')\n"
+        "    with op.batch_alter_table('resource') as batch_op:\n"
+        "        batch_op.alter_column('status')\n\n"
+        "def local_operation(op) -> None:\n"
+        "    op.execute('not migration')\n",
+        encoding="utf-8",
+    )
+    changed = ChangedFile(
+        old_path="migrations/versions/resource_status.py",
+        new_path="migrations/versions/resource_status.py",
+        language="python",
+        file_kind=FileKind.MIGRATION,
+        hunks=[
+            {
+                "old_start": 5,
+                "old_lines": 3,
+                "new_start": 5,
+                "new_lines": 3,
+                "lines": [
+                    {"kind": "add", "content": "    execute('select 1')"},
+                    {"kind": "context", "content": "    with op.batch_alter_table('resource') as batch_op:"},
+                    {"kind": "context", "content": "        batch_op.alter_column('status')"},
+                ],
+            },
+            {
+                "old_start": 10,
+                "old_lines": 1,
+                "new_start": 10,
+                "new_lines": 1,
+                "lines": [
+                    {"kind": "add", "content": "    op.execute('not migration')"},
+                ],
+            },
+        ],
+    )
+
+    result = run_python_analyzer(tmp_path, [changed])
+
+    assert result is not None
+    metadata_by_symbol = {
+        symbol.name: [reference.text for reference in symbol.metadata] for symbol in result.files[0].changed_symbols
+    }
+    assert "migration operation: execute('select 1')" in metadata_by_symbol["upgrade"]
+    assert "migration operation: batch_op.alter_column('status')" in metadata_by_symbol["upgrade"]
+    assert metadata_by_symbol["local_operation"] == []
+
+
+def test_python_analyzer_collects_direct_external_import_monkeypatch_and_event_priority(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "adapter.py").write_text(
+        "from requests import post\n\n"
+        "def send_resource(payload: dict[str, str]):\n"
+        "    return post('/resources', json=payload)\n\n"
+        "def configure(monkeypatch) -> None:\n"
+        "    monkeypatch.setenv('RESOURCE_MODE', 'test')\n\n"
+        "class ResourceWorker:\n"
+        "    def __init__(self, queue_client):\n"
+        "        self._queue_client = queue_client\n\n"
+        "    async def publish(self, event) -> None:\n"
+        "        await self._queue_client.send(event)\n",
+        encoding="utf-8",
+    )
+    changed = ChangedFile(
+        old_path="src/adapter.py",
+        new_path="src/adapter.py",
+        language="python",
+        file_kind=FileKind.SOURCE,
+        hunks=[
+            {
+                "old_start": 4,
+                "old_lines": 1,
+                "new_start": 4,
+                "new_lines": 1,
+                "lines": [{"kind": "add", "content": "    return post('/resources', json=payload)"}],
+            },
+            {
+                "old_start": 7,
+                "old_lines": 1,
+                "new_start": 7,
+                "new_lines": 1,
+                "lines": [{"kind": "add", "content": "    monkeypatch.setenv('RESOURCE_MODE', 'test')"}],
+            },
+            {
+                "old_start": 14,
+                "old_lines": 1,
+                "new_start": 14,
+                "new_lines": 1,
+                "lines": [{"kind": "add", "content": "        await self._queue_client.send(event)"}],
+            },
+        ],
+    )
+
+    result = run_python_analyzer(tmp_path, [changed])
+
+    assert result is not None
+    metadata_by_symbol = {
+        symbol.name: [reference.text for reference in symbol.metadata] for symbol in result.files[0].changed_symbols
+    }
+    assert "external I/O call: post('/resources', json=payload)" in metadata_by_symbol["send_resource"]
+    assert "test fixture override: monkeypatch.setenv('RESOURCE_MODE', 'test')" in metadata_by_symbol["configure"]
+    assert "worker/event boundary: await self._queue_client.send(event)" in metadata_by_symbol["ResourceWorker.publish"]
+    assert "external I/O call: await self._queue_client.send(event)" not in metadata_by_symbol["ResourceWorker.publish"]
+
+
+def test_python_changed_files_includes_migrations() -> None:
+    changed = ChangedFile(
+        old_path="migrations/versions/resource_status.py",
+        new_path="migrations/versions/resource_status.py",
+        language="python",
+        file_kind=FileKind.MIGRATION,
+    )
+
+    assert python_changed_files([changed]) == [changed]
 
 
 def test_python_analyzer_reference_and_callee_limits_follow_constants_module(

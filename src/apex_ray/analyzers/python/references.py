@@ -5,6 +5,7 @@ from apex_ray.models import AnalyzerReference, AnalyzerSymbol
 from . import constants as _constants
 from .annotations import _python_annotation_contracts_for_function
 from .calls import _python_call_sites, _python_resolved_call_identities
+from .metadata import _python_boundary_metadata_for_node
 from .state import _PythonImportBindings, _PythonIndexedSymbol, _PythonWorkspaceFile
 from .symbols import _python_symbol_nodes
 from .utils import (
@@ -29,6 +30,11 @@ def _populate_python_symbol_graph(
     for symbol in symbols:
         symbol.references = _python_workspace_references(symbol, changed_file, workspace, workspace_module_names)
         node = symbol_nodes.get(symbol.name)
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            symbol.metadata = _merge_python_references(
+                symbol.metadata,
+                _python_boundary_metadata_for_node(changed_file, node, workspace_module_names),
+            )
         if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
             symbol.callees = _python_callees_for_function(
                 changed_file,

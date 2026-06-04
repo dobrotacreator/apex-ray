@@ -1,0 +1,22 @@
+name: python alembic migration context
+repo: ../fixtures/python_quality/alembic_migration_context/repo
+diff: ../fixtures/python_quality/alembic_migration_context/change.diff
+llm: false
+expected: []
+expected_context:
+  - pack_file: migrations/versions/20260604_resource_status.py
+    pack_id_contains: upgrade
+    metadata_file: migrations/versions/20260604_resource_status.py
+    metadata_kind: metadata
+    metadata_text_contains: "migration operation: op.alter_column"
+    metadata_snippet_contains: 'op.alter_column("resource", "status", server_default=None)'
+  - pack_file: migrations/versions/20260604_resource_status.py
+    pack_id_contains: upgrade
+    metadata_file: migrations/versions/20260604_resource_status.py
+    metadata_kind: metadata
+    metadata_text_contains: "migration operation: op.create_index"
+    metadata_snippet_contains: 'op.create_index("ix_resource_status", "resource", ["status"])'
+  - pack_file: migrations/versions/20260604_resource_status.py
+    pack_id_contains: upgrade
+    related_test: tests/test_20260604_resource_status.py
+    related_test_snippet_contains: test_resource_status_migration_drops_server_default

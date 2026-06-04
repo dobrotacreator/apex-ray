@@ -1,0 +1,13 @@
+diff --git a/src/repository.py b/src/repository.py
+index 1111111..2222222 100644
+--- a/src/repository.py
++++ b/src/repository.py
+@@ -9,7 +9,7 @@ class ResourceRepository:
+     async def save_resource(self, account_id: str, payload: dict[str, str]) -> ResourceRecord:
+         record = ResourceRecord(
+             account_id=account_id,
+-            resource_id=payload["id"],
++            resource_id=payload.get("id", "pending"),
+             payload=payload,
+         )
+         self._session.add(record)
