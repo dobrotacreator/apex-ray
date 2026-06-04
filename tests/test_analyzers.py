@@ -489,6 +489,64 @@ def test_python_analyzer_collects_workspace_references_and_callees(tmp_path: Pat
     ]
 
 
+def test_python_analyzer_reference_and_callee_limits_follow_constants_module(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "pricing.py").write_text(
+        "def helper_one() -> int:\n"
+        "    return 1\n\n"
+        "def helper_two() -> int:\n"
+        "    return 2\n\n"
+        "def helper_three() -> int:\n"
+        "    return 3\n\n"
+        "def calculate_total() -> int:\n"
+        "    return helper_one() + helper_two() + helper_three()\n",
+        encoding="utf-8",
+    )
+    for name in ["a", "b", "c"]:
+        (tmp_path / "src" / f"consumer_{name}.py").write_text(
+            f"from pricing import calculate_total\n\ndef render_{name}() -> int:\n    return calculate_total()\n",
+            encoding="utf-8",
+        )
+    monkeypatch.setattr("apex_ray.analyzers.python.constants.PYTHON_REFERENCE_LIMIT", 1)
+    monkeypatch.setattr("apex_ray.analyzers.python.constants.PYTHON_CALLEE_LIMIT", 1)
+    changed = ChangedFile(
+        old_path="src/pricing.py",
+        new_path="src/pricing.py",
+        language="python",
+        file_kind=FileKind.SOURCE,
+        hunks=[
+            {
+                "old_start": 11,
+                "old_lines": 1,
+                "new_start": 11,
+                "new_lines": 1,
+                "lines": [
+                    {"kind": "delete", "content": "    return helper_one()"},
+                    {"kind": "add", "content": "    return helper_one() + helper_two() + helper_three()"},
+                ],
+            }
+        ],
+    )
+
+    result = run_python_analyzer(tmp_path, [changed])
+
+    assert result is not None
+    symbol = result.files[0].changed_symbols[0]
+    assert [(reference.file, reference.kind, reference.text) for reference in symbol.references] == [
+        ("src/consumer_a.py", "call", "calculate_total()")
+    ]
+    assert len(symbol.callees) == 1
+    assert (symbol.callees[0].file, symbol.callees[0].kind) == ("src/pricing.py", "callee")
+    assert symbol.callees[0].text in {
+        "def helper_one() -> int",
+        "def helper_two() -> int",
+        "def helper_three() -> int",
+    }
+
+
 def test_python_analyzer_resolves_relative_and_package_module_import_references(tmp_path: Path) -> None:
     (tmp_path / "app").mkdir()
     (tmp_path / "app" / "__init__.py").write_text("", encoding="utf-8")
@@ -842,7 +900,7 @@ def test_python_analyzer_marks_workspace_scan_partial_when_file_limit_is_reached
 ) -> None:
     (tmp_path / "a.py").write_text("def changed() -> bool:\n    return True\n", encoding="utf-8")
     (tmp_path / "z.py").write_text("def other() -> bool:\n    return True\n", encoding="utf-8")
-    monkeypatch.setattr("apex_ray.analyzers.python.PYTHON_WORKSPACE_FILE_LIMIT", 1, raising=False)
+    monkeypatch.setattr("apex_ray.analyzers.python.constants.PYTHON_WORKSPACE_FILE_LIMIT", 1, raising=False)
     changed = ChangedFile(
         old_path="a.py",
         new_path="a.py",
@@ -912,6 +970,50 @@ def test_python_analyzer_scores_related_tests_with_import_aliases(tmp_path: Path
         "tests/test_pricing_alias.py",
         "tests/test_pricing_name_only.py",
     ]
+
+
+def test_python_analyzer_related_test_limit_follows_constants_module(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tmp_path / "app").mkdir()
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "app" / "__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "app" / "pricing.py").write_text(
+        "def calculate_total(price: int, quantity: int) -> int:\n    return price * quantity\n",
+        encoding="utf-8",
+    )
+    for name in ["a", "b", "c"]:
+        (tmp_path / "tests" / f"test_pricing_{name}.py").write_text(
+            "from app.pricing import calculate_total\n\n"
+            f"def test_total_{name}() -> None:\n"
+            "    assert calculate_total(2, 3) == 6\n",
+            encoding="utf-8",
+        )
+    monkeypatch.setattr("apex_ray.analyzers.python.constants.PYTHON_RELATED_TEST_LIMIT", 1)
+    changed = ChangedFile(
+        old_path="app/pricing.py",
+        new_path="app/pricing.py",
+        language="python",
+        file_kind=FileKind.SOURCE,
+        hunks=[
+            {
+                "old_start": 2,
+                "old_lines": 1,
+                "new_start": 2,
+                "new_lines": 1,
+                "lines": [
+                    {"kind": "delete", "content": "    return price"},
+                    {"kind": "add", "content": "    return price * quantity"},
+                ],
+            }
+        ],
+    )
+
+    result = run_python_analyzer(tmp_path, [changed])
+
+    assert result is not None
+    assert result.files[0].related_tests == ["tests/test_pricing_a.py"]
 
 
 def test_typescript_analyzer_resolves_workspace_tsconfig_extends(
