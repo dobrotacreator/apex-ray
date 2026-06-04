@@ -4,7 +4,7 @@
 
 # Apex Ray
 
-Local CLI-first AI code review for TypeScript and JavaScript projects.
+Local CLI-first AI code review for git diffs with analyzer-backed context.
 
 Apex Ray reads a git diff, builds compact context packs around changed code, runs optional LLM review through a local CLI provider, verifies findings, and writes Markdown, JSON, and HTML reports. It is designed for teams that want review intelligence locally, without depending on a hosted PR-review product.
 
@@ -24,13 +24,26 @@ Apex Ray reads a git diff, builds compact context packs around changed code, run
 
 ## What It Does
 
-- Builds TS/JS context packs from changed files, symbols, callers, callees, contracts, metadata, and related tests.
+- Builds context packs from changed files, symbols, callers, callees, contracts, metadata, and related tests.
+- Runs a language-neutral diff -> context pack -> optional LLM review workflow.
+- Uses enhanced analyzers for TypeScript/JavaScript and Python today, with Go and Rust analyzers planned next.
 - Supports project-specific rules and repo-committed review memory.
 - Runs without LLM calls, or with Codex CLI / Claude Code CLI when configured.
 - Routes cheap and strong models through profiles.
 - Tracks LLM coverage, skipped packs, partial severity, provider failures, cache usage, and continuation commands.
 - Replays historical GitHub PR review comments for local evals.
 - Writes local telemetry so teams can tune cost, latency, and coverage over time.
+
+## Analyzer Coverage
+
+Apex Ray's review pipeline is language-neutral. It is strongest where an analyzer backend can build repository-aware context instead of relying only on diff hunks.
+
+| Status | Language family | Strongest current surfaces |
+| --- | --- | --- |
+| Enhanced analyzer available | TypeScript, JavaScript | NestJS controllers/providers/modules/guards, DTO/schema validators, route and DI metadata, workspace imports/exports, enum/const fanout, cache and permission surfaces, related tests. |
+| Enhanced analyzer available | Python | FastAPI routes/dependencies, Pydantic models/settings/validators, SQLAlchemy sessions/transactions, Alembic migrations, async worker/event flows, external HTTP/cloud/Redis adapters, dataclass/TypedDict/Protocol contracts, pytest/unittest tests and fixtures. |
+| Enhanced analyzer planned | Go, Rust | Repository-aware symbols, callers/callees, contracts, service boundaries, persistence/I/O surfaces, and related tests. |
+| Generic fallback | Other reviewable diffs | Diff-hunk context, risk signals, project rules, memory, reports, and optional LLM review without a repository-aware symbol graph. |
 
 ## What It Does Not Do
 

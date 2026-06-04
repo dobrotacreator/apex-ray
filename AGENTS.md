@@ -4,7 +4,7 @@ Repo-local rules for coding agents working on Apex Ray. Use `README.md` for user
 
 ## Purpose
 
-Apex Ray is a local CLI-first AI code review engine for TypeScript and JavaScript projects.
+Apex Ray is a local CLI-first AI code review engine for git diffs with analyzer-backed context for selected language families.
 
 ## Where Changes Go
 
@@ -18,6 +18,7 @@ Apex Ray is a local CLI-first AI code review engine for TypeScript and JavaScrip
 - Benchmark capture/replay and comparison lives in `src/apex_ray/benchmark/`.
 - Historical PR capture/replay, Greptile matching, state, storage, and telemetry lives in `src/apex_ray/pr_eval/`.
 - The bundled TS/JS analyzer lives in `analyzer-runtimes/typescript/src/`, grouped by `contracts/`, `references/`, `workspace/`, `indexes/`, and `symbols/`.
+- The built-in Python analyzer lives in `src/apex_ray/analyzers/python/`, grouped by symbols, bindings, calls, annotations, references, metadata, related tests, state, and workspace helpers.
 
 Keep new modules inside the relevant package and keep package `__init__.py` files as public API re-export surfaces. Do not add new flat prefix files such as `cli_*.py`, `pipeline_*.py`, `llm_*.py`, `report_*.py`, `contract-*.ts`, or `workspace-*.ts`.
 

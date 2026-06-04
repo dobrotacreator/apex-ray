@@ -49,10 +49,10 @@ title: Preserve cart totals
 kind: invariant
 severity: high
 paths:
-  - src/cart.ts
+  - src/cart.py
 triggers:
   symbols:
-    - calculateTotal
+    - calculate_total
 ---
 Cart total changes must preserve quantity multiplication.
 ```

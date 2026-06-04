@@ -10,7 +10,7 @@
 [![Python 3.14+](https://img.shields.io/badge/python-3.14%2B-blue.svg)](https://github.com/dobrotacreator/apex-ray/blob/main/pyproject.toml)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-Local CLI-first AI code review for TypeScript and JavaScript projects.
+Local CLI-first AI code review for git diffs with analyzer-backed context.
 
 Full documentation: [dobrotacreator.github.io/apex-ray](https://dobrotacreator.github.io/apex-ray/)
 
@@ -71,7 +71,7 @@ Continue only unreviewed packs from a partial report:
 
 ```bash
 apex-ray review --continue-from .apex-ray/reports/review.json --residual-priority p0 --llm
-apex-ray review --continue-from .apex-ray/reports/review.json --only-pack 'apps/api/src/payments.ts#capture:1' --llm
+apex-ray review --continue-from .apex-ray/reports/review.json --only-pack '<pack-id>' --llm
 ```
 
 Run the same gate that `apex-ray init` wires into pre-push:
@@ -86,13 +86,26 @@ See the full [Quick Start](https://dobrotacreator.github.io/apex-ray/quickstart/
 
 ## What It Does
 
-- Builds TS/JS context packs from changed files, symbols, callers, callees, contracts, metadata, and related tests.
+- Builds context packs from changed files, symbols, callers, callees, contracts, metadata, and related tests.
+- Runs a language-neutral diff -> context pack -> optional LLM review workflow.
+- Uses enhanced analyzers for TypeScript/JavaScript and Python today, with Go and Rust analyzers planned next.
 - Supports project-specific rules and repo-committed review memory.
 - Runs without LLM calls, or with Codex CLI / Claude Code CLI when configured.
 - Routes cheap and strong models through profiles.
 - Tracks LLM coverage, skipped packs, partial severity, provider failures, cache usage, and continuation commands.
 - Replays historical GitHub PR review comments for local evals.
 - Writes local telemetry so teams can tune cost, latency, and coverage over time.
+
+## Analyzer Coverage
+
+Apex Ray's review pipeline is language-neutral. It is strongest where an analyzer backend can build repository-aware context instead of relying only on diff hunks.
+
+| Status | Language family | Strongest current surfaces |
+| --- | --- | --- |
+| Enhanced analyzer available | TypeScript, JavaScript | NestJS controllers/providers/modules/guards, DTO/schema validators, route and DI metadata, workspace imports/exports, enum/const fanout, cache and permission surfaces, related tests. |
+| Enhanced analyzer available | Python | FastAPI routes/dependencies, Pydantic models/settings/validators, SQLAlchemy sessions/transactions, Alembic migrations, async worker/event flows, external HTTP/cloud/Redis adapters, dataclass/TypedDict/Protocol contracts, pytest/unittest tests and fixtures. |
+| Enhanced analyzer planned | Go, Rust | Repository-aware symbols, callers/callees, contracts, service boundaries, persistence/I/O surfaces, and related tests. |
+| Generic fallback | Other reviewable diffs | Diff-hunk context, risk signals, project rules, memory, reports, and optional LLM review without a repository-aware symbol graph. |
 
 ## What It Does Not Do
 

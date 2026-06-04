@@ -33,7 +33,7 @@ No-LLM mode is deterministic and cheap:
 apex-ray review --worktree --no-llm
 ```
 
-It still parses the diff, runs the TS/JS analyzer when available, builds context packs, and reports review coverage surfaces.
+It still parses the diff, runs available language analyzers, builds context packs, and reports review coverage surfaces.
 
 LLM mode sends selected context packs to the configured local CLI provider:
 
@@ -108,14 +108,14 @@ Run it manually before relying on hook behavior:
 apex-ray gate pre-push
 ```
 
-If repeated push attempts review the same packs, Apex Ray uses the LLM response cache and TS/JS analyzer cache to reduce repeated work.
+If repeated push attempts review the same packs, Apex Ray uses the LLM response cache and analyzer caches where available to reduce repeated work.
 
 ## Caches
 
 Apex Ray uses two local caches by default:
 
 - `.apex-ray/cache/llm` for provider responses keyed by prompt context and routing.
-- analyzer repo index cache for TypeScript/JavaScript repository analysis.
+- analyzer repo index caches where a backend supports them. Today this applies to TypeScript/JavaScript repository analysis; the Python analyzer is in-process and does not yet maintain a persistent repo index cache.
 
 Refresh LLM cache entries:
 
@@ -152,6 +152,7 @@ apex-ray doctor
 Typical issues:
 
 - `Config: not found`: run `apex-ray init` in the target repository or pass `--config`.
+- `Python analyzer available: false`: reinstall Apex Ray or run from a healthy source checkout. The Python analyzer is built in and should normally be available whenever the CLI imports successfully.
 - `TypeScript analyzer built: false`: reinstall the published package, or in a source checkout run the TypeScript analyzer build from [Development](development.md).
 - Provider command not found: install the configured Codex CLI or Claude Code CLI, or override the executable path in `.apex-ray/config.local.yml`.
 - Hook cannot find `apex-ray`: install Apex Ray on the user `PATH` used by git hooks, or update the hook environment.

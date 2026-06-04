@@ -4,7 +4,7 @@ This document gives a high-level map of how Apex Ray works. It focuses on produc
 
 ## What Apex Ray Is
 
-Apex Ray is a local CLI-first review engine. It reads a git diff, builds compact TypeScript/JavaScript context around changed code, optionally asks a local LLM CLI provider to review that context, verifies findings, and writes local reports and telemetry.
+Apex Ray is a local CLI-first review engine. It reads a git diff, builds compact TypeScript/JavaScript/Python context around changed code, optionally asks a local LLM CLI provider to review that context, verifies findings, and writes local reports and telemetry.
 
 The core design goal is local review intelligence:
 
@@ -20,7 +20,7 @@ flowchart LR
   CLI["Python CLI"]
   Config["Config loader"]
   Diff["Diff parser and classifier"]
-  Analyzer["Bundled TS/JS analyzer"]
+  Analyzer["Language analyzers"]
   Context["Context pack builder"]
   Rules["Rules and memory"]
   LLM["LLM providers and routing"]
@@ -61,7 +61,7 @@ The `src/apex_ray/pipeline/` package owns the end-to-end review orchestration:
 
 - parse and classify the selected diff;
 - discover project metadata;
-- run the bundled TS/JS analyzer;
+- run enabled language analyzers;
 - build context packs;
 - choose deep and shallow LLM review coverage;
 - consolidate findings;
@@ -69,7 +69,11 @@ The `src/apex_ray/pipeline/` package owns the end-to-end review orchestration:
 
 The package root `apex_ray.pipeline` re-exports the stable pipeline API. Implementation lives in `runner.py`, `selection.py`, and `findings.py`.
 
-### TypeScript Analyzer
+### Analyzer Backends
+
+Apex Ray runs analyzer backends independently per language family. A backend can produce symbol-aware context for its files while another backend falls back to diff-only packs or succeeds normally. Analyzer results use a shared schema: changed symbols, references, callees, contracts, metadata, related tests, warnings, partial status, and failed files.
+
+### TypeScript/JavaScript Analyzer
 
 The analyzer under `analyzer-runtimes/typescript/src/` is a Node/TypeScript program bundled into the Python package. It builds repository-aware context for TS/JS changes:
 
@@ -80,6 +84,16 @@ The analyzer under `analyzer-runtimes/typescript/src/` is a Node/TypeScript prog
 - workspace package import/export/member references.
 
 Python calls the analyzer as a subprocess, receives structured JSON, and falls back to diff-only context when analyzer coverage is unavailable for a file.
+
+### Python Analyzer
+
+The Python analyzer lives under `src/apex_ray/analyzers/python/` and runs in-process with the Python stdlib `ast` parser. It builds repository-aware context for Python changes:
+
+- changed functions, async functions, classes, methods, assignments, and deleted symbols;
+- imports, exports, references, direct callees, and related tests;
+- annotation contracts, base/protocol contracts, dataclass/TypedDict/Protocol surfaces, and Pydantic/FastAPI schema boundaries;
+- FastAPI route/dependency metadata, SQLAlchemy transaction/session boundaries, Alembic migration operations, external I/O adapters, worker/event publish/send boundaries, and pytest/unittest fixture context;
+- syntax/read failures as analyzer warnings with diff-only fallback for affected files.
 
 ### Context Packs
 
@@ -140,7 +154,7 @@ sequenceDiagram
   User->>CLI: apex-ray review --worktree|--staged|--base|--diff
   CLI->>Git: resolve target and collect diff
   CLI->>CLI: parse, classify, and ignore files
-  CLI->>Analyzer: run TS/JS analyzer for reviewable files
+  CLI->>Analyzer: run language analyzers for reviewable files
   Analyzer-->>CLI: structured symbols, refs, metadata, tests
   CLI->>Context: build context packs with rules and memory
   alt LLM disabled
@@ -179,7 +193,7 @@ The init command is intentionally conservative: shared config is commit-friendly
 
 `apex-ray gate pre-push` is the hook-friendly wrapper around the review pipeline. It reviews the configured base branch diff, writes the same Markdown/JSON report artifacts as normal review, evaluates `review.gates.pre_push`, prints live progress to stderr, prints a short blocking summary to stdout, and exits `1` when the gate blocks.
 
-The gate does not narrow the diff after a failed push. It keeps reviewing `base...HEAD` for correctness and relies on the LLM response cache plus the TypeScript analyzer index cache to make repeated fix-and-push attempts cheaper. When a previous pre-push JSON report exists, stdout includes a small delta for new, still blocking, and resolved blocking findings.
+The gate does not narrow the diff after a failed push. It keeps reviewing `base...HEAD` for correctness and relies on the LLM response cache plus analyzer caches where available to make repeated fix-and-push attempts cheaper. When a previous pre-push JSON report exists, stdout includes a small delta for new, still blocking, and resolved blocking findings.
 
 ## Configuration Flow
 
@@ -255,7 +269,7 @@ Benchmark reports can be compared to detect regressions in expected findings, ex
 - `sample.diff`: a small patch used by diff parsing, classification, and CLI output tests.
 - `ts_project/`: a tiny TypeScript project with `src/`, `tests/`, `tsconfig.json`, and several diffs. It exercises the core analyzer/context/review path.
 - `ts_quality/*/`: synthetic TS/JS repositories with one `repo/` directory and one `change.diff`. Each fixture targets a specific context or review-quality behavior: references, workspace imports, NestJS metadata, schema contracts, route entries, permission changes, cache leaks, related tests, and similar cases.
-- `python_quality/*/`: synthetic Python repositories with one `repo/` directory and one `change.diff`. These cases exercise Python analyzer/context behavior such as importing consumers, callees, protocol/base contracts, FastAPI route metadata, Pydantic schema contracts, and related tests.
+- `python_quality/*/`: synthetic Python repositories with one `repo/` directory and one `change.diff`. These cases exercise Python analyzer/context behavior such as importing consumers, callees, protocol/base contracts, FastAPI route metadata, Pydantic schema contracts, SQLAlchemy transaction boundaries, Alembic migrations, external I/O adapters, worker/event metadata, pytest fixture overrides, and related tests.
 
 `tests/benchmarks/` contains YAML wrappers around those fixtures:
 
