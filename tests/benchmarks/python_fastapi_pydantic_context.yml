@@ -1,0 +1,33 @@
+name: python fastapi pydantic context
+repo: ../fixtures/python_quality/fastapi_pydantic_context/repo
+diff: ../fixtures/python_quality/fastapi_pydantic_context/change.diff
+llm: false
+expected: []
+expected_context:
+  - pack_file: src/api/routes.py
+    pack_id_contains: create_resource
+    metadata_file: src/api/routes.py
+    metadata_kind: metadata
+    metadata_text_contains: '@router.post("/resources", response_model=ResourceRead)'
+    metadata_snippet_contains: '@router.post("/resources", response_model=ResourceRead)'
+  - pack_file: src/api/routes.py
+    pack_id_contains: create_resource
+    contract_file: src/api/schemas.py
+    contract_kind: contract
+    contract_text_contains: "class ResourceCreate(BaseModel)"
+    contract_snippet_contains: "class ResourceCreate(BaseModel)"
+  - pack_file: src/api/routes.py
+    pack_id_contains: create_resource
+    contract_file: src/api/schemas.py
+    contract_kind: contract
+    contract_text_contains: "class ResourceRead(BaseModel)"
+    contract_snippet_contains: "class ResourceRead(BaseModel)"
+  - pack_file: src/api/routes.py
+    pack_id_contains: create_resource
+    callee_file: src/api/schemas.py
+    callee_kind: callee
+    callee_text_contains: "class ResourceRead(BaseModel)"
+  - pack_file: src/api/routes.py
+    pack_id_contains: create_resource
+    related_test: tests/test_routes.py
+    related_test_snippet_contains: test_create_resource_trims_name

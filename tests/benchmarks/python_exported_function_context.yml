@@ -1,0 +1,22 @@
+name: python exported function context
+repo: ../fixtures/python_quality/exported_function_context/repo
+diff: ../fixtures/python_quality/exported_function_context/change.diff
+llm: false
+expected: []
+expected_context:
+  - pack_file: src/pricing.py
+    pack_id_contains: quote_total
+    reference_file: src/checkout.py
+    reference_kind: call
+    reference_text_contains: quote_total(Decimal("10.00"), 3)
+    reference_snippet_contains: preview_total
+  - pack_file: src/pricing.py
+    pack_id_contains: quote_total
+    callee_file: src/pricing.py
+    callee_kind: callee
+    callee_text_contains: "def clamp_amount(amount: Decimal) -> Decimal"
+    callee_snippet_contains: "def clamp_amount(amount: Decimal) -> Decimal"
+  - pack_file: src/pricing.py
+    pack_id_contains: quote_total
+    related_test: tests/test_pricing.py
+    related_test_snippet_contains: test_quote_total_uses_quantity

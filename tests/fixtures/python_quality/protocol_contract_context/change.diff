@@ -1,0 +1,12 @@
+diff --git a/src/repository.py b/src/repository.py
+index 1111111..2222222 100644
+--- a/src/repository.py
++++ b/src/repository.py
+@@ -10,6 +10,6 @@ class InMemoryResourceRepository(ResourceRepository):
+         self.saved: dict[str, dict[str, str]] = {}
+
+     def save(self, account_id: str, payload: dict[str, str]) -> str:
+-        key = payload["name"]
++        key = f"{account_id}:{payload['name']}"
+         self.saved[key] = payload
+         return key
