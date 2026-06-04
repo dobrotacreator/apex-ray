@@ -4,8 +4,6 @@ import shutil
 import signal
 import subprocess
 import time
-from collections.abc import Callable
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
@@ -20,120 +18,9 @@ from apex_ray.models import (
     FileKind,
 )
 
-
-class AnalyzerError(RuntimeError):
-    pass
-
+from .common import AnalyzerError, _collapse_ranges
 
 TS_JS_LANGUAGES = {"typescript", "javascript"}
-
-
-@dataclass(frozen=True, slots=True)
-class AnalyzerBackendRun:
-    name: str
-    display_name: str
-    changed_files_count: int
-    result: AnalyzerResult | None = None
-    warning: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class AnalyzerRun:
-    results: list[AnalyzerResult]
-    fallback_reasons_by_path: dict[str, str]
-    warnings: list[str]
-    backend_runs: list[AnalyzerBackendRun]
-
-
-@dataclass(frozen=True, slots=True)
-class _AnalyzerBackend:
-    name: str
-    display_name: str
-    changed_files: Callable[[list[ChangedFile]], list[ChangedFile]]
-    run: Callable[[Path, list[ChangedFile], AnalyzerConfig], AnalyzerResult | None]
-    partial_fallback_reason: str
-
-
-def run_analyzers(
-    repo_root: Path,
-    files: list[ChangedFile],
-    config: AnalyzerConfig | None = None,
-) -> AnalyzerRun:
-    config = config or AnalyzerConfig()
-    results: list[AnalyzerResult] = []
-    fallback_reasons_by_path: dict[str, str] = {}
-    warnings: list[str] = []
-    backend_runs: list[AnalyzerBackendRun] = []
-
-    for backend in _analyzer_backends():
-        backend_changed_files = backend.changed_files(files)
-        if not backend_changed_files:
-            backend_runs.append(
-                AnalyzerBackendRun(
-                    name=backend.name,
-                    display_name=backend.display_name,
-                    changed_files_count=0,
-                )
-            )
-            continue
-        try:
-            result = backend.run(repo_root, files, config)
-        except AnalyzerError as exc:
-            warning = f"{backend.display_name} analyzer unavailable: {exc}"
-            warnings.append(warning)
-            fallback_reason = f"{warning}; using diff-only fallback context."
-            for changed_file in backend_changed_files:
-                fallback_reasons_by_path[changed_file.path] = fallback_reason
-            backend_runs.append(
-                AnalyzerBackendRun(
-                    name=backend.name,
-                    display_name=backend.display_name,
-                    changed_files_count=len(backend_changed_files),
-                    warning=warning,
-                )
-            )
-            continue
-
-        if result is None:
-            backend_runs.append(
-                AnalyzerBackendRun(
-                    name=backend.name,
-                    display_name=backend.display_name,
-                    changed_files_count=len(backend_changed_files),
-                )
-            )
-            continue
-
-        results.append(result)
-        for failed_path in result.failed_files:
-            fallback_reasons_by_path[failed_path] = backend.partial_fallback_reason
-        backend_runs.append(
-            AnalyzerBackendRun(
-                name=backend.name,
-                display_name=backend.display_name,
-                changed_files_count=len(backend_changed_files),
-                result=result,
-            )
-        )
-
-    return AnalyzerRun(
-        results=results,
-        fallback_reasons_by_path=fallback_reasons_by_path,
-        warnings=warnings,
-        backend_runs=backend_runs,
-    )
-
-
-def _analyzer_backends() -> list[_AnalyzerBackend]:
-    return [
-        _AnalyzerBackend(
-            name="typescript",
-            display_name="TypeScript",
-            changed_files=ts_js_changed_files,
-            run=run_typescript_analyzer,
-            partial_fallback_reason="TypeScript analyzer shard failed; using diff-only fallback context.",
-        )
-    ]
 
 
 def has_ts_js_changes(files: list[ChangedFile]) -> bool:
@@ -431,10 +318,10 @@ def typescript_analyzer_script(config: AnalyzerConfig | None = None, repo_root: 
             script_path = repo_root / script_path
         return script_path.resolve()
 
-    bundled = Path(__file__).resolve().parent / "_bundled" / "typescript" / "analyze.js"
+    bundled = Path(__file__).resolve().parents[1] / "_bundled" / "typescript" / "analyze.js"
     if bundled.exists():
         return bundled
-    return Path(__file__).resolve().parents[2] / "analyzers" / "typescript" / "dist" / "analyze.js"
+    return Path(__file__).resolve().parents[3] / "analyzer-runtimes" / "typescript" / "dist" / "analyze.js"
 
 
 def _changed_new_line_ranges(file: ChangedFile) -> list[tuple[int, int]]:
@@ -460,18 +347,3 @@ def _deleted_lines(file: ChangedFile) -> list[tuple[int, str]]:
             if line.kind == "delete":
                 lines.append((next_new_line, line.content))
     return lines
-
-
-def _collapse_ranges(lines: list[int]) -> list[tuple[int, int]]:
-    if not lines:
-        return []
-    ranges: list[tuple[int, int]] = []
-    start = previous = lines[0]
-    for line in lines[1:]:
-        if line == previous + 1:
-            previous = line
-            continue
-        ranges.append((start, previous))
-        start = previous = line
-    ranges.append((start, previous))
-    return ranges

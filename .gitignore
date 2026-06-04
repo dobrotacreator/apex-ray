@@ -30,6 +30,6 @@ dist/
 /benchmark*.md
 /benchmark*.json
 docs/specs/
-analyzers/typescript/node_modules/
-analyzers/typescript/dist/
-analyzers/typescript/dist-test/
+analyzer-runtimes/typescript/node_modules/
+analyzer-runtimes/typescript/dist/
+analyzer-runtimes/typescript/dist-test/

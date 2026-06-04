@@ -6,7 +6,7 @@
 - [ ] `uv run ruff check .`
 - [ ] `uv run pyright`
 - [ ] `uv run pytest -q`
-- [ ] `cd analyzers/typescript && npm run build`
+- [ ] `cd analyzer-runtimes/typescript && npm run build`
 - [ ] `uv build --sdist --wheel && uv run twine check dist/*`
 - [ ] `git diff --check`
 

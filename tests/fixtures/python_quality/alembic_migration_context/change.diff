@@ -1,0 +1,10 @@
+diff --git a/migrations/versions/20260604_resource_status.py b/migrations/versions/20260604_resource_status.py
+index 1111111..2222222 100644
+--- a/migrations/versions/20260604_resource_status.py
++++ b/migrations/versions/20260604_resource_status.py
+@@ -10,5 +10,6 @@ def upgrade() -> None:
+         "resource",
+         sa.Column("status", sa.String(length=32), nullable=False, server_default="pending"),
+     )
++    op.alter_column("resource", "status", server_default=None)
+     op.create_index("ix_resource_status", "resource", ["status"])

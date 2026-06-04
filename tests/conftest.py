@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-TS_ANALYZER = ROOT / "analyzers" / "typescript"
+TS_ANALYZER = ROOT / "analyzer-runtimes" / "typescript"
 
 
 @pytest.fixture(scope="session")

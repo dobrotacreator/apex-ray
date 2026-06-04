@@ -12,8 +12,8 @@
 
 ```bash
 uv sync --all-groups
-npm --prefix analyzers/typescript ci
-npm --prefix analyzers/typescript run build
+npm --prefix analyzer-runtimes/typescript ci
+npm --prefix analyzer-runtimes/typescript run build
 ```
 
 ## Architecture Map
@@ -30,7 +30,7 @@ Python code lives under `src/apex_ray/`. Keep domain code in the existing packag
 - `benchmark/`: benchmark capture, matching, models, and reports.
 - `pr_eval/`: historical PR capture/replay, Greptile matching, run state, storage, and telemetry.
 
-The bundled TypeScript analyzer lives under `analyzers/typescript/src/`. Keep analyzer internals grouped by responsibility:
+The bundled TypeScript analyzer lives under `analyzer-runtimes/typescript/src/`. Keep analyzer internals grouped by responsibility:
 
 - `contracts/`: contracts, DTOs, decorator metadata, schemas, and dependency expansion.
 - `references/`: reference collection, merging, and target matching.
@@ -50,9 +50,9 @@ uv run ruff check .
 uv run pyright
 uv run coverage run -m pytest -q
 uv run coverage report -m
-npm --prefix analyzers/typescript run typecheck
-npm --prefix analyzers/typescript test
-npm --prefix analyzers/typescript run coverage
+npm --prefix analyzer-runtimes/typescript run typecheck
+npm --prefix analyzer-runtimes/typescript test
+npm --prefix analyzer-runtimes/typescript run coverage
 uv build --sdist --wheel
 uv run twine check dist/*
 git diff --check

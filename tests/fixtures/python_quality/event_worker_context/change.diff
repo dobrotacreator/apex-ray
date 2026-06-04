@@ -1,0 +1,13 @@
+diff --git a/src/worker.py b/src/worker.py
+index 1111111..2222222 100644
+--- a/src/worker.py
++++ b/src/worker.py
+@@ -8,7 +8,11 @@ class ResourceWorker:
+     async def handle(self, event: ResourceEvent) -> None:
+         await self._repository.save(event)
+         await self._publisher.publish(
+-            "resource.saved", event_id=event.event_id
++            "resource.saved",
++            event_id=event.event_id,
++            account_id=event.account_id,
+         )

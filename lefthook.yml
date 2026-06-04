@@ -25,7 +25,7 @@ pre-push:
     pyright:
       run: uv run pyright
     ts-analyzer:
-      run: npm --prefix analyzers/typescript run typecheck && npm --prefix analyzers/typescript run coverage
+      run: npm --prefix analyzer-runtimes/typescript run typecheck && npm --prefix analyzer-runtimes/typescript run coverage
     python-coverage:
       run: uv run coverage run -m pytest -q && uv run coverage report -m
     package:

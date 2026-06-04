@@ -1,0 +1,10 @@
+diff --git a/src/adapter.py b/src/adapter.py
+index 1111111..2222222 100644
+--- a/src/adapter.py
++++ b/src/adapter.py
+@@ -9,4 +9,4 @@ class ResourceClient:
+     async def send_resource(self, payload: dict[str, Any]) -> dict[str, Any]:
+-        response = await self._client.post("/resources", json=payload)
++        response = await self._client.post("/resources", json=payload, timeout=5.0)
+         response.raise_for_status()
+         return _decode_response(response)
