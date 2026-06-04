@@ -4,7 +4,7 @@ Repo-local rules for coding agents working on Apex Ray. Use `README.md` for user
 
 ## Purpose
 
-Apex Ray is a local CLI-first AI code review engine for TypeScript, JavaScript, and Python projects.
+Apex Ray is a local CLI-first, language-agnostic AI code review engine with analyzer-backed context for selected language families.
 
 ## Where Changes Go
 

@@ -1,7 +1,7 @@
 [project]
 name = "apex-ray"
 version = "0.1.5"
-description = "Local CLI-first AI code review for TypeScript, JavaScript, and Python projects."
+description = "Local CLI-first, language-agnostic AI code review for git diffs."
 readme = "README.md"
 requires-python = ">=3.14"
 license = "Apache-2.0"
@@ -9,7 +9,7 @@ license-files = ["LICENSE"]
 authors = [
     { name = "Apex Ray contributors" },
 ]
-keywords = ["ai", "code-review", "typescript", "javascript", "python", "llm", "cli"]
+keywords = ["ai", "code-review", "language-agnostic", "typescript", "javascript", "python", "llm", "cli"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Environment :: Console",

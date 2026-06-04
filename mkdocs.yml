@@ -1,5 +1,5 @@
 site_name: Apex Ray
-site_description: Local CLI-first AI code review for TypeScript, JavaScript, and Python projects.
+site_description: Local CLI-first, language-agnostic AI code review for git diffs.
 site_url: https://dobrotacreator.github.io/apex-ray/
 repo_url: https://github.com/dobrotacreator/apex-ray
 repo_name: dobrotacreator/apex-ray

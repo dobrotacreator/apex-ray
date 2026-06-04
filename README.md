@@ -10,7 +10,7 @@
 [![Python 3.14+](https://img.shields.io/badge/python-3.14%2B-blue.svg)](https://github.com/dobrotacreator/apex-ray/blob/main/pyproject.toml)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-Local CLI-first AI code review for TypeScript, JavaScript, and Python projects.
+Local CLI-first, language-agnostic AI code review for git diffs.
 
 Full documentation: [dobrotacreator.github.io/apex-ray](https://dobrotacreator.github.io/apex-ray/)
 
@@ -87,7 +87,8 @@ See the full [Quick Start](https://dobrotacreator.github.io/apex-ray/quickstart/
 ## What It Does
 
 - Builds context packs from changed files, symbols, callers, callees, contracts, metadata, and related tests.
-- Supports TypeScript/JavaScript and Python today, with Go and Rust planned next.
+- Runs a language-agnostic diff -> context pack -> optional LLM review workflow.
+- Uses enhanced analyzers for TypeScript/JavaScript and Python today, with Go and Rust analyzers planned next.
 - Supports project-specific rules and repo-committed review memory.
 - Runs without LLM calls, or with Codex CLI / Claude Code CLI when configured.
 - Routes cheap and strong models through profiles.
@@ -95,15 +96,16 @@ See the full [Quick Start](https://dobrotacreator.github.io/apex-ray/quickstart/
 - Replays historical GitHub PR review comments for local evals.
 - Writes local telemetry so teams can tune cost, latency, and coverage over time.
 
-## Language Support
+## Analyzer Coverage
 
-Apex Ray is strongest where it can build repository-aware context, not just paste diff hunks into a prompt.
+Apex Ray's review pipeline is language-agnostic. It is strongest where an analyzer backend can build repository-aware context instead of relying only on diff hunks.
 
-| Status | Languages | Strongest current surfaces |
+| Status | Language family | Strongest current surfaces |
 | --- | --- | --- |
-| Supported | TypeScript, JavaScript | NestJS controllers/providers/modules/guards, DTO/schema validators, route and DI metadata, workspace imports/exports, enum/const fanout, cache and permission surfaces, related tests. |
-| Supported | Python | FastAPI routes/dependencies, Pydantic models/settings/validators, SQLAlchemy sessions/transactions, Alembic migrations, async worker/event flows, external HTTP/cloud/Redis adapters, dataclass/TypedDict/Protocol contracts, pytest/unittest tests and fixtures. |
-| Planned | Go, Rust | Repository-aware symbols, callers/callees, contracts, service boundaries, persistence/I/O surfaces, and related tests. |
+| Enhanced analyzer available | TypeScript, JavaScript | NestJS controllers/providers/modules/guards, DTO/schema validators, route and DI metadata, workspace imports/exports, enum/const fanout, cache and permission surfaces, related tests. |
+| Enhanced analyzer available | Python | FastAPI routes/dependencies, Pydantic models/settings/validators, SQLAlchemy sessions/transactions, Alembic migrations, async worker/event flows, external HTTP/cloud/Redis adapters, dataclass/TypedDict/Protocol contracts, pytest/unittest tests and fixtures. |
+| Enhanced analyzer planned | Go, Rust | Repository-aware symbols, callers/callees, contracts, service boundaries, persistence/I/O surfaces, and related tests. |
+| Generic fallback | Other reviewable diffs | Diff-hunk context, risk signals, project rules, memory, reports, and optional LLM review without a repository-aware symbol graph. |
 
 ## What It Does Not Do
 
