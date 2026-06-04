@@ -1,0 +1,10 @@
+diff --git a/src/api/routes.py b/src/api/routes.py
+index 1111111..2222222 100644
+--- a/src/api/routes.py
++++ b/src/api/routes.py
+@@ -11,5 +11,5 @@ def require_account() -> str:
+
+ @router.post("/resources", response_model=ResourceRead)
+ def create_resource(payload: ResourceCreate, account_id: str = Depends(require_account)) -> ResourceRead:
+-    return ResourceRead(id=account_id, name=payload.name)
++    return ResourceRead(id=account_id, name=payload.name.strip())

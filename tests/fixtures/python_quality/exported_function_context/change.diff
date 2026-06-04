@@ -1,0 +1,12 @@
+diff --git a/src/pricing.py b/src/pricing.py
+index 1111111..2222222 100644
+--- a/src/pricing.py
++++ b/src/pricing.py
+@@ -8,5 +8,5 @@ def clamp_amount(amount: Decimal) -> Decimal:
+     return amount
+
+
+ def quote_total(price: Decimal, quantity: int) -> Decimal:
+-    subtotal = price + Decimal(quantity)
++    subtotal = price * quantity
+     return clamp_amount(subtotal)

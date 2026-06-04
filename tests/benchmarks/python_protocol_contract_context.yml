@@ -1,0 +1,16 @@
+name: python protocol contract context
+repo: ../fixtures/python_quality/protocol_contract_context/repo
+diff: ../fixtures/python_quality/protocol_contract_context/change.diff
+llm: false
+expected: []
+expected_context:
+  - pack_file: src/repository.py
+    pack_id_contains: InMemoryResourceRepository
+    contract_file: src/repository.py
+    contract_kind: contract
+    contract_text_contains: ResourceRepository
+    contract_snippet_contains: "def save(self, account_id: str, payload: dict[str, str]) -> str: ..."
+  - pack_file: src/repository.py
+    pack_id_contains: InMemoryResourceRepository
+    related_test: tests/test_repository.py
+    related_test_snippet_contains: test_repository_scopes_saved_resources_by_account

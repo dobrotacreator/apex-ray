@@ -255,6 +255,7 @@ Benchmark reports can be compared to detect regressions in expected findings, ex
 - `sample.diff`: a small patch used by diff parsing, classification, and CLI output tests.
 - `ts_project/`: a tiny TypeScript project with `src/`, `tests/`, `tsconfig.json`, and several diffs. It exercises the core analyzer/context/review path.
 - `ts_quality/*/`: synthetic TS/JS repositories with one `repo/` directory and one `change.diff`. Each fixture targets a specific context or review-quality behavior: references, workspace imports, NestJS metadata, schema contracts, route entries, permission changes, cache leaks, related tests, and similar cases.
+- `python_quality/*/`: synthetic Python repositories with one `repo/` directory and one `change.diff`. These cases exercise Python analyzer/context behavior such as importing consumers, callees, protocol/base contracts, FastAPI route metadata, Pydantic schema contracts, and related tests.
 
 `tests/benchmarks/` contains YAML wrappers around those fixtures:
 
