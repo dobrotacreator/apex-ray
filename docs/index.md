@@ -4,7 +4,7 @@
 
 # Apex Ray
 
-Local CLI-first AI code review for TypeScript and JavaScript projects.
+Local CLI-first AI code review for TypeScript, JavaScript, and Python projects.
 
 Apex Ray reads a git diff, builds compact context packs around changed code, runs optional LLM review through a local CLI provider, verifies findings, and writes Markdown, JSON, and HTML reports. It is designed for teams that want review intelligence locally, without depending on a hosted PR-review product.
 
@@ -24,13 +24,24 @@ Apex Ray reads a git diff, builds compact context packs around changed code, run
 
 ## What It Does
 
-- Builds TS/JS context packs from changed files, symbols, callers, callees, contracts, metadata, and related tests.
+- Builds context packs from changed files, symbols, callers, callees, contracts, metadata, and related tests.
+- Supports TypeScript/JavaScript and Python today, with Go and Rust planned next.
 - Supports project-specific rules and repo-committed review memory.
 - Runs without LLM calls, or with Codex CLI / Claude Code CLI when configured.
 - Routes cheap and strong models through profiles.
 - Tracks LLM coverage, skipped packs, partial severity, provider failures, cache usage, and continuation commands.
 - Replays historical GitHub PR review comments for local evals.
 - Writes local telemetry so teams can tune cost, latency, and coverage over time.
+
+## Language Support
+
+Apex Ray is strongest where it can build repository-aware context, not just paste diff hunks into a prompt.
+
+| Status | Languages | Strongest current surfaces |
+| --- | --- | --- |
+| Supported | TypeScript, JavaScript | NestJS controllers/providers/modules/guards, DTO/schema validators, route and DI metadata, workspace imports/exports, enum/const fanout, cache and permission surfaces, related tests. |
+| Supported | Python | FastAPI routes/dependencies, Pydantic models/settings/validators, SQLAlchemy sessions/transactions, Alembic migrations, async worker/event flows, external HTTP/cloud/Redis adapters, dataclass/TypedDict/Protocol contracts, pytest/unittest tests and fixtures. |
+| Planned | Go, Rust | Repository-aware symbols, callers/callees, contracts, service boundaries, persistence/I/O surfaces, and related tests. |
 
 ## What It Does Not Do
 

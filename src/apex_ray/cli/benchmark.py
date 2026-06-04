@@ -42,15 +42,15 @@ def benchmark(
     jobs: Annotated[int, typer.Option("--jobs", min=1, help="Number of benchmark cases to run concurrently.")] = 1,
     analyzer_cache: Annotated[
         bool,
-        typer.Option("--analyzer-cache/--no-analyzer-cache", help="Use the TS/JS analyzer repo index cache."),
+        typer.Option("--analyzer-cache/--no-analyzer-cache", help="Use analyzer repo index caches."),
     ] = True,
     refresh_analyzer_cache: Annotated[
         bool,
-        typer.Option("--refresh-analyzer-cache", help="Refresh the TS/JS analyzer repo index cache."),
+        typer.Option("--refresh-analyzer-cache", help="Refresh analyzer repo index caches."),
     ] = False,
     analyzer_cache_dir: Annotated[
         Path | None,
-        typer.Option("--analyzer-cache-dir", help="TS/JS analyzer index cache directory."),
+        typer.Option("--analyzer-cache-dir", help="Analyzer index cache directory."),
     ] = None,
 ) -> None:
     """Run benchmark cases and write markdown/JSON reports."""

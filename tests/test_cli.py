@@ -102,6 +102,17 @@ def test_doctor_reports_local_config(tmp_path: Path, monkeypatch) -> None:
 
     assert result.exit_code == 0
     assert f"- Local config: {tmp_path / '.apex-ray' / 'config.local.yml'}" in result.stdout
+    assert "- Python analyzer: built in" in result.stdout
+    assert "- Python analyzer available: true" in result.stdout
+
+
+def test_benchmark_help_uses_generic_analyzer_cache_wording() -> None:
+    result = runner.invoke(app, ["benchmark", "--help"], catch_exceptions=False)
+    plain_output = _plain_cli_output(result.stdout)
+
+    assert result.exit_code == 0
+    assert "Use analyzer repo index caches." in plain_output
+    assert "TS/JS analyzer repo index cache" not in plain_output
 
 
 def test_memory_lint_loads_repo_memory(tmp_path: Path, monkeypatch) -> None:

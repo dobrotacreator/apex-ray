@@ -144,9 +144,19 @@ def doctor(
     typer.echo(f"- Package managers: {', '.join(project.package_managers) or 'none'}")
     typer.echo(f"- Framework hints: {', '.join(project.framework_hints) or 'none'}")
     analyzer_script = typescript_analyzer_script(review_config.analyzer, root)
+    typer.echo("- Python analyzer: built in")
+    typer.echo(f"- Python analyzer available: {str(_python_analyzer_available()).lower()}")
     typer.echo(f"- Node available: {str(shutil.which('node') is not None).lower()}")
     typer.echo(f"- TypeScript analyzer: {analyzer_script}")
     typer.echo(f"- TypeScript analyzer built: {str(analyzer_script.exists()).lower()}")
+
+
+def _python_analyzer_available() -> bool:
+    try:
+        from apex_ray.analyzers.python import run_python_analyzer
+    except Exception:
+        return False
+    return callable(run_python_analyzer)
 
 
 @app.command("telemetry-summary")

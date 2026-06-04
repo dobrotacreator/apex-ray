@@ -23,16 +23,15 @@ apex-ray doctor
 
 ## Requirements
 
-Apex Ray reviews TypeScript and JavaScript projects, and the bundled analyzer needs Node.js:
+Apex Ray reviews TypeScript, JavaScript, and Python projects:
 
 - Python 3.14+
-- Node.js 24+
-- npm
 - git
+- Node.js 24+ and npm only when reviewing TypeScript or JavaScript with the bundled analyzer
 - Codex CLI or Claude Code CLI only when using `--llm`
 - GitHub CLI only for historical PR replay commands
 
-Run `apex-ray doctor` from the repository you want to review. It checks git discovery, detected languages, Node.js, and the bundled TypeScript analyzer.
+Run `apex-ray doctor` from the repository you want to review. It checks git discovery, detected languages, the built-in Python analyzer, Node.js, and the bundled TypeScript analyzer.
 
 ## Initialize A Project
 
@@ -119,7 +118,7 @@ Review one specific skipped pack:
 ```bash
 apex-ray review \
   --continue-from .apex-ray/reports/review.json \
-  --only-pack "apps/api/src/payments.ts#capture:1" \
+  --only-pack "<pack-id>" \
   --llm
 ```
 

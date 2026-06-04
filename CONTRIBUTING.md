@@ -7,12 +7,11 @@ Thanks for improving Apex Ray. This project is still pre-1.0, so breaking change
 Prerequisites:
 
 - Python 3.14+
-- Node.js 24+
-- npm
+- Node.js 24+ and npm for the bundled TypeScript/JavaScript analyzer
 - uv
 - git
 
-Install dependencies and build the TypeScript analyzer:
+Install dependencies and build the bundled TypeScript/JavaScript analyzer. The Python analyzer is part of the Python package and does not need a separate build step.
 
 ```bash
 uv sync --all-groups

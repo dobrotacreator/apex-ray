@@ -38,6 +38,16 @@ The bundled TypeScript analyzer lives under `analyzer-runtimes/typescript/src/`.
 - `indexes/`: repository, source-file, semantic-file, import/export, and DI indexes.
 - `symbols/`: symbol collection, export metadata, implemented members, and synthetic symbols.
 
+The Python analyzer lives under `src/apex_ray/analyzers/python/`. Keep it grouped by responsibility:
+
+- `runner.py`: backend entry point and per-file fallback behavior.
+- `workspace.py`: repository file discovery, safe path resolution, reading, and parsing.
+- `symbols.py`: Python symbol collection, imports, exports, deleted symbols, decorators, and base/annotation references.
+- `bindings.py` and `calls.py`: import binding, receiver, call-site, and simple instance tracking.
+- `annotations.py`, `references.py`, and `metadata.py`: annotation contracts, workspace references/callees, and framework-agnostic boundary metadata.
+- `related_tests.py`: related test discovery and ranking.
+- `state.py`, `utils.py`, and `constants.py`: shared data structures, helpers, and patchable analyzer limits.
+
 Avoid adding new flat prefix modules like `cli_*.py`, `pipeline_*.py`, `llm_*.py`, `report_*.py`, `contract-*.ts`, or `workspace-*.ts`; use package-local names inside the relevant directory. Keep Python package `__init__.py` files thin and focused on public re-exports.
 
 ## Checks

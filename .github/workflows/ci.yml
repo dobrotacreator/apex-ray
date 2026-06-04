@@ -84,9 +84,10 @@ jobs:
           tmpdir="$(mktemp -d)"
           doctor_output="$(cd "$tmpdir" && "$GITHUB_WORKSPACE/.ci-smoke-venv/bin/apex-ray" doctor)"
           echo "$doctor_output"
+          grep -q "Python analyzer available: true" <<<"$doctor_output"
           grep -q "TypeScript analyzer built: true" <<<"$doctor_output"
-          reviewdir="$(mktemp -d)"
-          cd "$reviewdir"
+          ts_reviewdir="$(mktemp -d)"
+          cd "$ts_reviewdir"
           git init
           git config user.email "apex@example.test"
           git config user.name "Apex Test"
@@ -116,4 +117,61 @@ jobs:
               for analyzer_result in report["analyzer_results"]
               for symbol in analyzer_result.get("files", [])
           ), "expected changed symbols from bundled TypeScript analyzer"
+          PY
+          py_reviewdir="$(mktemp -d)"
+          cd "$py_reviewdir"
+          git init
+          git config user.email "apex@example.test"
+          git config user.name "Apex Test"
+          mkdir -p src
+          cat > src/adapter.py <<'PYCODE'
+          class ResourceClient:
+              def __init__(self, client):
+                  self._client = client
+
+              async def send_resource(self, payload):
+                  response = await self._client.post("/resources", json=payload)
+                  return response
+          PYCODE
+          git add .
+          git commit -m "initial"
+          cat > src/adapter.py <<'PYCODE'
+          class ResourceClient:
+              def __init__(self, client):
+                  self._client = client
+
+              async def send_resource(self, payload):
+                  response = await self._client.post("/resources", json=payload, timeout=5.0)
+                  return response
+          PYCODE
+          "$GITHUB_WORKSPACE/.ci-smoke-venv/bin/apex-ray" review --worktree --no-llm --output python-review.md --json python-review.json
+          test -s python-review.md
+          test -s python-review.json
+          "$GITHUB_WORKSPACE/.ci-smoke-venv/bin/python" - <<'PY'
+          import json
+          from pathlib import Path
+
+          report = json.loads(Path("python-review.json").read_text(encoding="utf-8"))
+          python_results = [
+              analyzer_result
+              for analyzer_result in report["analyzer_results"]
+              if analyzer_result.get("language") == "python"
+          ]
+          assert python_results, "expected Python analyzer results"
+          warnings = "\n".join(
+              warning
+              for analyzer_result in python_results
+              for warning in analyzer_result.get("warnings", [])
+          )
+          assert "Python analyzer failed" not in warnings
+          assert any(
+              symbol.get("changed_symbols")
+              for analyzer_result in python_results
+              for symbol in analyzer_result.get("files", [])
+          ), "expected changed symbols from Python analyzer"
+          assert any(
+              "external I/O call" in metadata.get("text", "")
+              for pack in report["context_packs"]
+              for metadata in pack.get("metadata", [])
+          ), "expected Python boundary metadata in context pack"
           PY
