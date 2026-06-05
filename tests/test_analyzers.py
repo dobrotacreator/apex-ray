@@ -1464,6 +1464,153 @@ def test_typescript_analyzer_respects_total_timeout_across_shards(
     assert result.failed_files == ["src/file-1.ts", "src/file-2.ts"]
 
 
+def test_typescript_analyzer_scales_total_timeout_for_large_adaptive_shards(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    script = tmp_path / "analyze.js"
+    script.write_text("console.log('{}')\n", encoding="utf-8")
+    changed = [
+        ChangedFile(
+            old_path=f"src/file-{index}.ts",
+            new_path=f"src/file-{index}.ts",
+            language="typescript",
+            file_kind=FileKind.SOURCE,
+        )
+        for index in range(5)
+    ]
+    seen_shards: list[list[str]] = []
+    seen_timeouts: list[float] = []
+    monotonic_values = iter([0.0, 0.0, 2.1, 4.1])
+
+    monkeypatch.setattr("apex_ray.analyzers.typescript.shutil.which", lambda name: "/usr/bin/node")
+    monkeypatch.setattr("apex_ray.analyzers.typescript.time.monotonic", lambda: next(monotonic_values))
+
+    def fake_run(
+        args: list[str],
+        *,
+        cwd: Path,
+        timeout: float,
+    ) -> subprocess.CompletedProcess[str]:
+        changed_index = args.index("--changed") + 1
+        option_index = next(
+            (index for index in range(changed_index, len(args)) if args[index].startswith("--")),
+            len(args),
+        )
+        shard_files = args[changed_index:option_index]
+        seen_shards.append(shard_files)
+        seen_timeouts.append(timeout)
+        payload = {
+            "language": "typescript",
+            "projectRoot": str(tmp_path),
+            "tsconfigPath": None,
+            "files": [{"path": path, "symbols": [], "imports": [], "exports": []} for path in shard_files],
+            "warnings": [],
+            "indexCache": None,
+        }
+        return subprocess.CompletedProcess(args, 0, stdout=json.dumps(payload), stderr="")
+
+    monkeypatch.setattr("apex_ray.analyzers.typescript._run_analyzer_process", fake_run)
+
+    result = run_typescript_analyzer(
+        tmp_path,
+        changed,
+        AnalyzerConfig(
+            script_path=str(script),
+            timeout_seconds=2,
+            changed_file_shard_size=10,
+            adaptive_sharding=True,
+            large_change_file_threshold=5,
+            large_change_shard_size=2,
+        ),
+    )
+
+    assert result is not None
+    assert seen_shards == [
+        ["src/file-0.ts", "src/file-1.ts"],
+        ["src/file-2.ts", "src/file-3.ts"],
+        ["src/file-4.ts"],
+    ]
+    assert seen_timeouts[:2] == [2, 2]
+    assert seen_timeouts[2] == pytest.approx(1.9)
+    assert result.partial is False
+
+
+def test_typescript_analyzer_caps_scaled_total_timeout_for_large_adaptive_shards(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    script = tmp_path / "analyze.js"
+    script.write_text("console.log('{}')\n", encoding="utf-8")
+    changed = [
+        ChangedFile(
+            old_path=f"src/file-{index}.ts",
+            new_path=f"src/file-{index}.ts",
+            language="typescript",
+            file_kind=FileKind.SOURCE,
+        )
+        for index in range(9)
+    ]
+    seen_shards: list[list[str]] = []
+    seen_timeouts: list[float] = []
+    monotonic_values = iter([0.0, 0.0, 2.1, 4.1, 6.1, 8.1])
+
+    monkeypatch.setattr("apex_ray.analyzers.typescript.shutil.which", lambda name: "/usr/bin/node")
+    monkeypatch.setattr("apex_ray.analyzers.typescript.time.monotonic", lambda: next(monotonic_values))
+
+    def fake_run(
+        args: list[str],
+        *,
+        cwd: Path,
+        timeout: float,
+    ) -> subprocess.CompletedProcess[str]:
+        changed_index = args.index("--changed") + 1
+        option_index = next(
+            (index for index in range(changed_index, len(args)) if args[index].startswith("--")),
+            len(args),
+        )
+        shard_files = args[changed_index:option_index]
+        seen_shards.append(shard_files)
+        seen_timeouts.append(timeout)
+        payload = {
+            "language": "typescript",
+            "projectRoot": str(tmp_path),
+            "tsconfigPath": None,
+            "files": [{"path": path, "symbols": [], "imports": [], "exports": []} for path in shard_files],
+            "warnings": [],
+            "indexCache": None,
+        }
+        return subprocess.CompletedProcess(args, 0, stdout=json.dumps(payload), stderr="")
+
+    monkeypatch.setattr("apex_ray.analyzers.typescript._run_analyzer_process", fake_run)
+
+    result = run_typescript_analyzer(
+        tmp_path,
+        changed,
+        AnalyzerConfig(
+            script_path=str(script),
+            timeout_seconds=2,
+            changed_file_shard_size=20,
+            adaptive_sharding=True,
+            large_change_file_threshold=5,
+            large_change_shard_size=2,
+        ),
+    )
+
+    assert result is not None
+    assert seen_shards == [
+        ["src/file-0.ts", "src/file-1.ts"],
+        ["src/file-2.ts", "src/file-3.ts"],
+        ["src/file-4.ts", "src/file-5.ts"],
+        ["src/file-6.ts", "src/file-7.ts"],
+    ]
+    assert seen_timeouts[:3] == [2, 2, 2]
+    assert seen_timeouts[3] == pytest.approx(1.9)
+    assert any("total timeout after 8s" in warning for warning in result.warnings)
+    assert result.partial is True
+    assert result.failed_files == ["src/file-8.ts"]
+
+
 def test_typescript_analyzer_adaptive_sharding_uses_smaller_large_change_shards(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
