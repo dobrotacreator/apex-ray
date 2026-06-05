@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.1.6](https://github.com/dobrotacreator/apex-ray/compare/v0.1.5...v0.1.6) (2026-06-05)
+
+
+### Features
+
+* add analyzer orchestration foundation ([#26](https://github.com/dobrotacreator/apex-ray/issues/26)) ([de57e32](https://github.com/dobrotacreator/apex-ray/commit/de57e32b57e4e9ce6dee8b337c1aebe47dce97ef))
+* add Python analyzer quality benchmarks ([#38](https://github.com/dobrotacreator/apex-ray/issues/38)) ([1b99b25](https://github.com/dobrotacreator/apex-ray/commit/1b99b25fa56bd7f4511ea8345cecd4895ef5eee2))
+* add Python structural analyzer ([#28](https://github.com/dobrotacreator/apex-ray/issues/28)) ([7a9a9af](https://github.com/dobrotacreator/apex-ray/commit/7a9a9af12ef7f019242cdd5a1485ebc628a76c30))
+* add Python-aware review prompts ([#37](https://github.com/dobrotacreator/apex-ray/issues/37)) ([2e6869b](https://github.com/dobrotacreator/apex-ray/commit/2e6869bd5960417853213784e4f4e5086e83a516))
+* enrich Python analyzer reference context ([#30](https://github.com/dobrotacreator/apex-ray/issues/30)) ([2246925](https://github.com/dobrotacreator/apex-ray/commit/2246925b3e25c536f7406fb26d259f5cdf39ab92))
+* harden Python boundary analysis ([#40](https://github.com/dobrotacreator/apex-ray/issues/40)) ([3ac998a](https://github.com/dobrotacreator/apex-ray/commit/3ac998a7b2d29bbc84fec3244c624dd3d354f901))
+
+
+### Bug Fixes
+
+* handle Claude structured output in gate reviews ([#29](https://github.com/dobrotacreator/apex-ray/issues/29)) ([7ae551d](https://github.com/dobrotacreator/apex-ray/commit/7ae551d892a7827f5b3e7ab54f2a2b2c9325dffe))
+* scale TypeScript analyzer timeout for large diffs ([#42](https://github.com/dobrotacreator/apex-ray/issues/42)) ([233c1c3](https://github.com/dobrotacreator/apex-ray/commit/233c1c369f30ee9646d1a852e89632142782ca6f))
+
+
+### Refactoring
+
+* reorganize analyzer layout ([#31](https://github.com/dobrotacreator/apex-ray/issues/31)) ([2e41d42](https://github.com/dobrotacreator/apex-ray/commit/2e41d429f566900648d109611000e1520586b0bc))
+* split Python analyzer package ([#39](https://github.com/dobrotacreator/apex-ray/issues/39)) ([b88cd87](https://github.com/dobrotacreator/apex-ray/commit/b88cd877056e4b4e856958ca87900bf7419c8fd8))
+
+
+### Documentation
+
+* productize Python support ([#41](https://github.com/dobrotacreator/apex-ray/issues/41)) ([4aa7fdd](https://github.com/dobrotacreator/apex-ray/commit/4aa7fddb91106749ce55d46809405d9aad0be70d))
+
 ## [0.1.5](https://github.com/dobrotacreator/apex-ray/compare/v0.1.4...v0.1.5) (2026-06-02)
 
 
