@@ -58,12 +58,13 @@ def run_typescript_analyzer(
     failures: list[AnalyzerShardFailure] = []
     shards = list(_shard_changed_files(changed_files, config))
     large_change_set_size = len(changed_files) if len(changed_files) >= config.large_change_file_threshold else None
-    deadline = time.monotonic() + config.timeout_seconds
+    total_timeout_seconds = _typescript_total_timeout_seconds(changed_files, shards, config)
+    deadline = time.monotonic() + total_timeout_seconds
     for index, shard in enumerate(shards, start=1):
         remaining_seconds = config.timeout_seconds if len(shards) == 1 else deadline - time.monotonic()
         if remaining_seconds <= 0:
             timeout_error = AnalyzerError(
-                f"TypeScript analyzer total timeout after {_format_seconds(config.timeout_seconds)}"
+                f"TypeScript analyzer total timeout after {_format_seconds(total_timeout_seconds)}"
             )
             failures.extend(
                 _shard_failure(
@@ -223,6 +224,21 @@ def _shard_changed_files(files: list[ChangedFile], config: AnalyzerConfig) -> li
     if config.adaptive_sharding and len(ordered) >= config.large_change_file_threshold:
         shard_size = min(shard_size, config.large_change_shard_size)
     return [ordered[index : index + shard_size] for index in range(0, len(ordered), shard_size)]
+
+
+def _typescript_total_timeout_seconds(
+    changed_files: list[ChangedFile],
+    shards: list[list[ChangedFile]],
+    config: AnalyzerConfig,
+) -> float:
+    if len(shards) <= 1:
+        return config.timeout_seconds
+    if not config.adaptive_sharding or len(changed_files) < config.large_change_file_threshold:
+        return config.timeout_seconds
+    # Large diffs are split specifically to improve coverage. Give those shards
+    # enough shared wall-clock to finish without letting worst-case runs grow
+    # linearly with every changed file.
+    return config.timeout_seconds * min(len(shards), 4)
 
 
 def _changed_file_shard_priority(file: ChangedFile) -> tuple[int, int, int]:
