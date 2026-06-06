@@ -219,8 +219,57 @@ def test_init_project_creates_team_setup_files(tmp_path: Path) -> None:
     assert "Greptile comments" in improve_skill_text
 
 
+def test_init_project_deprecates_update_gitignore_without_touching_root(tmp_path: Path) -> None:
+    with pytest.warns(UserWarning, match="root .gitignore"):
+        init_project(tmp_path, update_gitignore=True, hooks="none", agent_files="none")
+
+    assert (tmp_path / ".apex-ray" / ".gitignore").exists()
+    assert not (tmp_path / ".gitignore").exists()
+
+
+def test_init_project_scoped_gitignore_covers_apex_local_artifacts(tmp_path: Path) -> None:
+    git.run_git(["init"], cwd=tmp_path)
+    init_project(tmp_path)
+
+    ignored_paths = [
+        ".apex-ray/config.local.yml",
+        ".apex-ray/cache/example",
+        ".apex-ray/telemetry/example.jsonl",
+        ".apex-ray/reports/review.json",
+        ".apex-ray/eval/runs/run.json",
+        ".apex-ray/evals/runs/run.json",
+    ]
+    for relative_path in ignored_paths:
+        path = tmp_path / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("local\n", encoding="utf-8")
+
+        ignored = git.run_git(["check-ignore", relative_path], cwd=tmp_path, check=False)
+
+        assert ignored.returncode == 0, relative_path
+
+    for relative_path in ("review.md", "review.json"):
+        path = tmp_path / relative_path
+        path.write_text("explicit report\n", encoding="utf-8")
+
+        ignored = git.run_git(["check-ignore", relative_path], cwd=tmp_path, check=False)
+
+        assert ignored.returncode != 0, relative_path
+
+
+def test_init_project_extends_existing_apex_gitignore(tmp_path: Path) -> None:
+    apex_gitignore = tmp_path / ".apex-ray" / ".gitignore"
+    apex_gitignore.parent.mkdir()
+    apex_gitignore.write_text("custom-apex\n", encoding="utf-8")
+
+    init_project(tmp_path)
+
+    assert "custom-apex" in apex_gitignore.read_text(encoding="utf-8")
+    assert "reports/" in apex_gitignore.read_text(encoding="utf-8")
+
+
 def test_init_project_appends_to_existing_agent_files(tmp_path: Path) -> None:
-    init_project(tmp_path, update_gitignore=True)
+    init_project(tmp_path)
     agents = tmp_path / "AGENTS.md"
     agents.write_text("custom\n", encoding="utf-8")
 

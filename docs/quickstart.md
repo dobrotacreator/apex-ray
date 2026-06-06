@@ -43,7 +43,7 @@ apex-ray doctor
 git status --short
 ```
 
-Inspect and commit the generated setup before reviewing application changes. `apex-ray init` creates shared config and review-learning directories under `.apex-ray/`, writes `.apex-ray/.gitignore` for local generated artifacts, and can install a pre-push gate through Lefthook or a git hook.
+Inspect and commit the generated setup before reviewing application changes. `apex-ray init` creates shared config and review-learning directories under `.apex-ray/`, writes `.apex-ray/.gitignore` for Apex Ray generated artifacts, and can install a pre-push gate through Lefthook or a git hook.
 
 Generated shared files are meant to be reviewed like normal project configuration. Machine-specific settings belong in `.apex-ray/config.local.yml`, which is ignored by default.
 

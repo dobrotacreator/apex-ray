@@ -1,3 +1,4 @@
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -57,15 +58,17 @@ def default_config_text(base: str = DEFAULT_BASE_BRANCH) -> str:
 """
 
 
-APEX_RAY_GITIGNORE_TEXT = """config.local.yml
-cache/
-telemetry/
-reports/
-eval/telemetry/
-eval/runs/
-evals/runs/
-*.tmp
-"""
+APEX_RAY_GITIGNORE_LINES = (
+    "config.local.yml",
+    "cache/",
+    "telemetry/",
+    "reports/",
+    "eval/telemetry/",
+    "eval/runs/",
+    "evals/runs/",
+    "*.tmp",
+)
+APEX_RAY_GITIGNORE_TEXT = "\n".join(APEX_RAY_GITIGNORE_LINES) + "\n"
 
 APEX_RAY_AGENT_BLOCK_START = "<!-- APEX_RAY_START -->"
 APEX_RAY_AGENT_BLOCK_END = "<!-- APEX_RAY_END -->"
@@ -210,7 +213,7 @@ def init_config(root: Path, overwrite: bool = False, *, base: str | None = None)
 
 def ensure_apex_gitignore(root: Path, *, overwrite: bool = False) -> Path | None:
     path = root / ".apex-ray" / ".gitignore"
-    return path if _write_if_missing_or_overwrite(path, APEX_RAY_GITIGNORE_TEXT, overwrite=overwrite) else None
+    return path if _ensure_gitignore_lines(path, APEX_RAY_GITIGNORE_LINES, overwrite=overwrite) else None
 
 
 def init_project(
@@ -222,7 +225,13 @@ def init_project(
     agent_files: str = "both",
     agent_skill: bool = True,
 ) -> list[Path]:
-    _ = update_gitignore  # Deprecated compatibility flag; root .gitignore is no longer managed.
+    if update_gitignore:
+        warnings.warn(
+            "update_gitignore is deprecated and no longer manages the root .gitignore; "
+            "Apex Ray writes .apex-ray/.gitignore for Apex Ray local artifacts.",
+            UserWarning,
+            stacklevel=2,
+        )
     _validate_init_options(hooks=hooks, agent_files=agent_files)
     _preflight_init_targets(root, hooks=hooks, agent_files=agent_files, overwrite=overwrite)
     written: list[Path] = []
@@ -398,6 +407,25 @@ def _write_if_missing_or_overwrite(path: Path, text: str, *, overwrite: bool) ->
         return False
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
+    return True
+
+
+def _ensure_gitignore_lines(path: Path, lines: tuple[str, ...], *, overwrite: bool) -> bool:
+    expected = "\n".join(lines) + "\n"
+    if overwrite or not path.exists():
+        if path.exists() and path.read_text(encoding="utf-8") == expected:
+            return False
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(expected, encoding="utf-8")
+        return True
+    text = path.read_text(encoding="utf-8")
+    existing = set(text.splitlines())
+    missing = [line for line in lines if line not in existing]
+    if not missing:
+        return False
+    separator = "\n" if text and not text.endswith("\n") else ""
+    missing_text = "\n".join(missing)
+    path.write_text(f"{text}{separator}{missing_text}\n", encoding="utf-8")
     return True
 
 

@@ -91,7 +91,7 @@ def init(
         bool,
         typer.Option(
             "--update-gitignore/--no-update-gitignore",
-            help="Deprecated no-op. Apex Ray uses .apex-ray/.gitignore for local artifacts.",
+            help="Deprecated compatibility flag. Emits a warning; root .gitignore is not modified.",
         ),
     ] = False,
 ) -> None:
