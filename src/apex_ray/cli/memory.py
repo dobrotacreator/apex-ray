@@ -2,12 +2,11 @@ from pathlib import Path
 from typing import Annotated
 
 import typer
-from pydantic import ValidationError
 
 from apex_ray import git
 from apex_ray.config import ConfigError, load_config
 from apex_ray.memory import memory_suggestions_from_report
-from apex_ray.models import ReviewReport
+from apex_ray.report import ReviewReportLoadError, load_review_report
 
 memory_app = typer.Typer(help="Inspect and maintain repo-committed Apex Ray memory.")
 
@@ -47,11 +46,11 @@ def memory_suggest(
 ) -> None:
     """Draft curated memory cards from a review JSON report."""
     try:
-        report = ReviewReport.model_validate_json(from_report.read_text(encoding="utf-8"))
+        report = load_review_report(from_report)
     except OSError as exc:
         raise typer.BadParameter(f"Unable to read report {from_report}: {exc}") from exc
-    except ValidationError as exc:
-        raise typer.BadParameter(f"Invalid Apex Ray report {from_report}: {exc}") from exc
+    except ReviewReportLoadError as exc:
+        raise typer.BadParameter(str(exc)) from exc
 
     suggestions = memory_suggestions_from_report(report, include_unverified=include_unverified)
     if output:
