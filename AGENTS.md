@@ -29,6 +29,13 @@ Keep new modules inside the relevant package and keep package `__init__.py` file
 - Use `npm --prefix analyzer-runtimes/typescript ...` for analyzer commands.
 - Treat `.github/workflows/ci.yml` as CI parity source of truth before claiming a change is CI-ready.
 
+## Worktrees
+
+- For PR-sized, risky, or long-running changes, prefer `scripts/create-worktree.sh <branch-name>` from the primary checkout instead of creating worktrees manually.
+- Use `scripts/create-worktree.sh --base <ref> --path <path> <branch-name>` only when a non-default base or location is needed.
+- The companion `scripts/setup-worktree.sh` copies machine-local config only when the target path is git-ignored, then runs the normal source checkout setup. Do not manually copy `.apex-ray/config.local.yml`, provider settings, env files, or generated reports into tracked paths.
+- Keep manual worktrees under `.worktrees/` unless there is a concrete reason to use a different ignored location.
+
 ## Verification
 
 Run the smallest relevant check for the changed surface:
