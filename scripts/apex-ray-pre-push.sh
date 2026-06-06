@@ -12,4 +12,8 @@ if ! git fetch --quiet origin +refs/heads/main:refs/remotes/origin/main; then
   exit 1
 fi
 
-apex-ray gate pre-push
+if command -v uv >/dev/null 2>&1 && [[ -f "pyproject.toml" ]]; then
+  uv run apex-ray gate pre-push
+else
+  apex-ray gate pre-push
+fi
