@@ -7,7 +7,7 @@ from typing import Literal
 
 from pydantic import Field, ValidationError
 
-from apex_ray import __version__
+from apex_ray import __version__, git
 from apex_ray.llm.cache import REVIEW_PROMPT_VERSION, REVIEW_SHALLOW_PROMPT_VERSION, VERIFIER_PROMPT_VERSION
 from apex_ray.models import (
     ApexModel,
@@ -244,6 +244,80 @@ def dedupe_carried_findings(findings: list[CarriedFinding]) -> list[CarriedFindi
     return deduped
 
 
+def stale_carried_finding_reason(carried: CarriedFinding, repo_root: Path) -> str | None:
+    anchors_by_file = _carried_evidence_anchors_by_file(carried)
+    if not anchors_by_file:
+        return None
+    readable_files = 0
+    for file, anchors in anchors_by_file.items():
+        source = _read_repo_head_text(repo_root, file)
+        if source is None:
+            continue
+        readable_files += 1
+        if any(anchor in source for anchor in anchors):
+            return None
+    if readable_files == 0:
+        return "Stored carried-finding evidence files are no longer available."
+    return "Stored carried-finding evidence no longer appears in the current file contents."
+
+
 def context_pack_fingerprint(payload: object) -> str:
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _carried_evidence_anchors_by_file(carried: CarriedFinding) -> dict[str, list[str]]:
+    anchors_by_file: dict[str, list[str]] = {}
+    pack = carried.context_pack
+    if pack is not None:
+        _extend_anchors(anchors_by_file, pack.file, _diff_added_lines(pack.diff_snippet))
+        for snippet in pack.changed_snippets:
+            _extend_anchors(anchors_by_file, snippet.file, snippet.code.splitlines())
+    if not anchors_by_file:
+        _extend_anchors(anchors_by_file, carried.finding.file, _backtick_spans(carried.finding.evidence))
+    return anchors_by_file
+
+
+def _extend_anchors(anchors_by_file: dict[str, list[str]], file: str, candidates: list[str]) -> None:
+    anchors = [_normalize_anchor(candidate) for candidate in candidates]
+    high_signal = [anchor for anchor in anchors if _is_high_signal_anchor(anchor)]
+    if high_signal and file:
+        anchors_by_file.setdefault(file, []).extend(high_signal)
+
+
+def _diff_added_lines(lines: list[str]) -> list[str]:
+    return [line[1:] for line in lines if line.startswith("+") and not line.startswith("+++")]
+
+
+def _backtick_spans(text: str) -> list[str]:
+    spans: list[str] = []
+    parts = text.split("`")
+    for index, part in enumerate(parts):
+        if index % 2 == 1:
+            spans.append(part)
+    return spans
+
+
+def _normalize_anchor(value: str) -> str:
+    return value.strip()
+
+
+def _is_high_signal_anchor(value: str) -> bool:
+    if len(value) < 8:
+        return False
+    return any(char.isalnum() for char in value) and value not in {"return;", "break;", "continue;"}
+
+
+def _read_repo_head_text(repo_root: Path, file: str) -> str | None:
+    if not file:
+        return None
+    path = Path(file)
+    if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
+        return None
+    try:
+        proc = git.run_git(["show", f"HEAD:{path.as_posix()}"], cwd=repo_root, check=False)
+    except OSError, UnicodeDecodeError:
+        return None
+    if proc.returncode != 0:
+        return None
+    return proc.stdout

@@ -1,5 +1,6 @@
 import json
 import re
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -17,6 +18,7 @@ from apex_ray.models import (
     ContextPack,
     DiffStats,
     DiffSummary,
+    FileKind,
     Finding,
     FindingConfidence,
     FindingResolutionStatus,
@@ -495,6 +497,80 @@ def test_gate_pre_push_incremental_retry_carries_blocker_when_unrelated_delta(tm
     assert "Missing tenant predicate" in second.stdout
 
 
+def test_gate_pre_push_incremental_retry_drops_stale_carried_blocker_when_evidence_is_gone(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _write_incremental_gate_config(tmp_path)
+    finding = _blocking_finding()
+    old_changed_line = "const order = findOrder({ id: orderId });"
+    fixed_line = "const order = findOrder({ id: orderId, tenantId });"
+    source_file = tmp_path / "src" / "orders.ts"
+    source_file.parent.mkdir()
+    source_file.write_text(f"{old_changed_line}\n", encoding="utf-8")
+    head_source = {"src/orders.ts": f"{old_changed_line}\n"}
+    context_pack = ContextPack(
+        id=finding.context_pack_id,
+        file=finding.file,
+        file_kind=FileKind.SOURCE,
+        diff_snippet=[
+            "@@ -1 +1 @@",
+            "-const order = findOrder({ id: orderId, tenantId });",
+            f"+{old_changed_line}",
+        ],
+    )
+    heads = iter(["head-1", "head-2"])
+    run_count = 0
+
+    def fake_run_review_pipeline(root, diff_text, target_mode, config, **kwargs):
+        nonlocal run_count
+        run_count += 1
+        report_finding = finding if run_count == 1 else None
+        return _gate_report(
+            root,
+            config,
+            diff_text,
+            target_mode,
+            kwargs.get("base"),
+            report_finding,
+            context_packs=[context_pack] if report_finding is not None else [],
+        )
+
+    def fake_run_git(args, cwd, check=True):
+        if args[:1] == ["show"] and args[1].startswith("HEAD:"):
+            path = args[1].removeprefix("HEAD:")
+            stdout = head_source.get(path, "")
+            return subprocess.CompletedProcess(args, 0 if path in head_source else 1, stdout=stdout, stderr="")
+        return subprocess.CompletedProcess(args, 1, stdout="", stderr="unexpected git call")
+
+    monkeypatch.setattr("apex_ray.cli.gate.git.repo_root", lambda _cwd: tmp_path)
+    monkeypatch.setattr("apex_ray.cli.gate.git.is_git_repo", lambda _root: True)
+    monkeypatch.setattr("apex_ray.cli.gate.git.rev_parse", lambda _root, _ref: next(heads))
+    monkeypatch.setattr("apex_ray.cli.gate.git.merge_base", lambda _root, _base, _head: "base-1")
+    monkeypatch.setattr("apex_ray.cli.gate.git.object_exists", lambda _root, _ref: True)
+    monkeypatch.setattr(
+        "apex_ray.cli.gate.git.diff_base", lambda _root, _base: _diff_for("src/orders.ts", "old", "full")
+    )
+    monkeypatch.setattr(
+        "apex_ray.cli.gate.git.diff_range",
+        lambda _root, _old, _new: _diff_for("src/other.ts", "before", "after"),
+    )
+    monkeypatch.setattr("apex_ray.cli.gate.run_review_pipeline", fake_run_review_pipeline)
+    monkeypatch.setattr("apex_ray.cli.gate.continue_review_from_report", lambda report, **_kwargs: (report, []))
+    monkeypatch.setattr("apex_ray.gate_retry.git.run_git", fake_run_git)
+
+    first = runner.invoke(app, ["gate", "pre-push"])
+    head_source["src/orders.ts"] = f"{fixed_line}\n"
+    second = runner.invoke(app, ["gate", "pre-push"], catch_exceptions=False)
+    state = json.loads((tmp_path / ".apex-ray" / "reports" / "pre-push-state.json").read_text(encoding="utf-8"))
+
+    assert first.exit_code == 1
+    assert second.exit_code == 0
+    assert "Resolved carried findings: 1" in second.stdout
+    assert state["active_findings"] == []
+
+
 def test_gate_pre_push_incremental_retry_resolved_carried_blocker_passes(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
     _write_incremental_gate_config(tmp_path)
@@ -643,6 +719,7 @@ def _gate_report(
     target_mode: TargetMode,
     base: str | None,
     finding: Finding | None,
+    context_packs: list[ContextPack] | None = None,
 ):
     findings = [finding] if finding is not None else []
     verifications = (
@@ -661,6 +738,7 @@ def _gate_report(
         ProjectProfile(root=str(root), is_git_repo=True),
         config,
         parse_unified_diff(diff_text, target_mode=target_mode, base=base),
+        context_packs=context_packs,
         findings=findings,
         verifications=verifications,
     )

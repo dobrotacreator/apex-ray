@@ -19,6 +19,7 @@ from apex_ray.gate_retry import (
     dedupe_carried_findings,
     load_pre_push_state,
     resolve_state_path,
+    stale_carried_finding_reason,
     write_pre_push_state,
 )
 from apex_ray.gates import PrePushGateDecision, PrePushRetrySummary, evaluate_pre_push_gate, render_pre_push_gate_stdout
@@ -337,11 +338,17 @@ def _resolve_incremental_carried_findings(
     changed = changed_paths(report)
     unchanged_active: list[CarriedFinding] = []
     needs_resolution: list[CarriedFinding] = []
+    stale_resolved_count = 0
     for carried in carried_findings:
         relevant = set(carried.relevant_files or [carried.finding.file])
         if changed and relevant & changed:
             needs_resolution.append(carried)
         else:
+            stale_reason = stale_carried_finding_reason(carried, repo_root)
+            if stale_reason is not None:
+                stale_resolved_count += 1
+                progress.event(f"dropping stale carried finding: {stale_reason}", force=True)
+                continue
             unchanged_active.append(
                 carried.model_copy(
                     update={
@@ -357,7 +364,10 @@ def _resolve_incremental_carried_findings(
         config=config,
         progress=progress,
     )
-    return dedupe_carried_findings([*unchanged_active, *unresolved]), len(needs_resolution) - len(unresolved)
+    return (
+        dedupe_carried_findings([*unchanged_active, *unresolved]),
+        len(needs_resolution) - len(unresolved) + stale_resolved_count,
+    )
 
 
 def resolve_carried_findings(
