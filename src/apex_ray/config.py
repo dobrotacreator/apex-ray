@@ -213,7 +213,7 @@ def init_config(root: Path, overwrite: bool = False, *, base: str | None = None)
 
 def ensure_apex_gitignore(root: Path, *, overwrite: bool = False) -> Path | None:
     path = root / ".apex-ray" / ".gitignore"
-    return path if _ensure_gitignore_lines(path, APEX_RAY_GITIGNORE_LINES, overwrite=overwrite) else None
+    return path if _ensure_gitignore_lines(root, path, APEX_RAY_GITIGNORE_LINES, overwrite=overwrite) else None
 
 
 def init_project(
@@ -410,22 +410,23 @@ def _write_if_missing_or_overwrite(path: Path, text: str, *, overwrite: bool) ->
     return True
 
 
-def _ensure_gitignore_lines(path: Path, lines: tuple[str, ...], *, overwrite: bool) -> bool:
+def _ensure_gitignore_lines(root: Path, path: Path, lines: tuple[str, ...], *, overwrite: bool) -> bool:
+    write_path = _safe_repo_symlink_target(root, path) if path.is_symlink() else path
     expected = "\n".join(lines) + "\n"
-    if overwrite or not path.exists():
-        if path.exists() and path.read_text(encoding="utf-8") == expected:
+    if overwrite or not write_path.exists():
+        if write_path.exists() and write_path.read_text(encoding="utf-8") == expected:
             return False
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(expected, encoding="utf-8")
+        write_path.parent.mkdir(parents=True, exist_ok=True)
+        write_path.write_text(expected, encoding="utf-8")
         return True
-    text = path.read_text(encoding="utf-8")
+    text = write_path.read_text(encoding="utf-8")
     existing = set(text.splitlines())
     missing = [line for line in lines if line not in existing]
     if not missing:
         return False
     separator = "\n" if text and not text.endswith("\n") else ""
     missing_text = "\n".join(missing)
-    path.write_text(f"{text}{separator}{missing_text}\n", encoding="utf-8")
+    write_path.write_text(f"{text}{separator}{missing_text}\n", encoding="utf-8")
     return True
 
 
@@ -574,7 +575,7 @@ def _safe_repo_symlink_target(root: Path, path: Path) -> Path:
     resolved_root = root.resolve()
     resolved_target = target.resolve()
     if not resolved_target.is_relative_to(resolved_root):
-        raise ConfigError(f"Agent instruction symlink points outside the repository: {path} -> {resolved_target}")
+        raise ConfigError(f"Repository setup symlink points outside the repository: {path} -> {resolved_target}")
     return resolved_target
 
 

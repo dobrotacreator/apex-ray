@@ -3,7 +3,14 @@ from pathlib import Path
 import pytest
 
 from apex_ray import git
-from apex_ray.config import ConfigError, find_local_config, init_config, init_project, load_config
+from apex_ray.config import (
+    ConfigError,
+    ensure_apex_gitignore,
+    find_local_config,
+    init_config,
+    init_project,
+    load_config,
+)
 
 
 def test_load_config_defaults_when_missing(tmp_path: Path) -> None:
@@ -230,6 +237,7 @@ def test_init_project_deprecates_update_gitignore_without_touching_root(tmp_path
 def test_init_project_scoped_gitignore_covers_apex_local_artifacts(tmp_path: Path) -> None:
     git.run_git(["init"], cwd=tmp_path)
     init_project(tmp_path)
+    apex_gitignore_text = (tmp_path / ".apex-ray" / ".gitignore").read_text(encoding="utf-8")
 
     ignored_paths = [
         ".apex-ray/config.local.yml",
@@ -248,13 +256,8 @@ def test_init_project_scoped_gitignore_covers_apex_local_artifacts(tmp_path: Pat
 
         assert ignored.returncode == 0, relative_path
 
-    for relative_path in ("review.md", "review.json"):
-        path = tmp_path / relative_path
-        path.write_text("explicit report\n", encoding="utf-8")
-
-        ignored = git.run_git(["check-ignore", relative_path], cwd=tmp_path, check=False)
-
-        assert ignored.returncode != 0, relative_path
+    assert "review.md" not in apex_gitignore_text
+    assert "review.json" not in apex_gitignore_text
 
 
 def test_init_project_extends_existing_apex_gitignore(tmp_path: Path) -> None:
@@ -266,6 +269,19 @@ def test_init_project_extends_existing_apex_gitignore(tmp_path: Path) -> None:
 
     assert "custom-apex" in apex_gitignore.read_text(encoding="utf-8")
     assert "reports/" in apex_gitignore.read_text(encoding="utf-8")
+
+
+def test_ensure_apex_gitignore_rejects_external_symlink(tmp_path: Path) -> None:
+    apex_dir = tmp_path / ".apex-ray"
+    apex_dir.mkdir()
+    outside = tmp_path.parent / f"{tmp_path.name}-outside-gitignore"
+    outside.write_text("outside\n", encoding="utf-8")
+    (apex_dir / ".gitignore").symlink_to(outside)
+
+    with pytest.raises(ConfigError, match="outside the repository"):
+        ensure_apex_gitignore(tmp_path)
+
+    assert outside.read_text(encoding="utf-8") == "outside\n"
 
 
 def test_init_project_appends_to_existing_agent_files(tmp_path: Path) -> None:
