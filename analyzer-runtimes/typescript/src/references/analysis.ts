@@ -262,7 +262,10 @@ function referenceSearchText(target: CollectedSymbol): ReferenceSearchText {
     const memberName = target.analysis.name.slice(syntheticSeparatorIndex + 1);
     return [containerName, memberName].filter((value) => value.length > 0);
   }
-  return target.analysis.name ? [target.analysis.name] : null;
+  if (target.exportContainer || target.analysis.kind === "method" || target.analysis.kind === "enum-member") {
+    return target.analysis.name ? [target.analysis.name] : null;
+  }
+  return null;
 }
 
 function sourceMayContainReference(source: ts.SourceFile, searchText: ReferenceSearchText): boolean {

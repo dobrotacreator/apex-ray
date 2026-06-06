@@ -9,7 +9,7 @@ import typer
 from apex_ray import __version__, git
 from apex_ray.analyzers import typescript_analyzer_script
 from apex_ray.cli.benchmark import register_benchmark_commands
-from apex_ray.cli.common import ensure_apex_ignore_for_outputs, ensure_distinct_outputs
+from apex_ray.cli.common import ensure_apex_ignore_for_outputs, ensure_distinct_outputs, resolve_output_path
 from apex_ray.cli.eval import eval_app
 from apex_ray.cli.gate import gate_app
 from apex_ray.cli.memory import memory_app
@@ -304,8 +304,6 @@ def review(
         raise typer.BadParameter("Use --telemetry-path only when telemetry is enabled.")
     if continue_review_depth not in {"deep", "shallow"}:
         raise typer.BadParameter("--continue-review-depth must be 'deep' or 'shallow'.")
-    ensure_distinct_outputs(output, json_output, html_output)
-
     prior_report = None
     if continue_from is not None:
         try:
@@ -316,6 +314,11 @@ def review(
             raise typer.BadParameter(str(exc)) from exc
         root = Path(prior_report.project.root)
         review_config = prior_report.config
+
+    output = resolve_output_path(root, output)
+    json_output = resolve_output_path(root, json_output)
+    html_output = resolve_output_path(root, html_output) if html_output is not None else None
+    ensure_distinct_outputs(output, json_output, html_output)
 
     parsed_provider = None
     if llm_provider:

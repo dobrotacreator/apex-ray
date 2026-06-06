@@ -18,6 +18,10 @@ def ensure_distinct_outputs(output: Path, json_output: Path, html_output: Path |
         seen[resolved] = label
 
 
+def resolve_output_path(root: Path, path: Path) -> Path:
+    return path if path.is_absolute() else root / path
+
+
 def ensure_apex_ignore_for_outputs(root: Path, *paths: Path | None) -> None:
     apex_dir = (root / ".apex-ray").resolve()
     for path in paths:

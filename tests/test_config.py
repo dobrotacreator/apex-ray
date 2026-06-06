@@ -273,6 +273,21 @@ def test_init_project_extends_existing_apex_gitignore(tmp_path: Path) -> None:
     assert "reports/" in apex_gitignore.read_text(encoding="utf-8")
 
 
+def test_ensure_apex_gitignore_preserves_custom_entries_on_overwrite(tmp_path: Path) -> None:
+    apex_gitignore = tmp_path / ".apex-ray" / ".gitignore"
+    apex_gitignore.parent.mkdir()
+    apex_gitignore.write_text("custom-apex\ncache/\n", encoding="utf-8")
+
+    written = ensure_apex_gitignore(tmp_path, overwrite=True)
+
+    text = apex_gitignore.read_text(encoding="utf-8")
+    assert written == apex_gitignore
+    assert "custom-apex\n" in text
+    assert "cache/\n" in text
+    assert "reports/\n" in text
+    assert "config.local.yml\n" in text
+
+
 def test_ensure_apex_gitignore_rejects_external_symlink(tmp_path: Path) -> None:
     apex_dir = tmp_path / ".apex-ray"
     apex_dir.mkdir()

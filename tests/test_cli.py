@@ -223,6 +223,24 @@ def test_review_patch_defaults_to_apex_reports_dir(tmp_path: Path, monkeypatch) 
     assert not (tmp_path / "review.json").exists()
 
 
+def test_review_patch_defaults_to_repo_reports_dir_from_subdir(tmp_path: Path, monkeypatch) -> None:
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    subdir = tmp_path / "src"
+    subdir.mkdir()
+    patch = tmp_path / "sample.diff"
+    patch.write_text((FIXTURE_DIR / "sample.diff").read_text(encoding="utf-8"), encoding="utf-8")
+    monkeypatch.chdir(subdir)
+
+    result = runner.invoke(app, ["review", "--diff", str(patch)], catch_exceptions=False)
+
+    output = tmp_path / ".apex-ray" / "reports" / "review.md"
+    json_output = tmp_path / ".apex-ray" / "reports" / "review.json"
+    assert result.exit_code == 0
+    assert output.exists()
+    assert json_output.exists()
+    assert not (subdir / ".apex-ray").exists()
+
+
 def test_review_patch_archives_reports_when_enabled(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
     patch = tmp_path / "sample.diff"

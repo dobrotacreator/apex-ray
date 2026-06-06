@@ -187,3 +187,50 @@ test("reference analysis keeps semantic references when raw text prefilters are 
     fs.rmSync(repo, { recursive: true, force: true });
   }
 });
+
+test("reference analysis follows aliased re-export consumers", () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "apex-ray-ts-reference-alias-"));
+  try {
+    const fooPath = path.join(repo, "src/foo.ts");
+    const barrelPath = path.join(repo, "src/barrel.ts");
+    const consumerPath = path.join(repo, "src/consumer.ts");
+    writeFile(
+      repo,
+      "tsconfig.json",
+      JSON.stringify({
+        compilerOptions: {
+          target: "ES2022",
+          module: "NodeNext",
+          moduleResolution: "NodeNext",
+          strict: true,
+        },
+        include: ["src/**/*.ts"],
+      }),
+    );
+    writeFile(repo, "src/foo.ts", "export function Foo(): number {\n  return 1;\n}\n");
+    writeFile(repo, "src/barrel.ts", "export { Foo as Bar } from './foo.js';\n");
+    writeFile(repo, "src/consumer.ts", "import { Bar } from './barrel.js';\nexport const value = Bar();\n");
+
+    const program = ts.createProgram({
+      rootNames: [fooPath, barrelPath, consumerPath],
+      options: {
+        target: ts.ScriptTarget.ES2022,
+        module: ts.ModuleKind.NodeNext,
+        moduleResolution: ts.ModuleResolutionKind.NodeNext,
+        strict: true,
+      },
+    });
+    const checker = program.getTypeChecker();
+    const fooSource = program.getSourceFile(fooPath);
+    assert.ok(fooSource);
+
+    const target = collectSymbols(fooSource, checker).find((symbol) => symbol.analysis.name === "Foo");
+    assert.ok(target);
+
+    const refs = collectReferences(program, checker, target, repo, 20);
+
+    assert.ok(refs.some((reference) => reference.file === "src/consumer.ts" && reference.text.includes("Bar()")));
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
+});

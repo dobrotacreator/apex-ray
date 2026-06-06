@@ -413,9 +413,7 @@ def _write_if_missing_or_overwrite(path: Path, text: str, *, overwrite: bool) ->
 def _ensure_gitignore_lines(root: Path, path: Path, lines: tuple[str, ...], *, overwrite: bool) -> bool:
     write_path = _safe_repo_write_path(root, path)
     expected = "\n".join(lines) + "\n"
-    if overwrite or not write_path.exists():
-        if write_path.exists() and write_path.read_text(encoding="utf-8") == expected:
-            return False
+    if not write_path.exists():
         write_path.parent.mkdir(parents=True, exist_ok=True)
         write_path.write_text(expected, encoding="utf-8")
         return True
