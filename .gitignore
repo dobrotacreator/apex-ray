@@ -18,6 +18,8 @@ dist/
 **/.apex-ray/cache/
 .apex-ray/telemetry/
 **/.apex-ray/telemetry/
+.apex-ray/reports/
+**/.apex-ray/reports/
 .apex-ray/eval/telemetry/
 **/.apex-ray/eval/telemetry/
 .apex-ray/eval/runs/

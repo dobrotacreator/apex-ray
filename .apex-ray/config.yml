@@ -1,0 +1,61 @@
+review:
+  base: main
+  ignore:
+    - "**/*.lock"
+    - "**/generated/**"
+    - ".venv/**"
+    - ".ci-smoke-venv/**"
+    - ".pytest_cache/**"
+    - ".ruff_cache/**"
+    - ".codegraph/**"
+    - ".code-review-graph/**"
+    - "build/**"
+    - "dist/**"
+    - "site/**"
+    - "analyzer-runtimes/typescript/node_modules/**"
+    - "analyzer-runtimes/typescript/dist/**"
+    - "analyzer-runtimes/typescript/dist-test/**"
+    - ".apex-ray/cache/**"
+    - ".apex-ray/telemetry/**"
+    - ".apex-ray/reports/**"
+    - ".apex-ray/eval/telemetry/**"
+    - ".apex-ray/eval/runs/**"
+    - ".apex-ray/evals/runs/**"
+  rule_paths:
+    - .apex-ray/rules
+  memory:
+    enabled: true
+    paths:
+      - .apex-ray/memory
+  llm:
+    enabled: true
+    provider: codex_cli
+    effort: medium
+    timeout_seconds: 900
+    jobs: 1
+    coverage_mode: balanced
+    max_packs: 64
+    max_deep_packs: 48
+    max_input_tokens: 300000
+    verify: true
+  telemetry:
+    enabled: false
+    path: .apex-ray/telemetry/review-runs.jsonl
+  reports:
+    archive: false
+    archive_dir: .apex-ray/reports/runs
+    retention: 20
+  gates:
+    pre_push:
+      enabled: true
+      min_finding_severity: high
+      require_verified_findings: true
+      fail_on_quality_gate: true
+      fail_on_partial_severity: critical
+      max_stdout_findings: 10
+      stdout_format: agent
+      auto_followup_p0: true
+      progress: auto
+      progress_interval_seconds: 5
+      incremental_retry:
+        enabled: true

@@ -30,3 +30,5 @@ pre-push:
       run: uv run coverage run -m pytest -q && uv run coverage report -m
     package:
       run: uv build --sdist --wheel && uv run twine check dist/*
+    apex-ray-review:
+      run: uv run apex-ray gate pre-push
