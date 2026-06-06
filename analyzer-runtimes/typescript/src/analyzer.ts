@@ -50,7 +50,7 @@ export type {
 
 export function analyze(args: Args): AnalyzerResult {
   const warnings: string[] = [];
-  const budget = analysisBudget(args.analysisTimeBudgetMs);
+  const budgetExhausted = analysisBudget(args.analysisTimeBudgetMs);
   const contextsByFile = createProgramContexts(args, warnings);
   const repoIndex = buildRepoIndex(args);
   const syntheticReferenceScanCache = new Map<string, ReferenceScanResult>();
@@ -79,7 +79,7 @@ export function analyze(args: Args): AnalyzerResult {
   const files: FileAnalysis[] = [];
   for (let changedIndex = 0; changedIndex < args.changed.length; changedIndex += 1) {
     const changedFile = args.changed[changedIndex];
-    if (budget.exhausted()) {
+    if (budgetExhausted()) {
       markBudgetExhausted(args.changed.slice(changedIndex));
       break;
     }
@@ -116,13 +116,13 @@ export function analyze(args: Args): AnalyzerResult {
     ]);
     const isChangedTestFile = isTestPath(changedFile.toLowerCase());
     let completedFile = true;
-    if (budget.exhausted()) {
+    if (budgetExhausted()) {
       markBudgetExhausted(args.changed.slice(changedIndex));
       break;
     }
 
     for (let symbolIndex = 0; symbolIndex < changedCollectedSymbols.length; symbolIndex += 1) {
-      if (budget.exhausted()) {
+      if (budgetExhausted()) {
         markBudgetExhausted(args.changed.slice(changedIndex));
         completedFile = false;
         break;
@@ -140,8 +140,8 @@ export function analyze(args: Args): AnalyzerResult {
       const cachedReferenceScan = referenceScanCacheKey ? syntheticReferenceScanCache.get(referenceScanCacheKey) : undefined;
       const referenceScan =
         cachedReferenceScan ??
-        collectReferenceScan(program, checker, symbol, args.repo, symbol.analysis.name.includes(":"), budget.exhausted);
-      if (!referenceScan.completed || budget.exhausted()) {
+        collectReferenceScan(program, checker, symbol, args.repo, symbol.analysis.name.includes(":"), budgetExhausted);
+      if (!referenceScan.completed || budgetExhausted()) {
         markBudgetExhausted(args.changed.slice(changedIndex));
         completedFile = false;
         break;
@@ -162,7 +162,7 @@ export function analyze(args: Args): AnalyzerResult {
         REFERENCE_LIMIT,
       );
       symbol.analysis.references = filterInvalidWorkspaceMemberReferences(args.repo, repoIndex, symbol, symbol.analysis.references);
-      if (budget.exhausted()) {
+      if (budgetExhausted()) {
         markBudgetExhausted(args.changed.slice(changedIndex));
         completedFile = false;
         break;
@@ -170,7 +170,7 @@ export function analyze(args: Args): AnalyzerResult {
 
       let calleeReferences: Reference[];
       try {
-        calleeReferences = collectCallees(checker, symbol, args.repo, REFERENCE_COLLECTION_LIMIT, budget.exhausted);
+        calleeReferences = collectCallees(checker, symbol, args.repo, REFERENCE_COLLECTION_LIMIT, budgetExhausted);
       } catch (error) {
         if (error instanceof ReferenceScanCancelled) {
           markBudgetExhausted(args.changed.slice(changedIndex));
@@ -180,7 +180,7 @@ export function analyze(args: Args): AnalyzerResult {
         throw error;
       }
       symbol.analysis.callees = mergeReferences([...calleeReferences, ...referenceScan.consumerImpact.callees], REFERENCE_LIMIT);
-      if (budget.exhausted()) {
+      if (budgetExhausted()) {
         markBudgetExhausted(args.changed.slice(changedIndex));
         completedFile = false;
         break;
@@ -190,7 +190,7 @@ export function analyze(args: Args): AnalyzerResult {
         collectSchemaContracts(program, checker, symbol, args.repo, REFERENCE_COLLECTION_LIMIT),
         REFERENCE_LIMIT,
       );
-      if (budget.exhausted()) {
+      if (budgetExhausted()) {
         markBudgetExhausted(args.changed.slice(changedIndex));
         completedFile = false;
         break;
@@ -200,7 +200,7 @@ export function analyze(args: Args): AnalyzerResult {
         collectFrameworkMetadata(symbol, args.repo, REFERENCE_COLLECTION_LIMIT),
         REFERENCE_LIMIT,
       );
-      if (budget.exhausted()) {
+      if (budgetExhausted()) {
         markBudgetExhausted(args.changed.slice(changedIndex));
         completedFile = false;
         break;
@@ -211,12 +211,12 @@ export function analyze(args: Args): AnalyzerResult {
     }
 
     const changedReferences = changedCollectedSymbols.flatMap((symbol) => symbol.analysis.references);
-    if (budget.exhausted()) {
+    if (budgetExhausted()) {
       markBudgetExhausted(args.changed.slice(changedIndex));
       break;
     }
     const relatedTests = findRelatedTests(args.repo, repoIndex, changedFile, changedReferences);
-    if (budget.exhausted()) {
+    if (budgetExhausted()) {
       markBudgetExhausted(args.changed.slice(changedIndex));
       break;
     }
@@ -294,10 +294,8 @@ function syntheticReferenceScanCacheKey(symbol: CollectedSymbol): string | null 
   ].join(":");
 }
 
-function analysisBudget(timeBudgetMs: number | null): { exhausted: () => boolean } {
-  if (timeBudgetMs === null) return { exhausted: () => false };
+function analysisBudget(timeBudgetMs: number | null): () => boolean {
+  if (timeBudgetMs === null) return () => false;
   const deadline = Date.now() + timeBudgetMs;
-  return {
-    exhausted: () => Date.now() >= deadline,
-  };
+  return () => Date.now() >= deadline;
 }
