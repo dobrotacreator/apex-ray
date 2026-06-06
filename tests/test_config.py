@@ -3,7 +3,14 @@ from pathlib import Path
 import pytest
 
 from apex_ray import git
-from apex_ray.config import ConfigError, find_local_config, init_config, init_project, load_config
+from apex_ray.config import (
+    ConfigError,
+    ensure_apex_gitignore,
+    find_local_config,
+    init_config,
+    init_project,
+    load_config,
+)
 
 
 def test_load_config_defaults_when_missing(tmp_path: Path) -> None:
@@ -27,7 +34,7 @@ def test_init_config_creates_default_file(tmp_path: Path) -> None:
     assert config.analyzer.index_cache_dir is None
     assert config.analyzer.changed_file_shard_size == 40
     assert config.analyzer.adaptive_sharding is True
-    assert config.analyzer.large_change_shard_size == 8
+    assert config.analyzer.large_change_shard_size == 4
     assert config.context.max_pack_chars == 40000
     assert config.context.max_reference_snippets == 8
     assert config.rule_paths == [".apex-ray/rules"]
@@ -187,33 +194,135 @@ def test_init_project_creates_team_setup_files(tmp_path: Path) -> None:
     assert (tmp_path / ".apex-ray" / "memory").is_dir()
     assert (tmp_path / ".apex-ray" / "reports").is_dir()
     assert "config.local.yml" in (tmp_path / ".apex-ray" / ".gitignore").read_text(encoding="utf-8")
-    assert ".apex-ray/reports/" in (tmp_path / ".gitignore").read_text(encoding="utf-8")
-    assert ".codex/config.local.toml" in (tmp_path / ".gitignore").read_text(encoding="utf-8")
+    assert not (tmp_path / ".gitignore").exists()
     assert "apex-ray-review" in (tmp_path / "lefthook.yml").read_text(encoding="utf-8")
     assert (tmp_path / "AGENTS.md").exists()
     assert (tmp_path / ".claude" / "CLAUDE.md").exists()
     assert (tmp_path / ".apex-ray" / "skills" / "apex-ray" / "SKILL.md").exists()
     assert (tmp_path / ".apex-ray" / "skills" / "apex-ray-improve" / "SKILL.md").exists()
-    assert (tmp_path / ".codex" / "skills" / "apex-ray" / "SKILL.md").exists()
-    assert (tmp_path / ".codex" / "skills" / "apex-ray-improve" / "SKILL.md").exists()
+    assert (tmp_path / ".agents" / "skills" / "apex-ray" / "SKILL.md").exists()
+    assert (tmp_path / ".agents" / "skills" / "apex-ray-improve" / "SKILL.md").exists()
+    assert not (tmp_path / ".codex").exists()
     assert (tmp_path / ".claude" / "skills" / "apex-ray" / "SKILL.md").exists()
     assert (tmp_path / ".claude" / "skills" / "apex-ray-improve" / "SKILL.md").exists()
+    assert not (tmp_path / ".claude" / ".gitignore").exists()
     lefthook_text = (tmp_path / "lefthook.yml").read_text(encoding="utf-8")
+    assert "no_tty: true" in lefthook_text
+    assert "follow: true" in lefthook_text
     assert "apex-ray gate pre-push" in lefthook_text
     assert "--base" not in lefthook_text
     assert "--no-llm" not in lefthook_text
     agents_text = (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
     assert "APEX_RAY_START" in agents_text
+    assert "Do not bypass the configured pre-push gate by default" in agents_text
     assert "$apex-ray" in agents_text
     assert "$apex-ray-improve" in agents_text
     skill_text = (tmp_path / ".apex-ray" / "skills" / "apex-ray" / "SKILL.md").read_text(encoding="utf-8")
     assert "apex-ray review --continue-from .apex-ray/reports/review.json" in skill_text
+    assert "Do not bypass the configured pre-push gate by default" in skill_text
     assert "Use `--no-llm` or `.apex-ray/config.local.yml`" in skill_text
     improve_skill_text = (tmp_path / ".apex-ray" / "skills" / "apex-ray-improve" / "SKILL.md").read_text(
         encoding="utf-8"
     )
     assert "recommendation-only improvements" in improve_skill_text
     assert "Greptile comments" in improve_skill_text
+
+
+def test_init_project_codex_agent_files_use_agents_skill_directory(tmp_path: Path) -> None:
+    init_project(tmp_path, hooks="none", agent_files="codex")
+
+    assert (tmp_path / "AGENTS.md").exists()
+    assert (tmp_path / ".apex-ray" / "skills" / "apex-ray" / "SKILL.md").exists()
+    assert (tmp_path / ".agents" / "skills" / "apex-ray" / "SKILL.md").exists()
+    assert (tmp_path / ".agents" / "skills" / "apex-ray-improve" / "SKILL.md").exists()
+    assert not (tmp_path / ".codex").exists()
+    assert not (tmp_path / ".claude").exists()
+
+
+def test_init_project_deprecates_update_gitignore_without_touching_root(tmp_path: Path) -> None:
+    with pytest.warns(UserWarning, match="root .gitignore"):
+        init_project(tmp_path, update_gitignore=True, hooks="none", agent_files="none")
+
+    assert (tmp_path / ".apex-ray" / ".gitignore").exists()
+    assert not (tmp_path / ".gitignore").exists()
+
+
+def test_init_project_scoped_gitignore_covers_apex_local_artifacts(tmp_path: Path) -> None:
+    git.run_git(["init"], cwd=tmp_path)
+    init_project(tmp_path)
+    apex_gitignore_text = (tmp_path / ".apex-ray" / ".gitignore").read_text(encoding="utf-8")
+
+    ignored_paths = [
+        ".apex-ray/config.local.yml",
+        ".apex-ray/cache/example",
+        ".apex-ray/telemetry/example.jsonl",
+        ".apex-ray/reports/review.json",
+        ".apex-ray/eval/runs/run.json",
+        ".apex-ray/evals/runs/run.json",
+    ]
+    for relative_path in ignored_paths:
+        path = tmp_path / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("local\n", encoding="utf-8")
+
+        ignored = git.run_git(["check-ignore", "-v", relative_path], cwd=tmp_path, check=False)
+
+        assert ignored.returncode == 0, relative_path
+        assert ".apex-ray/.gitignore" in ignored.stdout, relative_path
+
+    assert "review.md" not in apex_gitignore_text
+    assert "review.json" not in apex_gitignore_text
+    assert git.run_git(["check-ignore", "review.json"], cwd=tmp_path, check=False).returncode == 1
+
+
+def test_init_project_extends_existing_apex_gitignore(tmp_path: Path) -> None:
+    apex_gitignore = tmp_path / ".apex-ray" / ".gitignore"
+    apex_gitignore.parent.mkdir()
+    apex_gitignore.write_text("custom-apex\n", encoding="utf-8")
+
+    init_project(tmp_path)
+
+    assert "custom-apex" in apex_gitignore.read_text(encoding="utf-8")
+    assert "reports/" in apex_gitignore.read_text(encoding="utf-8")
+
+
+def test_ensure_apex_gitignore_preserves_custom_entries_on_overwrite(tmp_path: Path) -> None:
+    apex_gitignore = tmp_path / ".apex-ray" / ".gitignore"
+    apex_gitignore.parent.mkdir()
+    apex_gitignore.write_text("custom-apex\ncache/\n", encoding="utf-8")
+
+    written = ensure_apex_gitignore(tmp_path, overwrite=True)
+
+    text = apex_gitignore.read_text(encoding="utf-8")
+    assert written == apex_gitignore
+    assert "custom-apex\n" in text
+    assert "cache/\n" in text
+    assert "reports/\n" in text
+    assert "config.local.yml\n" in text
+
+
+def test_ensure_apex_gitignore_rejects_external_symlink(tmp_path: Path) -> None:
+    apex_dir = tmp_path / ".apex-ray"
+    apex_dir.mkdir()
+    outside = tmp_path.parent / f"{tmp_path.name}-outside-gitignore"
+    outside.write_text("outside\n", encoding="utf-8")
+    (apex_dir / ".gitignore").symlink_to(outside)
+
+    with pytest.raises(ConfigError, match="outside the repository"):
+        ensure_apex_gitignore(tmp_path)
+
+    assert outside.read_text(encoding="utf-8") == "outside\n"
+
+
+def test_ensure_apex_gitignore_rejects_external_parent_symlink(tmp_path: Path) -> None:
+    outside = tmp_path.parent / f"{tmp_path.name}-outside-apex"
+    outside.mkdir()
+    (tmp_path / ".apex-ray").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(ConfigError, match="outside the repository"):
+        ensure_apex_gitignore(tmp_path)
+
+    assert not (outside / ".gitignore").exists()
 
 
 def test_init_project_appends_to_existing_agent_files(tmp_path: Path) -> None:
@@ -309,17 +418,12 @@ def test_init_project_does_not_use_feature_branch_as_default_base(tmp_path: Path
     assert "base: feature/review" not in (tmp_path / ".apex-ray" / "config.yml").read_text(encoding="utf-8")
 
 
-def test_init_project_updates_existing_apex_gitignore_block(tmp_path: Path) -> None:
+def test_init_project_leaves_existing_root_gitignore_untouched(tmp_path: Path) -> None:
     (tmp_path / ".gitignore").write_text("# Apex Ray\n.apex-ray/reports/\n", encoding="utf-8")
 
     init_project(tmp_path)
 
-    text = (tmp_path / ".gitignore").read_text(encoding="utf-8")
-    assert "# Apex Ray start" in text
-    assert "# Apex Ray end" in text
-    assert ".apex-ray/reports/" in text
-    assert ".codex/config.local.toml" in text
-    assert ".claude/settings.local.json" in text
+    assert (tmp_path / ".gitignore").read_text(encoding="utf-8") == "# Apex Ray\n.apex-ray/reports/\n"
 
 
 def test_init_project_can_skip_agent_skill_files(tmp_path: Path) -> None:

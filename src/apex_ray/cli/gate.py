@@ -5,7 +5,7 @@ from typing import Annotated
 import typer
 
 from apex_ray import git
-from apex_ray.cli.common import ensure_distinct_outputs
+from apex_ray.cli.common import ensure_apex_ignore_for_outputs, ensure_distinct_outputs, resolve_output_path
 from apex_ray.config import ConfigError, load_config
 from apex_ray.gate_retry import (
     CarriedFinding,
@@ -79,9 +79,9 @@ def pre_push(
         raise typer.Exit()
     progress = _progress_for_gate(gate_config)
 
-    output = _resolve_output_path(root, output)
-    json_output = _resolve_output_path(root, json_output)
-    html_output = _resolve_output_path(root, html_output) if html_output is not None else None
+    output = resolve_output_path(root, output)
+    json_output = resolve_output_path(root, json_output)
+    html_output = resolve_output_path(root, html_output) if html_output is not None else None
     ensure_distinct_outputs(output, json_output, html_output)
     if telemetry and no_telemetry:
         raise typer.BadParameter("Use only one of --telemetry or --no-telemetry.")
@@ -197,6 +197,7 @@ def pre_push(
         markdown_text = _prepend_retry_summary_markdown(markdown_text, retry_summary, decision)
     json_text = report.model_dump_json(indent=2)
     html_text = render_html(report) if html_output is not None else None
+    ensure_apex_ignore_for_outputs(root, output, json_output, html_output)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(markdown_text, encoding="utf-8")
     json_output.parent.mkdir(parents=True, exist_ok=True)
@@ -283,10 +284,6 @@ def pre_push(
         typer.echo(f"Archived report: {archive_path}")
     if decision.blocked:
         raise typer.Exit(code=1)
-
-
-def _resolve_output_path(root: Path, path: Path) -> Path:
-    return path if path.is_absolute() else root / path
 
 
 def _load_base_diff(root: Path, base: str) -> str:

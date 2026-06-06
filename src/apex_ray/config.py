@@ -1,3 +1,4 @@
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -57,48 +58,32 @@ def default_config_text(base: str = DEFAULT_BASE_BRANCH) -> str:
 """
 
 
-APEX_RAY_GITIGNORE_TEXT = """config.local.yml
-cache/
-telemetry/
-reports/
-eval/telemetry/
-eval/runs/
-evals/runs/
-*.tmp
-"""
-
-ROOT_GITIGNORE_BLOCK_START = "# Apex Ray start"
-ROOT_GITIGNORE_BLOCK_END = "# Apex Ray end"
-ROOT_GITIGNORE_LINES = (
-    ".apex-ray/config.local.yml",
-    ".apex-ray/cache/",
-    ".apex-ray/telemetry/",
-    ".apex-ray/reports/",
-    ".apex-ray/eval/telemetry/",
-    ".apex-ray/eval/runs/",
-    ".apex-ray/evals/runs/",
-    ".claude/settings.local.json",
-    ".codex/config.local.toml",
-    "/review*.md",
-    "/review*.json",
-    "/review*.html",
+APEX_RAY_GITIGNORE_LINES = (
+    "config.local.yml",
+    "cache/",
+    "telemetry/",
+    "reports/",
+    "eval/telemetry/",
+    "eval/runs/",
+    "evals/runs/",
+    "*.tmp",
 )
-ROOT_GITIGNORE_BLOCK = (
-    f"{ROOT_GITIGNORE_BLOCK_START}\n" + "\n".join(ROOT_GITIGNORE_LINES) + f"\n{ROOT_GITIGNORE_BLOCK_END}\n"
-)
+APEX_RAY_GITIGNORE_TEXT = "\n".join(APEX_RAY_GITIGNORE_LINES) + "\n"
+# Codex discovers repository-scoped skills from .agents/skills; .codex is local Codex configuration.
+CODEX_REPO_SKILL_DIR = ".agents"
 
 APEX_RAY_AGENT_BLOCK_START = "<!-- APEX_RAY_START -->"
 APEX_RAY_AGENT_BLOCK_END = "<!-- APEX_RAY_END -->"
 APEX_RAY_AGENT_BLOCK = f"""{APEX_RAY_AGENT_BLOCK_START}
 ## Apex Ray
 
-This project uses Apex Ray for local diff-aware review. Use the `$apex-ray` skill for review, gate, report, telemetry, and eval workflows. Use `$apex-ray-improve` after merged PRs or review feedback to produce recommendation-only improvements for Apex Ray memory, rules, eval labels, telemetry, and config. Keep `.apex-ray/config.local.yml`, caches, telemetry, reports, and eval runs out of commits.
+This project uses Apex Ray for local diff-aware review. Use the `$apex-ray` skill for review, gate, report, telemetry, and eval workflows. Do not bypass the configured pre-push gate by default; if bypassing is unavoidable, explain why and name the equivalent checks or review already run. Use `$apex-ray-improve` after merged PRs or review feedback to produce recommendation-only improvements for Apex Ray memory, rules, eval labels, telemetry, and config. Keep `.apex-ray/config.local.yml`, Apex Ray caches/telemetry/reports/eval runs, generated review artifacts, and local provider, model, API, or cost settings out of commits.
 {APEX_RAY_AGENT_BLOCK_END}
 """
 APEX_RAY_AGENT_BLOCK_NO_SKILL = f"""{APEX_RAY_AGENT_BLOCK_START}
 ## Apex Ray
 
-This project uses Apex Ray for local diff-aware review. Run `apex-ray doctor` to check setup, `apex-ray review --output .apex-ray/reports/review.md --json .apex-ray/reports/review.json` for local reports, and `apex-ray gate pre-push` for the hook-equivalent gate. Keep `.apex-ray/config.local.yml`, caches, telemetry, reports, and eval runs out of commits.
+This project uses Apex Ray for local diff-aware review. Run `apex-ray doctor` to check setup, `apex-ray review --no-llm` for deterministic local reports under `.apex-ray/reports/`, and `apex-ray gate pre-push` for the hook-equivalent gate. Do not bypass the configured pre-push gate by default; if bypassing is unavoidable, explain why and name the equivalent checks or review already run. Keep `.apex-ray/config.local.yml`, Apex Ray caches/telemetry/reports/eval runs, generated review artifacts, and local provider, model, API, or cost settings out of commits.
 {APEX_RAY_AGENT_BLOCK_END}
 """
 
@@ -116,8 +101,9 @@ Apex Ray is the project's local diff-aware AI review tool. Use it to create dete
 ## Process
 
 - Run `apex-ray doctor` when setup, config, provider, or analyzer state is uncertain.
-- For deterministic local review, run `apex-ray review --no-llm --output .apex-ray/reports/review.md --json .apex-ray/reports/review.json`.
+- For deterministic local review, run `apex-ray review --no-llm`; default reports are written under `.apex-ray/reports/`.
 - For pre-push gate parity, run `apex-ray gate pre-push`; blocking findings and critical partial coverage are printed to stdout and the full report is written under `.apex-ray/reports/`.
+- Do not bypass the configured pre-push gate by default. If bypassing is unavoidable, explain why and name the equivalent checks or review already run.
 - Use `--no-llm` or `.apex-ray/config.local.yml` when the configured local provider is unavailable or LLM cost is not appropriate.
 - If a report has partial coverage, continue unreviewed work with `apex-ray review --continue-from .apex-ray/reports/review.json --residual-priority p0 --llm` or review a specific skipped pack with `--only-pack`.
 - Use `.apex-ray/config.yml` for shared team policy and `.apex-ray/config.local.yml` for personal provider/model/cost overrides.
@@ -132,7 +118,7 @@ Prefer writing generated review artifacts under `.apex-ray/reports/`. Keep Markd
 
 ## Boundaries
 
-Do not treat Apex Ray as a replacement for tests, linters, typecheck, CI, dependency scanners, SAST, or human review. Do not commit `.apex-ray/config.local.yml`, `.apex-ray/cache/`, `.apex-ray/telemetry/`, `.apex-ray/reports/`, eval run directories, or generated `review.*` files unless the team intentionally curates a specific artifact.
+Do not treat Apex Ray as a replacement for tests, linters, typecheck, CI, dependency scanners, SAST, or human review. Do not commit `.apex-ray/config.local.yml`, `.apex-ray/cache/`, `.apex-ray/telemetry/`, `.apex-ray/reports/`, eval run directories, generated review artifacts, or local provider, model, API, or cost settings unless the team intentionally curates a specific artifact.
 """
 
 APEX_RAY_IMPROVE_SKILL_TEXT = """---
@@ -227,15 +213,27 @@ def init_config(root: Path, overwrite: bool = False, *, base: str | None = None)
     return path
 
 
+def ensure_apex_gitignore(root: Path, *, overwrite: bool = False) -> Path | None:
+    path = root / ".apex-ray" / ".gitignore"
+    return path if _ensure_gitignore_lines(root, path, APEX_RAY_GITIGNORE_LINES, overwrite=overwrite) else None
+
+
 def init_project(
     root: Path,
     *,
     overwrite: bool = False,
-    update_gitignore: bool = True,
+    update_gitignore: bool = False,
     hooks: str = "lefthook",
     agent_files: str = "both",
     agent_skill: bool = True,
 ) -> list[Path]:
+    if update_gitignore:
+        warnings.warn(
+            "update_gitignore is deprecated and no longer manages the root .gitignore; "
+            "Apex Ray writes .apex-ray/.gitignore for Apex Ray local artifacts.",
+            UserWarning,
+            stacklevel=2,
+        )
     _validate_init_options(hooks=hooks, agent_files=agent_files)
     _preflight_init_targets(root, hooks=hooks, agent_files=agent_files, overwrite=overwrite)
     written: list[Path] = []
@@ -250,11 +248,9 @@ def init_project(
         root / ".apex-ray" / "reports",
     ):
         directory.mkdir(parents=True, exist_ok=True)
-    apex_gitignore = root / ".apex-ray" / ".gitignore"
-    if _write_if_missing_or_overwrite(apex_gitignore, APEX_RAY_GITIGNORE_TEXT, overwrite=overwrite):
+    apex_gitignore = ensure_apex_gitignore(root, overwrite=overwrite)
+    if apex_gitignore is not None:
         written.append(apex_gitignore)
-    if update_gitignore and _append_root_gitignore_block(root / ".gitignore"):
-        written.append(root / ".gitignore")
     if hooks == "lefthook":
         if _write_lefthook_hook(root / "lefthook.yml", overwrite=overwrite):
             written.append(root / "lefthook.yml")
@@ -416,6 +412,33 @@ def _write_if_missing_or_overwrite(path: Path, text: str, *, overwrite: bool) ->
     return True
 
 
+def _ensure_gitignore_lines(root: Path, path: Path, lines: tuple[str, ...], *, overwrite: bool) -> bool:
+    write_path = _safe_repo_write_path(root, path)
+    expected = "\n".join(lines) + "\n"
+    if not write_path.exists():
+        write_path.parent.mkdir(parents=True, exist_ok=True)
+        write_path.write_text(expected, encoding="utf-8")
+        return True
+    text = write_path.read_text(encoding="utf-8")
+    existing = set(text.splitlines())
+    missing = [line for line in lines if line not in existing]
+    if not missing:
+        return False
+    separator = "\n" if text and not text.endswith("\n") else ""
+    missing_text = "\n".join(missing)
+    write_path.write_text(f"{text}{separator}{missing_text}\n", encoding="utf-8")
+    return True
+
+
+def _safe_repo_write_path(root: Path, path: Path) -> Path:
+    write_path = _safe_repo_symlink_target(root, path) if path.is_symlink() else path
+    resolved_root = root.resolve()
+    resolved_write_path = write_path.resolve(strict=False)
+    if not resolved_write_path.is_relative_to(resolved_root):
+        raise ConfigError(f"Repository setup path points outside the repository: {path} -> {resolved_write_path}")
+    return write_path
+
+
 def _append_marked_block(path: Path, block: str, *, overwrite: bool) -> bool:
     start = APEX_RAY_AGENT_BLOCK_START
     end = APEX_RAY_AGENT_BLOCK_END
@@ -439,27 +462,6 @@ def _append_marked_block(path: Path, block: str, *, overwrite: bool) -> bool:
     return True
 
 
-def _append_root_gitignore_block(path: Path) -> bool:
-    text = path.read_text(encoding="utf-8") if path.exists() else ""
-    if ROOT_GITIGNORE_BLOCK_START in text and ROOT_GITIGNORE_BLOCK_END in text:
-        before, remainder = text.split(ROOT_GITIGNORE_BLOCK_START, 1)
-        _, after = remainder.split(ROOT_GITIGNORE_BLOCK_END, 1)
-        replacement = ROOT_GITIGNORE_BLOCK.rstrip("\n")
-        updated = (
-            f"{before.rstrip()}\n\n{replacement}\n{after.lstrip()}"
-            if before.strip()
-            else f"{replacement}\n{after.lstrip()}"
-        )
-        if updated == text:
-            return False
-        path.write_text(updated, encoding="utf-8")
-        return True
-    text = _strip_legacy_root_gitignore_block(text)
-    separator = "\n" if text and not text.endswith("\n") else ""
-    path.write_text(f"{text}{separator}{ROOT_GITIGNORE_BLOCK}", encoding="utf-8")
-    return True
-
-
 def _write_lefthook_hook(path: Path, *, overwrite: bool) -> bool:
     raw = path.read_text(encoding="utf-8") if path.exists() else ""
     _validate_lefthook_text(path, raw, overwrite=overwrite)
@@ -471,9 +473,11 @@ def _write_lefthook_hook(path: Path, *, overwrite: bool) -> bool:
         data = {}
     if not isinstance(data, dict):
         raise ConfigError(f"Invalid Lefthook config in {path}: expected a mapping")
+    data.setdefault("no_tty", True)
     pre_push = data.setdefault("pre-push", {})
     if not isinstance(pre_push, dict):
         raise ConfigError(f"Invalid Lefthook config in {path}: pre-push must be a mapping")
+    pre_push.setdefault("follow", True)
     commands = pre_push.setdefault("commands", {})
     if not isinstance(commands, dict):
         raise ConfigError(f"Invalid Lefthook config in {path}: pre-push.commands must be a mapping")
@@ -496,26 +500,6 @@ def _validate_lefthook_text(path: Path, raw: str, *, overwrite: bool) -> None:
             "Add the apex-ray-review command manually, use --hooks none, or rerun with --force if YAML "
             "formatting/comments can be rewritten."
         )
-
-
-def _strip_legacy_root_gitignore_block(text: str) -> str:
-    if "# Apex Ray" not in text:
-        return text
-    output: list[str] = []
-    in_legacy_block = False
-    for line in text.splitlines():
-        if line == "# Apex Ray":
-            in_legacy_block = True
-            continue
-        if in_legacy_block and (line in ROOT_GITIGNORE_LINES or not line.strip()):
-            if not line.strip():
-                in_legacy_block = False
-            continue
-        in_legacy_block = False
-        output.append(line)
-    if not output:
-        return ""
-    return "\n".join(output) + ("\n" if text.endswith("\n") else "")
 
 
 def _write_git_pre_push_hook(root: Path, *, overwrite: bool) -> Path | None:
@@ -600,7 +584,7 @@ def _safe_repo_symlink_target(root: Path, path: Path) -> Path:
     resolved_root = root.resolve()
     resolved_target = target.resolve()
     if not resolved_target.is_relative_to(resolved_root):
-        raise ConfigError(f"Agent instruction symlink points outside the repository: {path} -> {resolved_target}")
+        raise ConfigError(f"Repository setup symlink points outside the repository: {path} -> {resolved_target}")
     return resolved_target
 
 
@@ -635,12 +619,12 @@ def _write_agent_skill(
     if _write_if_missing_or_overwrite(canonical, skill_text, overwrite=overwrite):
         written.append(canonical)
     if agent_files in {"codex", "both"} and _write_skill_alias(
-        root / ".codex" / "skills" / skill_name / "SKILL.md",
+        _codex_skill_alias_path(root, skill_name),
         canonical,
         skill_text,
         overwrite=overwrite,
     ):
-        written.append(root / ".codex" / "skills" / skill_name / "SKILL.md")
+        written.append(_codex_skill_alias_path(root, skill_name))
     if agent_files in {"claude", "both"} and _write_skill_alias(
         root / ".claude" / "skills" / skill_name / "SKILL.md",
         canonical,
@@ -649,6 +633,10 @@ def _write_agent_skill(
     ):
         written.append(root / ".claude" / "skills" / skill_name / "SKILL.md")
     return written
+
+
+def _codex_skill_alias_path(root: Path, skill_name: str) -> Path:
+    return root / CODEX_REPO_SKILL_DIR / "skills" / skill_name / "SKILL.md"
 
 
 def _write_skill_alias(path: Path, target: Path, fallback_text: str, *, overwrite: bool) -> bool:

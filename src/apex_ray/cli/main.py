@@ -9,7 +9,7 @@ import typer
 from apex_ray import __version__, git
 from apex_ray.analyzers import typescript_analyzer_script
 from apex_ray.cli.benchmark import register_benchmark_commands
-from apex_ray.cli.common import ensure_distinct_outputs
+from apex_ray.cli.common import ensure_apex_ignore_for_outputs, ensure_distinct_outputs, resolve_output_path
 from apex_ray.cli.eval import eval_app
 from apex_ray.cli.gate import gate_app
 from apex_ray.cli.memory import memory_app
@@ -89,8 +89,11 @@ def init(
     ] = True,
     update_gitignore: Annotated[
         bool,
-        typer.Option("--update-gitignore/--no-update-gitignore", help="Add Apex Ray outputs to root .gitignore."),
-    ] = True,
+        typer.Option(
+            "--update-gitignore/--no-update-gitignore",
+            help="Deprecated compatibility flag. Emits a warning; root .gitignore is not modified.",
+        ),
+    ] = False,
 ) -> None:
     """Create project Apex Ray config, ignores, hooks, and agent instructions."""
     root = git.repo_root(Path.cwd()) or Path.cwd()
@@ -216,8 +219,12 @@ def review(
         bool,
         typer.Option("--auto-followup", help="After the first pass, automatically review unreviewed P0 packs."),
     ] = False,
-    output: Annotated[Path, typer.Option("--output", help="Markdown report path.")] = Path("review.md"),
-    json_output: Annotated[Path, typer.Option("--json", help="JSON report path.")] = Path("review.json"),
+    output: Annotated[Path, typer.Option("--output", help="Markdown report path.")] = Path(
+        ".apex-ray/reports/review.md"
+    ),
+    json_output: Annotated[Path, typer.Option("--json", help="JSON report path.")] = Path(
+        ".apex-ray/reports/review.json"
+    ),
     html_output: Annotated[Path | None, typer.Option("--html", help="Optional HTML report path.")] = None,
     config: Annotated[Path | None, typer.Option("--config", help="Path to config file.")] = None,
     llm: Annotated[bool, typer.Option("--llm", help="Run LLM review over generated context packs.")] = False,
@@ -297,8 +304,6 @@ def review(
         raise typer.BadParameter("Use --telemetry-path only when telemetry is enabled.")
     if continue_review_depth not in {"deep", "shallow"}:
         raise typer.BadParameter("--continue-review-depth must be 'deep' or 'shallow'.")
-    ensure_distinct_outputs(output, json_output, html_output)
-
     prior_report = None
     if continue_from is not None:
         try:
@@ -309,6 +314,11 @@ def review(
             raise typer.BadParameter(str(exc)) from exc
         root = Path(prior_report.project.root)
         review_config = prior_report.config
+
+    output = resolve_output_path(root, output)
+    json_output = resolve_output_path(root, json_output)
+    html_output = resolve_output_path(root, html_output) if html_output is not None else None
+    ensure_distinct_outputs(output, json_output, html_output)
 
     parsed_provider = None
     if llm_provider:
@@ -400,6 +410,7 @@ def review(
     markdown_text = render_markdown(report)
     json_text = report.model_dump_json(indent=2)
     html_text = render_html(report) if html_output else None
+    ensure_apex_ignore_for_outputs(root, output, json_output, html_output)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(markdown_text, encoding="utf-8")
     json_output.parent.mkdir(parents=True, exist_ok=True)

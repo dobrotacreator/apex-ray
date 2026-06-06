@@ -19,12 +19,22 @@ import { isDeclarationNameIdentifier, referenceForNode, referenceKind } from "./
 import type { CollectedSymbol, Reference } from "../types.js";
 import { isInsideRepo, isRepoRelativePath, normalizeRelPath, sourceFileName } from "../utils.js";
 
+type ReferenceSearchText = string | readonly string[] | null;
+
+export class ReferenceScanCancelled extends Error {
+  constructor() {
+    super("Reference scan cancelled");
+    this.name = "ReferenceScanCancelled";
+  }
+}
+
 export function collectReferences(
   program: ts.Program,
   checker: ts.TypeChecker,
   target: CollectedSymbol,
   repo: string,
   limit: number,
+  shouldStop: () => boolean = () => false,
 ): Reference[] {
   const refs: Reference[] = [];
   const seen = new Set<string>();
@@ -32,15 +42,19 @@ export function collectReferences(
   const excludedNode = target.containerNode ?? target.node;
   const targetStart = excludedNode.getStart(targetSource);
   const targetEnd = excludedNode.getEnd();
+  const searchText = referenceSearchText(target);
   for (const source of program.getSourceFiles()) {
+    stopIfNeeded(shouldStop);
     if (source.isDeclarationFile) continue;
     if (!isInsideRepo(repo, source.fileName)) continue;
+    if (!sourceMayContainReference(source, searchText)) continue;
     visit(source);
     if (refs.length >= limit) break;
   }
   return refs;
 
   function visit(node: ts.Node): void {
+    stopIfNeeded(shouldStop);
     if (refs.length >= limit) return;
     if (ts.isIdentifier(node) && isReferenceToTarget(node, checker, target)) {
       const source = node.getSourceFile();
@@ -80,6 +94,7 @@ export function collectImplementedMemberUsageReferences(
   target: CollectedSymbol,
   repo: string,
   limit: number,
+  shouldStop: () => boolean = () => false,
 ): Reference[] {
   if (!ts.isMethodDeclaration(target.node)) return [];
   const methodName = propertyNameText(target.node.name);
@@ -96,14 +111,17 @@ export function collectImplementedMemberUsageReferences(
   const targetEnd = excludedNode.getEnd();
 
   for (const source of program.getSourceFiles()) {
+    stopIfNeeded(shouldStop);
     if (source.isDeclarationFile) continue;
     if (!isInsideRepo(repo, source.fileName)) continue;
+    if (!sourceMayContainReference(source, methodName)) continue;
     visit(source);
     if (refs.length >= limit) break;
   }
   return refs;
 
   function visit(node: ts.Node): void {
+    stopIfNeeded(shouldStop);
     if (refs.length >= limit) return;
     if (ts.isIdentifier(node) && node.text === methodName && !isDeclarationNameIdentifier(node)) {
       const source = node.getSourceFile();
@@ -132,6 +150,7 @@ export function collectReferenceConsumerImpact(
   target: CollectedSymbol,
   repo: string,
   limit: number,
+  shouldStop: () => boolean = () => false,
 ): { references: Reference[]; callees: Reference[] } {
   const references: Reference[] = [];
   const callees: Reference[] = [];
@@ -141,17 +160,22 @@ export function collectReferenceConsumerImpact(
   const consumerNames = new Set<string>();
   const targetSource = target.node.getSourceFile();
   const excludedNode = target.containerNode ?? target.node;
+  const searchText = referenceSearchText(target);
 
   for (const source of program.getSourceFiles()) {
+    stopIfNeeded(shouldStop);
     if (source.isDeclarationFile || !isInsideRepo(repo, source.fileName)) continue;
+    if (!sourceMayContainReference(source, searchText)) continue;
     collectConsumerSymbols(source);
   }
 
   for (const symbol of consumerSymbols) {
+    stopIfNeeded(shouldStop);
     if (references.length >= limit && callees.length >= limit) break;
     collectConsumerReferences(symbol, null);
   }
   for (const name of consumerNames) {
+    stopIfNeeded(shouldStop);
     if (references.length >= limit && callees.length >= limit) break;
     collectConsumerReferences(null, name);
   }
@@ -162,6 +186,7 @@ export function collectReferenceConsumerImpact(
     visit(source);
 
     function visit(node: ts.Node): void {
+      stopIfNeeded(shouldStop);
       if (ts.isIdentifier(node) && isReferenceToTarget(node, checker, target)) {
         if (isNodeInsideTarget(node, excludedNode, targetSource)) {
           ts.forEachChild(node, visit);
@@ -184,13 +209,17 @@ export function collectReferenceConsumerImpact(
   }
 
   function collectConsumerReferences(consumerSymbol: ts.Symbol | null, consumerName: string | null): void {
+    const consumerSearchText = consumerSymbol === null ? consumerName : null;
     for (const source of program.getSourceFiles()) {
+      stopIfNeeded(shouldStop);
       if (source.isDeclarationFile || !isInsideRepo(repo, source.fileName)) continue;
+      if (!sourceMayContainReference(source, consumerSearchText)) continue;
       visit(source);
       if (references.length >= limit && callees.length >= limit) return;
     }
 
     function visit(node: ts.Node): void {
+      stopIfNeeded(shouldStop);
       if (references.length < limit && ts.isIdentifier(node) && !isDeclarationNameIdentifier(node)) {
         const nodeSymbol = canonicalSymbol(checker, checker.getSymbolAtLocation(node));
         const matchesSymbol =
@@ -209,7 +238,7 @@ export function collectReferenceConsumerImpact(
               (consumerSymbol === null || callerSymbol !== consumerSymbol) &&
               (consumerName === null || callerName !== consumerName)
             ) {
-              collectCalleesFromNode(checker, callerDeclaration, repo, limit, callees, seenCallees);
+              collectCalleesFromNode(checker, callerDeclaration, repo, limit, callees, seenCallees, shouldStop);
             }
           }
         }
@@ -225,15 +254,41 @@ export function collectReferenceConsumerImpact(
   }
 }
 
+function referenceSearchText(target: CollectedSymbol): ReferenceSearchText {
+  if (target.defaultExported) return null;
+  const syntheticSeparatorIndex = target.analysis.name.indexOf(":");
+  if (syntheticSeparatorIndex > 0) {
+    const containerName = target.analysis.name.slice(0, syntheticSeparatorIndex);
+    const memberName = target.analysis.name.slice(syntheticSeparatorIndex + 1);
+    return [containerName, memberName].filter((value) => value.length > 0);
+  }
+  if (target.exportContainer || target.analysis.kind === "method" || target.analysis.kind === "enum-member") {
+    return target.analysis.name ? [target.analysis.name] : null;
+  }
+  return null;
+}
+
+function sourceMayContainReference(source: ts.SourceFile, searchText: ReferenceSearchText): boolean {
+  const candidates = typeof searchText === "string" ? [searchText] : searchText;
+  return candidates === null || candidates.some((value) => source.text.includes(value)) || source.text.includes("\\u");
+}
+
+function stopIfNeeded(shouldStop: () => boolean): void {
+  if (shouldStop()) {
+    throw new ReferenceScanCancelled();
+  }
+}
+
 export function collectCallees(
   checker: ts.TypeChecker,
   target: CollectedSymbol,
   repo: string,
   limit: number,
+  shouldStop: () => boolean = () => false,
 ): Reference[] {
   const refs: Reference[] = [];
   const seen = new Set<string>();
-  collectCalleesFromNode(checker, target.node, repo, limit, refs, seen, target.node);
+  collectCalleesFromNode(checker, target.node, repo, limit, refs, seen, shouldStop, target.node);
   return refs;
 }
 
@@ -244,12 +299,14 @@ function collectCalleesFromNode(
   limit: number,
   refs: Reference[],
   seen: Set<string>,
+  shouldStop: () => boolean,
   excludedNode?: ts.Node,
 ): void {
   const targetSource = node.getSourceFile();
   visit(node);
 
   function visit(node: ts.Node): void {
+    stopIfNeeded(shouldStop);
     if (refs.length >= limit) return;
     if (ts.isCallExpression(node)) {
       const calleeNode = calleeNameNode(node.expression);

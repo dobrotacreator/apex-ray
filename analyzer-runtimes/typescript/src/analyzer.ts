@@ -7,6 +7,7 @@ import {
   collectImplementedMemberUsageReferences,
   collectReferenceConsumerImpact,
   collectReferences,
+  ReferenceScanCancelled,
 } from "./references/analysis.js";
 import { mergeReferences } from "./references/merge.js";
 import { buildRepoIndex } from "./indexes/repo.js";
@@ -21,8 +22,11 @@ import {
 import { findRelatedTests, isTestPath } from "./test-discovery.js";
 import type {
   AnalyzerResult,
+  AnalyzerShardFailure,
   Args,
+  CollectedSymbol,
   FileAnalysis,
+  Reference,
 } from "./types.js";
 import { rangesOverlap } from "./utils.js";
 import {
@@ -46,11 +50,40 @@ export type {
 
 export function analyze(args: Args): AnalyzerResult {
   const warnings: string[] = [];
+  const budgetExhausted = analysisBudget(args.analysisTimeBudgetMs);
   const contextsByFile = createProgramContexts(args, warnings);
   const repoIndex = buildRepoIndex(args);
+  const syntheticReferenceScanCache = new Map<string, ReferenceScanResult>();
+  const failedFileSet = new Set<string>();
+  const failedFiles: string[] = [];
+  const shardFailures: AnalyzerShardFailure[] = [];
+
+  const markBudgetExhausted = (filesToSkip: string[]): void => {
+    const skippedFiles = filesToSkip.filter((file) => !failedFileSet.has(file));
+    if (skippedFiles.length === 0) return;
+    for (const file of skippedFiles) {
+      failedFileSet.add(file);
+      failedFiles.push(file);
+    }
+    const reason = `TypeScript analyzer internal budget exhausted after ${args.analysisTimeBudgetMs ?? 0}ms`;
+    warnings.push(`${reason}; skipped ${skippedFiles.length} changed file${skippedFiles.length === 1 ? "" : "s"}.`);
+    shardFailures.push({
+      index: 1,
+      total: 1,
+      files: skippedFiles,
+      reason,
+      status: "timeout",
+    });
+  };
 
   const files: FileAnalysis[] = [];
-  for (const changedFile of args.changed) {
+  for (let changedIndex = 0; changedIndex < args.changed.length; changedIndex += 1) {
+    const changedFile = args.changed[changedIndex];
+    if (budgetExhausted()) {
+      markBudgetExhausted(args.changed.slice(changedIndex));
+      break;
+    }
+
     const context = contextsByFile.get(changedFile);
     if (!context) {
       warnings.push(`No TypeScript program could be created for changed file: ${changedFile}`);
@@ -82,8 +115,20 @@ export function analyze(args: Args): AnalyzerResult {
       ),
     ]);
     const isChangedTestFile = isTestPath(changedFile.toLowerCase());
+    let completedFile = true;
+    if (budgetExhausted()) {
+      markBudgetExhausted(args.changed.slice(changedIndex));
+      break;
+    }
 
-    for (const symbol of changedCollectedSymbols) {
+    for (let symbolIndex = 0; symbolIndex < changedCollectedSymbols.length; symbolIndex += 1) {
+      if (budgetExhausted()) {
+        markBudgetExhausted(args.changed.slice(changedIndex));
+        completedFile = false;
+        break;
+      }
+
+      const symbol = changedCollectedSymbols[symbolIndex];
       if (isChangedTestFile) {
         symbol.analysis.references = [];
         symbol.analysis.callees = [];
@@ -91,17 +136,24 @@ export function analyze(args: Args): AnalyzerResult {
         symbol.analysis.metadata = [];
         continue;
       }
-      const directReferences = [
-        ...collectReferences(program, checker, symbol, args.repo, REFERENCE_COLLECTION_LIMIT),
-        ...collectImplementedMemberUsageReferences(program, checker, symbol, args.repo, REFERENCE_COLLECTION_LIMIT),
-      ];
-      const consumerImpact = !symbol.analysis.name.includes(":")
-        ? { references: [], callees: [] }
-        : collectReferenceConsumerImpact(program, checker, symbol, args.repo, REFERENCE_COLLECTION_LIMIT);
+      const referenceScanCacheKey = syntheticReferenceScanCacheKey(symbol);
+      const cachedReferenceScan = referenceScanCacheKey ? syntheticReferenceScanCache.get(referenceScanCacheKey) : undefined;
+      const referenceScan =
+        cachedReferenceScan ??
+        collectReferenceScan(program, checker, symbol, args.repo, symbol.analysis.name.includes(":"), budgetExhausted);
+      if (!referenceScan.completed || budgetExhausted()) {
+        markBudgetExhausted(args.changed.slice(changedIndex));
+        completedFile = false;
+        break;
+      }
+      if (referenceScanCacheKey && !cachedReferenceScan) {
+        syntheticReferenceScanCache.set(referenceScanCacheKey, referenceScan);
+      }
+
       symbol.analysis.references = mergeReferences(
         [
-          ...directReferences,
-          ...consumerImpact.references,
+          ...referenceScan.directReferences,
+          ...referenceScan.consumerImpact.references,
           ...collectWorkspaceImportReferences(args.repo, repoIndex, symbol, REFERENCE_COLLECTION_LIMIT),
           ...collectWorkspaceMemberReferences(args.repo, repoIndex, symbol, REFERENCE_COLLECTION_LIMIT),
           ...collectWorkspaceDiReferences(args.repo, repoIndex, symbol, REFERENCE_COLLECTION_LIMIT),
@@ -110,31 +162,71 @@ export function analyze(args: Args): AnalyzerResult {
         REFERENCE_LIMIT,
       );
       symbol.analysis.references = filterInvalidWorkspaceMemberReferences(args.repo, repoIndex, symbol, symbol.analysis.references);
-      symbol.analysis.callees = mergeReferences(
-        [
-          ...collectCallees(checker, symbol, args.repo, REFERENCE_COLLECTION_LIMIT),
-          ...consumerImpact.callees,
-        ],
-        REFERENCE_LIMIT,
-      );
+      if (budgetExhausted()) {
+        markBudgetExhausted(args.changed.slice(changedIndex));
+        completedFile = false;
+        break;
+      }
+
+      let calleeReferences: Reference[];
+      try {
+        calleeReferences = collectCallees(checker, symbol, args.repo, REFERENCE_COLLECTION_LIMIT, budgetExhausted);
+      } catch (error) {
+        if (error instanceof ReferenceScanCancelled) {
+          markBudgetExhausted(args.changed.slice(changedIndex));
+          completedFile = false;
+          break;
+        }
+        throw error;
+      }
+      symbol.analysis.callees = mergeReferences([...calleeReferences, ...referenceScan.consumerImpact.callees], REFERENCE_LIMIT);
+      if (budgetExhausted()) {
+        markBudgetExhausted(args.changed.slice(changedIndex));
+        completedFile = false;
+        break;
+      }
+
       symbol.analysis.contracts = mergeReferences(
         collectSchemaContracts(program, checker, symbol, args.repo, REFERENCE_COLLECTION_LIMIT),
         REFERENCE_LIMIT,
       );
+      if (budgetExhausted()) {
+        markBudgetExhausted(args.changed.slice(changedIndex));
+        completedFile = false;
+        break;
+      }
+
       symbol.analysis.metadata = mergeReferences(
         collectFrameworkMetadata(symbol, args.repo, REFERENCE_COLLECTION_LIMIT),
         REFERENCE_LIMIT,
       );
+      if (budgetExhausted()) {
+        markBudgetExhausted(args.changed.slice(changedIndex));
+        completedFile = false;
+        break;
+      }
+    }
+    if (!completedFile) {
+      break;
     }
 
     const changedReferences = changedCollectedSymbols.flatMap((symbol) => symbol.analysis.references);
+    if (budgetExhausted()) {
+      markBudgetExhausted(args.changed.slice(changedIndex));
+      break;
+    }
+    const relatedTests = findRelatedTests(args.repo, repoIndex, changedFile, changedReferences);
+    if (budgetExhausted()) {
+      markBudgetExhausted(args.changed.slice(changedIndex));
+      break;
+    }
     files.push({
       path: changedFile,
       tsconfigPath: context.tsconfigPath,
       symbols,
       imports,
       exports,
-      relatedTests: findRelatedTests(args.repo, repoIndex, changedFile, changedReferences),
+      relatedTests,
       changedSymbols: changedCollectedSymbols.map((symbol) => symbol.analysis),
     });
   }
@@ -147,5 +239,63 @@ export function analyze(args: Args): AnalyzerResult {
     files,
     warnings,
     indexCache: repoIndex.cacheStats,
+    partial: failedFiles.length > 0,
+    failedFiles,
+    shardFailures,
   };
+}
+
+interface ReferenceScanResult {
+  directReferences: Reference[];
+  consumerImpact: {
+    references: Reference[];
+    callees: Reference[];
+  };
+  completed: boolean;
+}
+
+function collectReferenceScan(
+  program: import("typescript").Program,
+  checker: import("typescript").TypeChecker,
+  symbol: CollectedSymbol,
+  repo: string,
+  includeConsumerImpact: boolean,
+  shouldStop: () => boolean = () => false,
+): ReferenceScanResult {
+  try {
+    const directReferences = collectReferences(program, checker, symbol, repo, REFERENCE_COLLECTION_LIMIT, shouldStop);
+    if (!shouldStop()) {
+      directReferences.push(
+        ...collectImplementedMemberUsageReferences(program, checker, symbol, repo, REFERENCE_COLLECTION_LIMIT, shouldStop),
+      );
+    }
+    const consumerImpact = includeConsumerImpact && !shouldStop()
+      ? collectReferenceConsumerImpact(program, checker, symbol, repo, REFERENCE_COLLECTION_LIMIT, shouldStop)
+      : { references: [], callees: [] };
+    return { directReferences, consumerImpact, completed: !shouldStop() };
+  } catch (error) {
+    if (error instanceof ReferenceScanCancelled) {
+      return { directReferences: [], consumerImpact: { references: [], callees: [] }, completed: false };
+    }
+    throw error;
+  }
+}
+
+function syntheticReferenceScanCacheKey(symbol: CollectedSymbol): string | null {
+  if (!symbol.analysis.name.includes(":") || !symbol.containerNode || !symbol.tsSymbol) return null;
+  const source = symbol.containerNode.getSourceFile();
+  return [
+    source.fileName,
+    symbol.containerNode.getStart(source),
+    symbol.containerNode.getEnd(),
+    symbol.analysis.name,
+    symbol.analysis.startLine,
+    symbol.analysis.endLine,
+  ].join(":");
+}
+
+function analysisBudget(timeBudgetMs: number | null): () => boolean {
+  if (timeBudgetMs === null) return () => false;
+  const deadline = Date.now() + timeBudgetMs;
+  return () => Date.now() >= deadline;
 }

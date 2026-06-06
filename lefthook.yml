@@ -1,3 +1,5 @@
+no_tty: true
+
 pre-commit:
   parallel: true
   commands:
@@ -16,6 +18,7 @@ commit-msg:
       run: 'head -n 1 "{1}" | grep -qE "^(feat|fix|refactor|test|docs|infra|adr|migration|chore)(\([^)]+\))?!?: .+" || (echo "Commit message must follow conventional format: type(scope): description" && exit 1)'
 
 pre-push:
+  follow: true
   parallel: false
   commands:
     ruff-format:

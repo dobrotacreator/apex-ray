@@ -60,8 +60,9 @@ def test_init_creates_config(tmp_path: Path, monkeypatch) -> None:
     assert (tmp_path / ".claude" / "CLAUDE.md").exists()
     assert (tmp_path / ".apex-ray" / "skills" / "apex-ray" / "SKILL.md").exists()
     assert (tmp_path / ".apex-ray" / "skills" / "apex-ray-improve" / "SKILL.md").exists()
-    assert (tmp_path / ".codex" / "skills" / "apex-ray" / "SKILL.md").exists()
-    assert (tmp_path / ".codex" / "skills" / "apex-ray-improve" / "SKILL.md").exists()
+    assert (tmp_path / ".agents" / "skills" / "apex-ray" / "SKILL.md").exists()
+    assert (tmp_path / ".agents" / "skills" / "apex-ray-improve" / "SKILL.md").exists()
+    assert not (tmp_path / ".codex").exists()
     assert (tmp_path / ".claude" / "skills" / "apex-ray" / "SKILL.md").exists()
     assert (tmp_path / ".claude" / "skills" / "apex-ray-improve" / "SKILL.md").exists()
     assert "apex-ray-review" in (tmp_path / "lefthook.yml").read_text(encoding="utf-8")
@@ -202,6 +203,42 @@ def test_review_patch_writes_markdown_and_json(tmp_path: Path, monkeypatch) -> N
     assert "# Apex Ray Review" in output.read_text(encoding="utf-8")
     assert '"files_changed": 3' in json_output.read_text(encoding="utf-8")
     assert "<h1>Apex Ray Review</h1>" in html_output.read_text(encoding="utf-8")
+    assert not (tmp_path / ".apex-ray").exists()
+
+
+def test_review_patch_defaults_to_apex_reports_dir(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    patch = tmp_path / "sample.diff"
+    patch.write_text((FIXTURE_DIR / "sample.diff").read_text(encoding="utf-8"), encoding="utf-8")
+
+    result = runner.invoke(app, ["review", "--diff", str(patch)], catch_exceptions=False)
+
+    output = tmp_path / ".apex-ray" / "reports" / "review.md"
+    json_output = tmp_path / ".apex-ray" / "reports" / "review.json"
+    assert result.exit_code == 0
+    assert output.exists()
+    assert json_output.exists()
+    assert "reports/" in (tmp_path / ".apex-ray" / ".gitignore").read_text(encoding="utf-8")
+    assert not (tmp_path / "review.md").exists()
+    assert not (tmp_path / "review.json").exists()
+
+
+def test_review_patch_defaults_to_repo_reports_dir_from_subdir(tmp_path: Path, monkeypatch) -> None:
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    subdir = tmp_path / "src"
+    subdir.mkdir()
+    patch = tmp_path / "sample.diff"
+    patch.write_text((FIXTURE_DIR / "sample.diff").read_text(encoding="utf-8"), encoding="utf-8")
+    monkeypatch.chdir(subdir)
+
+    result = runner.invoke(app, ["review", "--diff", str(patch)], catch_exceptions=False)
+
+    output = tmp_path / ".apex-ray" / "reports" / "review.md"
+    json_output = tmp_path / ".apex-ray" / "reports" / "review.json"
+    assert result.exit_code == 0
+    assert output.exists()
+    assert json_output.exists()
+    assert not (subdir / ".apex-ray").exists()
 
 
 def test_review_patch_archives_reports_when_enabled(tmp_path: Path, monkeypatch) -> None:

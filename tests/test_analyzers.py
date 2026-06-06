@@ -81,6 +81,54 @@ def test_typescript_analyzer_resolves_relative_script_path_against_repo_root(
     assert seen_command[1] == str(script.resolve())
 
 
+def test_typescript_analyzer_passes_internal_time_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    script = tmp_path / "analyze.js"
+    script.write_text("console.log('{}')\n", encoding="utf-8")
+    changed = ChangedFile(
+        old_path="src/cart.ts",
+        new_path="src/cart.ts",
+        language="typescript",
+        file_kind=FileKind.SOURCE,
+    )
+    seen_command: list[str] | None = None
+
+    monkeypatch.setattr("apex_ray.analyzers.typescript.shutil.which", lambda name: "/usr/bin/node")
+
+    def fake_run(
+        args: list[str],
+        *,
+        cwd: Path,
+        timeout: float,
+    ) -> subprocess.CompletedProcess[str]:
+        nonlocal seen_command
+        seen_command = args
+        payload = {
+            "language": "typescript",
+            "projectRoot": str(tmp_path),
+            "tsconfigPath": None,
+            "files": [],
+            "warnings": [],
+            "indexCache": None,
+        }
+        return subprocess.CompletedProcess(args, 0, stdout=json.dumps(payload), stderr="")
+
+    monkeypatch.setattr("apex_ray.analyzers.typescript._run_analyzer_process", fake_run)
+
+    result = run_typescript_analyzer(
+        tmp_path,
+        [changed],
+        AnalyzerConfig(script_path=str(script), timeout_seconds=10),
+    )
+
+    assert result is not None
+    assert seen_command is not None
+    budget_index = seen_command.index("--analysis-time-budget-ms")
+    assert seen_command[budget_index + 1] == "9500"
+
+
 def test_run_analyzers_scopes_unavailable_backend_fallback_to_matching_files(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

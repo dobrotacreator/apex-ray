@@ -150,3 +150,147 @@ test("analyzer library API matches the CLI JSON contract", () => {
     fs.rmSync(repo, { recursive: true, force: true });
   }
 });
+
+test("analyzer returns partial JSON when the internal budget is exhausted", () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "apex-ray-ts-analyzer-budget-"));
+  try {
+    writeFile(
+      repo,
+      "tsconfig.json",
+      JSON.stringify({
+        compilerOptions: {
+          target: "ES2022",
+          module: "NodeNext",
+          moduleResolution: "NodeNext",
+          strict: true,
+        },
+        include: ["src/**/*.ts"],
+      }),
+    );
+    writeFile(repo, "src/first.ts", "export function first(): number {\n  return 1;\n}\n");
+    writeFile(repo, "src/second.ts", "export function second(): number {\n  return 2;\n}\n");
+
+    const result = runAnalyzer(repo, [
+      "src/first.ts",
+      "src/second.ts",
+      "--range",
+      "src/first.ts:1-3",
+      "--range",
+      "src/second.ts:1-3",
+      "--analysis-time-budget-ms",
+      "0",
+      "--no-index-cache",
+    ]);
+
+    assert.equal(result.partial, true);
+    assert.deepEqual(result.files, []);
+    assert.deepEqual(result.failedFiles, ["src/first.ts", "src/second.ts"]);
+    assert.equal(result.shardFailures.length, 1);
+    assert.equal(result.shardFailures[0].status, "timeout");
+    assert.deepEqual(result.shardFailures[0].files, ["src/first.ts", "src/second.ts"]);
+    assert.ok(result.warnings.some((warning) => warning.includes("internal budget exhausted")));
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("analyzer marks partial when budget expires after metadata collection", () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "apex-ray-ts-analyzer-metadata-budget-"));
+  const originalNow = Date.now;
+  try {
+    writeFile(
+      repo,
+      "tsconfig.json",
+      JSON.stringify({
+        compilerOptions: {
+          target: "ES2022",
+          module: "NodeNext",
+          moduleResolution: "NodeNext",
+          experimentalDecorators: true,
+          strict: true,
+        },
+        include: ["src/**/*.ts"],
+      }),
+    );
+    writeFile(
+      repo,
+      "src/controller.ts",
+      [
+        "function Controller(): ClassDecorator { return () => undefined; }",
+        "function Get(): MethodDecorator { return () => undefined; }",
+        "@Controller()",
+        "export class CartController {",
+        "  @Get()",
+        "  list(): string { return 'ok'; }",
+        "}",
+      ].join("\n"),
+    );
+
+    let nowCalls = 0;
+    Date.now = () => {
+      nowCalls += 1;
+      return nowCalls <= 238 ? 0 : 1;
+    };
+
+    const result = runAnalyzerInProcess(repo, [
+      "src/controller.ts",
+      "--range",
+      "src/controller.ts:4-7",
+      "--analysis-time-budget-ms",
+      "1",
+      "--no-index-cache",
+    ]);
+
+    assert.equal(result.partial, true);
+    assert.deepEqual(result.files, []);
+    assert.deepEqual(result.failedFiles, ["src/controller.ts"]);
+    assert.ok(result.warnings.some((warning) => warning.includes("internal budget exhausted")));
+  } finally {
+    Date.now = originalNow;
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("analyzer marks partial when budget expires after collecting a file with no changed symbols", () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "apex-ray-ts-analyzer-empty-symbol-budget-"));
+  const originalNow = Date.now;
+  try {
+    writeFile(
+      repo,
+      "tsconfig.json",
+      JSON.stringify({
+        compilerOptions: {
+          target: "ES2022",
+          module: "NodeNext",
+          moduleResolution: "NodeNext",
+          strict: true,
+        },
+        include: ["src/**/*.ts"],
+      }),
+    );
+    writeFile(repo, "src/notes.ts", "export function stable(): number {\n  return 1;\n}\n\n// changed comment\n");
+
+    let nowCalls = 0;
+    Date.now = () => {
+      nowCalls += 1;
+      return nowCalls <= 2 ? 0 : 1;
+    };
+
+    const result = runAnalyzerInProcess(repo, [
+      "src/notes.ts",
+      "--range",
+      "src/notes.ts:5-5",
+      "--analysis-time-budget-ms",
+      "1",
+      "--no-index-cache",
+    ]);
+
+    assert.equal(result.partial, true);
+    assert.deepEqual(result.files, []);
+    assert.deepEqual(result.failedFiles, ["src/notes.ts"]);
+    assert.ok(result.warnings.some((warning) => warning.includes("internal budget exhausted")));
+  } finally {
+    Date.now = originalNow;
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
+});

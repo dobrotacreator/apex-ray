@@ -26,6 +26,8 @@ test("parseArgs normalizes analyzer CLI options", () => {
     "--refresh-index-cache",
     "--large-change-set-size",
     "12",
+    "--analysis-time-budget-ms",
+    "2500",
   ]);
 
   assert.equal(args.repo, path.resolve(repo));
@@ -36,4 +38,5 @@ test("parseArgs normalizes analyzer CLI options", () => {
   assert.equal(args.indexCacheDir, ".cache/typescript");
   assert.equal(args.refreshIndexCache, true);
   assert.equal(args.largeChangeSetSize, 12);
+  assert.equal(args.analysisTimeBudgetMs, 2500);
 });

@@ -47,28 +47,13 @@ Run the smallest relevant check for the changed surface:
 
 Before saying work is complete, report the verification that actually ran.
 
-## Apex Ray Review Aid
-
-Use Apex Ray itself only as an additional local review signal; it does not replace tests, linters, typecheck, security scanners, or human review.
-
-```bash
-uv run apex-ray review --worktree --no-llm --json review.json --output review.md
-uv run apex-ray review --worktree --llm --json review.json --output review.md
-uv run apex-ray review --continue-from review.json --llm
-```
-
-## Do Not Commit
-
-- `.apex-ray/config.local.yml`
-- `.apex-ray/cache/`
-- `.apex-ray/telemetry/`
-- `.apex-ray/reports/`
-- `.apex-ray/eval*/runs/`
-- generated `review.*` reports
-- local provider, model, API, or cost settings
-
 ## Git Rules
 
-- Do not commit unless explicitly asked.
 - Commit messages use Conventional Commits.
 - Mark breaking changes with `!` and a `BREAKING CHANGE:` footer.
+
+<!-- APEX_RAY_START -->
+## Apex Ray
+
+This project uses Apex Ray for local diff-aware review. Use the `$apex-ray` skill for review, gate, report, telemetry, and eval workflows. Do not bypass the configured pre-push gate by default; if bypassing is unavoidable, explain why and name the equivalent checks or review already run. Use `$apex-ray-improve` after merged PRs or review feedback to produce recommendation-only improvements for Apex Ray memory, rules, eval labels, telemetry, and config. Keep `.apex-ray/config.local.yml`, Apex Ray caches/telemetry/reports/eval runs, generated review artifacts, and local provider, model, API, or cost settings out of commits.
+<!-- APEX_RAY_END -->

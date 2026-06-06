@@ -36,9 +36,6 @@ PY
 }
 
 copy_local_file_if_missing ".apex-ray/config.local.yml"
-copy_local_file_if_missing ".codex/config.toml"
-copy_local_file_if_missing ".codex/config.local.toml"
-copy_local_file_if_missing ".claude/settings.local.json"
 copy_local_file_if_missing ".mcp.json"
 copy_local_file_if_missing ".env"
 copy_local_file_if_missing ".env.local"
