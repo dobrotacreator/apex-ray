@@ -5,7 +5,6 @@ from pathlib import Path
 from typing import Annotated
 
 import typer
-from pydantic import ValidationError
 
 from apex_ray import __version__, git
 from apex_ray.analyzers import typescript_analyzer_script
@@ -20,7 +19,14 @@ from apex_ray.invocation import ReviewOverrides, apply_review_overrides
 from apex_ray.llm import LLMProviderError
 from apex_ray.models import LLMCoverageMode, LLMProviderName, ReviewReport, TargetMode
 from apex_ray.pipeline import continue_review_from_report, run_review_pipeline
-from apex_ray.report import ReportArtifact, archive_report_artifacts, render_html, render_markdown
+from apex_ray.report import (
+    ReportArtifact,
+    ReviewReportLoadError,
+    archive_report_artifacts,
+    load_review_report,
+    render_html,
+    render_markdown,
+)
 from apex_ray.report.coverage import continue_command_for_pack
 from apex_ray.telemetry import (
     DEFAULT_REVIEW_TELEMETRY_PATH,
@@ -296,11 +302,11 @@ def review(
     prior_report = None
     if continue_from is not None:
         try:
-            prior_report = ReviewReport.model_validate_json(continue_from.read_text(encoding="utf-8"))
+            prior_report = load_review_report(continue_from)
         except OSError as exc:
             raise typer.BadParameter(f"Unable to read report {continue_from}: {exc}") from exc
-        except ValidationError as exc:
-            raise typer.BadParameter(f"Invalid Apex Ray report {continue_from}: {exc}") from exc
+        except ReviewReportLoadError as exc:
+            raise typer.BadParameter(str(exc)) from exc
         root = Path(prior_report.project.root)
         review_config = prior_report.config
 

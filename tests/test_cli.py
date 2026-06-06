@@ -11,6 +11,10 @@ from apex_ray.diff import parse_unified_diff
 from apex_ray.llm.cache import REVIEW_PROMPT_VERSION
 from apex_ray.llm.providers import FakeLLMProvider
 from apex_ray.models import (
+    AnalyzerFile,
+    AnalyzerResult,
+    AnalyzerSymbol,
+    ContextPack,
     DiffStats,
     DiffSummary,
     Finding,
@@ -804,6 +808,100 @@ def test_review_continue_from_can_enable_llm_explicitly(tmp_path: Path, monkeypa
 
     assert result.exit_code == 0
     assert seen["llm_enabled"] is True
+
+
+def test_review_continue_from_accepts_legacy_context_pack_symbols_without_line_ranges(
+    tmp_path: Path, monkeypatch
+) -> None:
+    report = build_report(
+        ProjectProfile(root=str(tmp_path), is_git_repo=True),
+        ReviewConfig(),
+        DiffSummary(target_mode=TargetMode.PATCH, stats=DiffStats(files_changed=1)),
+        analyzer_results=[
+            AnalyzerResult(
+                language="typescript",
+                projectRoot=str(tmp_path),
+                tsconfigPath=None,
+                files=[
+                    AnalyzerFile(
+                        path="src/service.ts",
+                        symbols=[
+                            AnalyzerSymbol(name="request", kind="function", startLine=12, endLine=14),
+                        ],
+                        changedSymbols=[
+                            AnalyzerSymbol(name="request", kind="function", startLine=12, endLine=14),
+                        ],
+                    )
+                ],
+                indexCache=None,
+            )
+        ],
+        context_packs=[
+            ContextPack(
+                id="src/service.ts#request:7",
+                file="src/service.ts",
+                changed_lines=[(12, 14)],
+                symbol=AnalyzerSymbol(name="request", kind="function", startLine=12, endLine=14),
+                symbols=[
+                    AnalyzerSymbol(name="request", kind="function", startLine=12, endLine=14),
+                    AnalyzerSymbol(name="helper", kind="function", startLine=20, endLine=22),
+                ],
+            )
+        ],
+    )
+    report_data = json.loads(report.model_dump_json(indent=2))
+    analyzer_file = report_data["analyzer_results"][0]["files"][0]
+    for symbol in [*analyzer_file["symbols"], *analyzer_file["changed_symbols"]]:
+        symbol.pop("start_line", None)
+        symbol.pop("end_line", None)
+        symbol.pop("startLine", None)
+        symbol.pop("endLine", None)
+    pack = report_data["context_packs"][0]
+    for symbol in [pack["symbol"], *pack["symbols"]]:
+        symbol.pop("start_line", None)
+        symbol.pop("end_line", None)
+        symbol.pop("startLine", None)
+        symbol.pop("endLine", None)
+    report_path = tmp_path / "legacy-review.json"
+    output = tmp_path / "continued.md"
+    json_output = tmp_path / "continued.json"
+    report_path.write_text(json.dumps(report_data), encoding="utf-8")
+    seen: dict[str, int | None] = {}
+
+    def fake_continue(prior_report, *args, **kwargs):
+        loaded_pack = prior_report.context_packs[0]
+        seen["symbol_start_line"] = loaded_pack.symbol.start_line if loaded_pack.symbol else None
+        seen["symbol_end_line"] = loaded_pack.symbol.end_line if loaded_pack.symbol else None
+        seen["secondary_start_line"] = loaded_pack.symbols[1].start_line
+        seen["analyzer_symbol_start_line"] = prior_report.analyzer_results[0].files[0].symbols[0].start_line
+        return prior_report, [object()]
+
+    monkeypatch.setattr("apex_ray.cli.main.continue_review_from_report", fake_continue)
+
+    result = runner.invoke(
+        app,
+        [
+            "review",
+            "--continue-from",
+            str(report_path),
+            "--llm",
+            "--only-pack",
+            "src/service.ts#request:7",
+            "--output",
+            str(output),
+            "--json",
+            str(json_output),
+        ],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert seen == {
+        "symbol_start_line": 12,
+        "symbol_end_line": 14,
+        "secondary_start_line": 12,
+        "analyzer_symbol_start_line": 1,
+    }
 
 
 def test_review_patch_can_run_fake_llm(tmp_path: Path, monkeypatch, built_ts_analyzer: None) -> None:

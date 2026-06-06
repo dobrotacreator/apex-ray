@@ -3,7 +3,6 @@ from pathlib import Path
 from typing import Annotated
 
 import typer
-from pydantic import ValidationError
 
 from apex_ray import git
 from apex_ray.cli.common import ensure_distinct_outputs
@@ -28,7 +27,14 @@ from apex_ray.llm.providers import provider_from_config
 from apex_ray.models import ReviewReport, TargetMode
 from apex_ray.pipeline import continue_review_from_report, run_review_pipeline
 from apex_ray.progress import NoopProgress, ProgressSink, StreamProgress, progress_enabled
-from apex_ray.report import ReportArtifact, archive_report_artifacts, render_html, render_markdown
+from apex_ray.report import (
+    ReportArtifact,
+    ReviewReportLoadError,
+    archive_report_artifacts,
+    load_review_report,
+    render_html,
+    render_markdown,
+)
 from apex_ray.report.coverage import continue_command_for_pack
 from apex_ray.telemetry import TelemetryError, append_review_telemetry
 
@@ -304,8 +310,8 @@ def _load_previous_report(path: Path) -> ReviewReport | None:
     if not path.exists():
         return None
     try:
-        return ReviewReport.model_validate_json(path.read_text(encoding="utf-8"))
-    except OSError, ValidationError:
+        return load_review_report(path)
+    except OSError, ReviewReportLoadError:
         return None
 
 

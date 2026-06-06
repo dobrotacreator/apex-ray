@@ -6,11 +6,11 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class ApexModel(BaseModel):
-    model_config = ConfigDict(use_enum_values=True)
+    model_config = ConfigDict(use_enum_values=True, populate_by_name=True)
 
 
 class StrictApexModel(ApexModel):
-    model_config = ConfigDict(use_enum_values=True, extra="forbid")
+    model_config = ConfigDict(use_enum_values=True, extra="forbid", populate_by_name=True)
 
 
 class TargetMode(StrEnum):
