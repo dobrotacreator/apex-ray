@@ -1,5 +1,6 @@
 .venv/
 .ci-smoke-venv/
+.worktrees/
 .pytest_cache/
 __pycache__/
 *.py[cod]

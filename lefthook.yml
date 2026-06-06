@@ -31,4 +31,4 @@ pre-push:
     package:
       run: uv build --sdist --wheel && uv run twine check dist/*
     apex-ray-review:
-      run: uv run apex-ray gate pre-push
+      run: bash scripts/apex-ray-pre-push.sh
