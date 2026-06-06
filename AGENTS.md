@@ -49,7 +49,6 @@ Before saying work is complete, report the verification that actually ran.
 
 ## Git Rules
 
-- Do not commit unless explicitly asked.
 - Commit messages use Conventional Commits.
 - Mark breaking changes with `!` and a `BREAKING CHANGE:` footer.
 
