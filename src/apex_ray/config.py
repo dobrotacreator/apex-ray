@@ -411,7 +411,7 @@ def _write_if_missing_or_overwrite(path: Path, text: str, *, overwrite: bool) ->
 
 
 def _ensure_gitignore_lines(root: Path, path: Path, lines: tuple[str, ...], *, overwrite: bool) -> bool:
-    write_path = _safe_repo_symlink_target(root, path) if path.is_symlink() else path
+    write_path = _safe_repo_write_path(root, path)
     expected = "\n".join(lines) + "\n"
     if overwrite or not write_path.exists():
         if write_path.exists() and write_path.read_text(encoding="utf-8") == expected:
@@ -428,6 +428,15 @@ def _ensure_gitignore_lines(root: Path, path: Path, lines: tuple[str, ...], *, o
     missing_text = "\n".join(missing)
     write_path.write_text(f"{text}{separator}{missing_text}\n", encoding="utf-8")
     return True
+
+
+def _safe_repo_write_path(root: Path, path: Path) -> Path:
+    write_path = _safe_repo_symlink_target(root, path) if path.is_symlink() else path
+    resolved_root = root.resolve()
+    resolved_write_path = write_path.resolve(strict=False)
+    if not resolved_write_path.is_relative_to(resolved_root):
+        raise ConfigError(f"Repository setup path points outside the repository: {path} -> {resolved_write_path}")
+    return write_path
 
 
 def _append_marked_block(path: Path, block: str, *, overwrite: bool) -> bool:

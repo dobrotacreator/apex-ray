@@ -196,6 +196,11 @@ export function analyze(args: Args): AnalyzerResult {
         collectFrameworkMetadata(symbol, args.repo, REFERENCE_COLLECTION_LIMIT),
         REFERENCE_LIMIT,
       );
+      if (budget.exhausted()) {
+        markBudgetExhausted(args.changed.slice(changedIndex));
+        completedFile = false;
+        break;
+      }
     }
     if (!completedFile) {
       break;

@@ -193,3 +193,60 @@ test("analyzer returns partial JSON when the internal budget is exhausted", () =
     fs.rmSync(repo, { recursive: true, force: true });
   }
 });
+
+test("analyzer marks partial when budget expires after metadata collection", () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "apex-ray-ts-analyzer-metadata-budget-"));
+  const originalNow = Date.now;
+  try {
+    writeFile(
+      repo,
+      "tsconfig.json",
+      JSON.stringify({
+        compilerOptions: {
+          target: "ES2022",
+          module: "NodeNext",
+          moduleResolution: "NodeNext",
+          experimentalDecorators: true,
+          strict: true,
+        },
+        include: ["src/**/*.ts"],
+      }),
+    );
+    writeFile(
+      repo,
+      "src/controller.ts",
+      [
+        "function Controller(): ClassDecorator { return () => undefined; }",
+        "function Get(): MethodDecorator { return () => undefined; }",
+        "@Controller()",
+        "export class CartController {",
+        "  @Get()",
+        "  list(): string { return 'ok'; }",
+        "}",
+      ].join("\n"),
+    );
+
+    let nowCalls = 0;
+    Date.now = () => {
+      nowCalls += 1;
+      return nowCalls <= 238 ? 0 : 1;
+    };
+
+    const result = runAnalyzerInProcess(repo, [
+      "src/controller.ts",
+      "--range",
+      "src/controller.ts:4-7",
+      "--analysis-time-budget-ms",
+      "1",
+      "--no-index-cache",
+    ]);
+
+    assert.equal(result.partial, true);
+    assert.deepEqual(result.files, []);
+    assert.deepEqual(result.failedFiles, ["src/controller.ts"]);
+    assert.ok(result.warnings.some((warning) => warning.includes("internal budget exhausted")));
+  } finally {
+    Date.now = originalNow;
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
+});

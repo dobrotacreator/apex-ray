@@ -286,6 +286,17 @@ def test_ensure_apex_gitignore_rejects_external_symlink(tmp_path: Path) -> None:
     assert outside.read_text(encoding="utf-8") == "outside\n"
 
 
+def test_ensure_apex_gitignore_rejects_external_parent_symlink(tmp_path: Path) -> None:
+    outside = tmp_path.parent / f"{tmp_path.name}-outside-apex"
+    outside.mkdir()
+    (tmp_path / ".apex-ray").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(ConfigError, match="outside the repository"):
+        ensure_apex_gitignore(tmp_path)
+
+    assert not (outside / ".gitignore").exists()
+
+
 def test_init_project_appends_to_existing_agent_files(tmp_path: Path) -> None:
     init_project(tmp_path)
     agents = tmp_path / "AGENTS.md"
