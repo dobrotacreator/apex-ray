@@ -12,7 +12,7 @@ Apex Ray is the project's local diff-aware AI review tool. Use it to create dete
 ## Process
 
 - Run `apex-ray doctor` when setup, config, provider, or analyzer state is uncertain.
-- For deterministic local review, run `apex-ray review --no-llm --output .apex-ray/reports/review.md --json .apex-ray/reports/review.json`.
+- For deterministic local review, run `apex-ray review --no-llm`; default reports are written under `.apex-ray/reports/`.
 - For pre-push gate parity, run `apex-ray gate pre-push`; blocking findings and critical partial coverage are printed to stdout and the full report is written under `.apex-ray/reports/`.
 - Do not bypass the configured pre-push gate by default. If bypassing is unavoidable, explain why and name the equivalent checks or review already run.
 - Use `--no-llm` or `.apex-ray/config.local.yml` when the configured local provider is unavailable or LLM cost is not appropriate.
@@ -29,4 +29,4 @@ Prefer writing generated review artifacts under `.apex-ray/reports/`. Keep Markd
 
 ## Boundaries
 
-Do not treat Apex Ray as a replacement for tests, linters, typecheck, CI, dependency scanners, SAST, or human review. Do not commit `.apex-ray/config.local.yml`, `.apex-ray/cache/`, `.apex-ray/telemetry/`, `.apex-ray/reports/`, eval run directories, or generated `review.*` files unless the team intentionally curates a specific artifact.
+Do not treat Apex Ray as a replacement for tests, linters, typecheck, CI, dependency scanners, SAST, or human review. Do not commit `.apex-ray/config.local.yml`, `.apex-ray/cache/`, `.apex-ray/telemetry/`, `.apex-ray/reports/`, eval run directories, generated review artifacts, or local provider, model, API, or cost settings unless the team intentionally curates a specific artifact.

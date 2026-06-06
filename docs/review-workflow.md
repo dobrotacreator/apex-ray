@@ -12,9 +12,9 @@ Use one target per review run:
 | Staged changes | `apex-ray review --staged` | You want review to match the next commit. |
 | Branch diff | `apex-ray review --base main` | You want PR-like review of `main...HEAD`. |
 | Supplied diff file | `apex-ray review --diff change.diff` | You captured a patch outside the current worktree. |
-| Partial report continuation | `apex-ray review --continue-from review.json` | You need to review skipped or residual context packs. |
+| Partial report continuation | `apex-ray review --continue-from .apex-ray/reports/review.json` | You need to review skipped or residual context packs. |
 
-For stable automation, write reports under `.apex-ray/reports/`:
+Reports are written under `.apex-ray/reports/` by default. For stable automation, pass explicit paths:
 
 ```bash
 apex-ray review \

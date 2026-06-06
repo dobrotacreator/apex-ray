@@ -43,7 +43,7 @@ apex-ray doctor
 git status --short
 ```
 
-Inspect and commit the generated setup before reviewing application changes. `apex-ray init` creates shared config and review-learning directories under `.apex-ray/`, updates ignore rules for generated artifacts, and can install a pre-push gate through Lefthook or a git hook.
+Inspect and commit the generated setup before reviewing application changes. `apex-ray init` creates shared config and review-learning directories under `.apex-ray/`, writes `.apex-ray/.gitignore` for local generated artifacts, and can install a pre-push gate through Lefthook or a git hook.
 
 Generated shared files are meant to be reviewed like normal project configuration. Machine-specific settings belong in `.apex-ray/config.local.yml`, which is ignored by default.
 
@@ -54,9 +54,7 @@ Run a no-LLM review first. This verifies diff parsing, project discovery, analyz
 ```bash
 apex-ray review \
   --worktree \
-  --no-llm \
-  --output .apex-ray/reports/review.md \
-  --json .apex-ray/reports/review.json
+  --no-llm
 ```
 
 Use `--staged` to review only staged changes, `--base main` to review `main...HEAD`, or `--diff path/to/change.diff` for a supplied unified diff.

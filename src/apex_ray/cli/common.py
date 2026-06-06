@@ -2,6 +2,8 @@ from pathlib import Path
 
 import typer
 
+from apex_ray.config import ensure_apex_gitignore
+
 
 def ensure_distinct_outputs(output: Path, json_output: Path, html_output: Path | None = None) -> None:
     outputs = [("Markdown", output), ("JSON", json_output)]
@@ -14,3 +16,11 @@ def ensure_distinct_outputs(output: Path, json_output: Path, html_output: Path |
         if existing:
             raise typer.BadParameter(f"{existing} and {label} output paths must be different.")
         seen[resolved] = label
+
+
+def ensure_apex_ignore_for_outputs(root: Path, *paths: Path | None) -> None:
+    apex_dir = (root / ".apex-ray").resolve()
+    for path in paths:
+        if path is not None and path.resolve().is_relative_to(apex_dir):
+            ensure_apex_gitignore(root)
+            return

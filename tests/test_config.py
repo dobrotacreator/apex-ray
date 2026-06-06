@@ -187,8 +187,7 @@ def test_init_project_creates_team_setup_files(tmp_path: Path) -> None:
     assert (tmp_path / ".apex-ray" / "memory").is_dir()
     assert (tmp_path / ".apex-ray" / "reports").is_dir()
     assert "config.local.yml" in (tmp_path / ".apex-ray" / ".gitignore").read_text(encoding="utf-8")
-    assert ".apex-ray/reports/" in (tmp_path / ".gitignore").read_text(encoding="utf-8")
-    assert ".codex/config.local.toml" in (tmp_path / ".gitignore").read_text(encoding="utf-8")
+    assert not (tmp_path / ".gitignore").exists()
     assert "apex-ray-review" in (tmp_path / "lefthook.yml").read_text(encoding="utf-8")
     assert (tmp_path / "AGENTS.md").exists()
     assert (tmp_path / ".claude" / "CLAUDE.md").exists()
@@ -221,7 +220,7 @@ def test_init_project_creates_team_setup_files(tmp_path: Path) -> None:
 
 
 def test_init_project_appends_to_existing_agent_files(tmp_path: Path) -> None:
-    init_project(tmp_path)
+    init_project(tmp_path, update_gitignore=True)
     agents = tmp_path / "AGENTS.md"
     agents.write_text("custom\n", encoding="utf-8")
 
@@ -313,17 +312,12 @@ def test_init_project_does_not_use_feature_branch_as_default_base(tmp_path: Path
     assert "base: feature/review" not in (tmp_path / ".apex-ray" / "config.yml").read_text(encoding="utf-8")
 
 
-def test_init_project_updates_existing_apex_gitignore_block(tmp_path: Path) -> None:
+def test_init_project_leaves_existing_root_gitignore_untouched(tmp_path: Path) -> None:
     (tmp_path / ".gitignore").write_text("# Apex Ray\n.apex-ray/reports/\n", encoding="utf-8")
 
     init_project(tmp_path)
 
-    text = (tmp_path / ".gitignore").read_text(encoding="utf-8")
-    assert "# Apex Ray start" in text
-    assert "# Apex Ray end" in text
-    assert ".apex-ray/reports/" in text
-    assert ".codex/config.local.toml" in text
-    assert ".claude/settings.local.json" in text
+    assert (tmp_path / ".gitignore").read_text(encoding="utf-8") == "# Apex Ray\n.apex-ray/reports/\n"
 
 
 def test_init_project_can_skip_agent_skill_files(tmp_path: Path) -> None:

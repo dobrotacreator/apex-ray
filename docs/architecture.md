@@ -187,7 +187,7 @@ It creates or updates:
 - `AGENTS.md` / Claude agent files: short pointers for coding agents.
 - `.apex-ray/skills/apex-ray/SKILL.md` for review workflows and `.apex-ray/skills/apex-ray-improve/SKILL.md` for post-merge learning recommendations, plus Codex/Claude skill copies when enabled.
 
-The init command is intentionally conservative: shared config is commit-friendly, local provider/model/cost settings go into `.apex-ray/config.local.yml`, and generated outputs stay ignored.
+The init command is intentionally conservative: shared config is commit-friendly, local provider/model/cost settings go into `.apex-ray/config.local.yml`, generated Apex Ray outputs stay ignored by `.apex-ray/.gitignore`, and the root `.gitignore` is left untouched.
 
 ## Pre-Push Gate Flow
 

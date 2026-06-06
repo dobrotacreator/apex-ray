@@ -5,7 +5,7 @@ from typing import Annotated
 import typer
 
 from apex_ray import git
-from apex_ray.cli.common import ensure_distinct_outputs
+from apex_ray.cli.common import ensure_apex_ignore_for_outputs, ensure_distinct_outputs
 from apex_ray.config import ConfigError, load_config
 from apex_ray.gate_retry import (
     CarriedFinding,
@@ -197,6 +197,7 @@ def pre_push(
         markdown_text = _prepend_retry_summary_markdown(markdown_text, retry_summary, decision)
     json_text = report.model_dump_json(indent=2)
     html_text = render_html(report) if html_output is not None else None
+    ensure_apex_ignore_for_outputs(root, output, json_output, html_output)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(markdown_text, encoding="utf-8")
     json_output.parent.mkdir(parents=True, exist_ok=True)

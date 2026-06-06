@@ -73,7 +73,7 @@ Useful commands:
 
 ```bash
 apex-ray memory lint
-apex-ray memory suggest --from-report review.json --output memory-suggestions.md
+apex-ray memory suggest --from-report .apex-ray/reports/review.json --output memory-suggestions.md
 ```
 
 `memory suggest` uses approved verifier findings by default. Add `--include-unverified` only when you are manually triaging an unverified report.
