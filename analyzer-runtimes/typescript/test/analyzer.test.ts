@@ -150,3 +150,46 @@ test("analyzer library API matches the CLI JSON contract", () => {
     fs.rmSync(repo, { recursive: true, force: true });
   }
 });
+
+test("analyzer returns partial JSON when the internal budget is exhausted", () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "apex-ray-ts-analyzer-budget-"));
+  try {
+    writeFile(
+      repo,
+      "tsconfig.json",
+      JSON.stringify({
+        compilerOptions: {
+          target: "ES2022",
+          module: "NodeNext",
+          moduleResolution: "NodeNext",
+          strict: true,
+        },
+        include: ["src/**/*.ts"],
+      }),
+    );
+    writeFile(repo, "src/first.ts", "export function first(): number {\n  return 1;\n}\n");
+    writeFile(repo, "src/second.ts", "export function second(): number {\n  return 2;\n}\n");
+
+    const result = runAnalyzer(repo, [
+      "src/first.ts",
+      "src/second.ts",
+      "--range",
+      "src/first.ts:1-3",
+      "--range",
+      "src/second.ts:1-3",
+      "--analysis-time-budget-ms",
+      "0",
+      "--no-index-cache",
+    ]);
+
+    assert.equal(result.partial, true);
+    assert.deepEqual(result.files, []);
+    assert.deepEqual(result.failedFiles, ["src/first.ts", "src/second.ts"]);
+    assert.equal(result.shardFailures.length, 1);
+    assert.equal(result.shardFailures[0].status, "timeout");
+    assert.deepEqual(result.shardFailures[0].files, ["src/first.ts", "src/second.ts"]);
+    assert.ok(result.warnings.some((warning) => warning.includes("internal budget exhausted")));
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
+});

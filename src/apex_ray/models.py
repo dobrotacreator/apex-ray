@@ -259,7 +259,7 @@ class AnalyzerConfig(StrictApexModel):
     changed_file_shard_size: int = Field(default=40, gt=0)
     adaptive_sharding: bool = True
     large_change_file_threshold: int = Field(default=20, gt=0)
-    large_change_shard_size: int = Field(default=8, gt=0)
+    large_change_shard_size: int = Field(default=4, gt=0)
     script_path: str | None = None
 
 

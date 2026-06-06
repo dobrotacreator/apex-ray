@@ -69,6 +69,17 @@ export interface AnalyzerResult {
   files: FileAnalysis[];
   warnings: string[];
   indexCache: RepoIndexCacheStats | null;
+  partial: boolean;
+  failedFiles: string[];
+  shardFailures: AnalyzerShardFailure[];
+}
+
+export interface AnalyzerShardFailure {
+  index: number;
+  total: number;
+  files: string[];
+  reason: string;
+  status: "failed" | "timeout" | "skipped";
 }
 
 export interface Args {
@@ -80,6 +91,7 @@ export interface Args {
   indexCacheDir: string | null;
   refreshIndexCache: boolean;
   largeChangeSetSize: number | null;
+  analysisTimeBudgetMs: number | null;
 }
 
 export interface DeletedLine {

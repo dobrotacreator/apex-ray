@@ -17,6 +17,7 @@ export function parseArgs(argv: string[]): Args {
   let indexCacheDir: string | null = null;
   let refreshIndexCache = false;
   let largeChangeSetSize: number | null = null;
+  let analysisTimeBudgetMs: number | null = null;
 
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -52,6 +53,9 @@ export function parseArgs(argv: string[]): Args {
     } else if (arg === "--large-change-set-size") {
       const value = Number(argv[++i] ?? "0");
       largeChangeSetSize = Number.isFinite(value) && value > 0 ? value : null;
+    } else if (arg === "--analysis-time-budget-ms") {
+      const value = Number(argv[++i] ?? "0");
+      analysisTimeBudgetMs = Number.isFinite(value) && value >= 0 ? value : null;
     }
   }
 
@@ -68,6 +72,7 @@ export function parseArgs(argv: string[]): Args {
     indexCacheDir,
     refreshIndexCache,
     largeChangeSetSize,
+    analysisTimeBudgetMs,
   };
 }
 

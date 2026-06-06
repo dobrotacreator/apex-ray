@@ -119,14 +119,15 @@ def _run_typescript_analyzer_shard(
     timeout_seconds: float | None = None,
     large_change_set_size: int | None = None,
 ) -> AnalyzerResult:
+    actual_timeout = config.timeout_seconds if timeout_seconds is None else max(0.001, timeout_seconds)
     args = _typescript_analyzer_args(
         repo_root,
         script,
         changed_files,
         config,
         large_change_set_size=large_change_set_size,
+        analysis_time_budget_ms=_analysis_time_budget_ms(actual_timeout),
     )
-    actual_timeout = config.timeout_seconds if timeout_seconds is None else max(0.001, timeout_seconds)
     try:
         proc = _run_analyzer_process(
             args,
@@ -151,11 +152,14 @@ def _typescript_analyzer_args(
     config: AnalyzerConfig,
     *,
     large_change_set_size: int | None = None,
+    analysis_time_budget_ms: int | None = None,
 ) -> list[str]:
     args = ["node", str(script), "--repo", str(repo_root), "--changed"]
     args.extend(file.new_path for file in changed_files if file.new_path)
     if large_change_set_size is not None:
         args.extend(["--large-change-set-size", str(large_change_set_size)])
+    if analysis_time_budget_ms is not None:
+        args.extend(["--analysis-time-budget-ms", str(analysis_time_budget_ms)])
     if not config.index_cache_enabled:
         args.append("--no-index-cache")
     if config.index_cache_dir:
@@ -261,6 +265,12 @@ def _format_seconds(seconds: float) -> str:
     if abs(seconds - rounded) < 0.05:
         return f"{rounded}s"
     return f"{seconds:.1f}s"
+
+
+def _analysis_time_budget_ms(timeout_seconds: float) -> int:
+    margin_seconds = min(5.0, max(0.25, timeout_seconds * 0.05))
+    budget_seconds = max(0.001, timeout_seconds - margin_seconds)
+    return max(1, round(budget_seconds * 1000))
 
 
 def _shard_failure(

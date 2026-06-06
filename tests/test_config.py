@@ -27,7 +27,7 @@ def test_init_config_creates_default_file(tmp_path: Path) -> None:
     assert config.analyzer.index_cache_dir is None
     assert config.analyzer.changed_file_shard_size == 40
     assert config.analyzer.adaptive_sharding is True
-    assert config.analyzer.large_change_shard_size == 8
+    assert config.analyzer.large_change_shard_size == 4
     assert config.context.max_pack_chars == 40000
     assert config.context.max_reference_snippets == 8
     assert config.rule_paths == [".apex-ray/rules"]
