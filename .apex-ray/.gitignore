@@ -1,0 +1,8 @@
+config.local.yml
+cache/
+telemetry/
+reports/
+eval/telemetry/
+eval/runs/
+evals/runs/
+*.tmp
