@@ -69,6 +69,8 @@ APEX_RAY_GITIGNORE_LINES = (
     "*.tmp",
 )
 APEX_RAY_GITIGNORE_TEXT = "\n".join(APEX_RAY_GITIGNORE_LINES) + "\n"
+# Codex discovers repository-scoped skills from .agents/skills; .codex is local Codex configuration.
+CODEX_REPO_SKILL_DIR = ".agents"
 
 APEX_RAY_AGENT_BLOCK_START = "<!-- APEX_RAY_START -->"
 APEX_RAY_AGENT_BLOCK_END = "<!-- APEX_RAY_END -->"
@@ -617,12 +619,12 @@ def _write_agent_skill(
     if _write_if_missing_or_overwrite(canonical, skill_text, overwrite=overwrite):
         written.append(canonical)
     if agent_files in {"codex", "both"} and _write_skill_alias(
-        root / ".agents" / "skills" / skill_name / "SKILL.md",
+        _codex_skill_alias_path(root, skill_name),
         canonical,
         skill_text,
         overwrite=overwrite,
     ):
-        written.append(root / ".agents" / "skills" / skill_name / "SKILL.md")
+        written.append(_codex_skill_alias_path(root, skill_name))
     if agent_files in {"claude", "both"} and _write_skill_alias(
         root / ".claude" / "skills" / skill_name / "SKILL.md",
         canonical,
@@ -631,6 +633,10 @@ def _write_agent_skill(
     ):
         written.append(root / ".claude" / "skills" / skill_name / "SKILL.md")
     return written
+
+
+def _codex_skill_alias_path(root: Path, skill_name: str) -> Path:
+    return root / CODEX_REPO_SKILL_DIR / "skills" / skill_name / "SKILL.md"
 
 
 def _write_skill_alias(path: Path, target: Path, fallback_text: str, *, overwrite: bool) -> bool:

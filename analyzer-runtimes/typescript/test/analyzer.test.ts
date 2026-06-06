@@ -250,3 +250,47 @@ test("analyzer marks partial when budget expires after metadata collection", () 
     fs.rmSync(repo, { recursive: true, force: true });
   }
 });
+
+test("analyzer marks partial when budget expires after collecting a file with no changed symbols", () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "apex-ray-ts-analyzer-empty-symbol-budget-"));
+  const originalNow = Date.now;
+  try {
+    writeFile(
+      repo,
+      "tsconfig.json",
+      JSON.stringify({
+        compilerOptions: {
+          target: "ES2022",
+          module: "NodeNext",
+          moduleResolution: "NodeNext",
+          strict: true,
+        },
+        include: ["src/**/*.ts"],
+      }),
+    );
+    writeFile(repo, "src/notes.ts", "export function stable(): number {\n  return 1;\n}\n\n// changed comment\n");
+
+    let nowCalls = 0;
+    Date.now = () => {
+      nowCalls += 1;
+      return nowCalls <= 2 ? 0 : 1;
+    };
+
+    const result = runAnalyzerInProcess(repo, [
+      "src/notes.ts",
+      "--range",
+      "src/notes.ts:5-5",
+      "--analysis-time-budget-ms",
+      "1",
+      "--no-index-cache",
+    ]);
+
+    assert.equal(result.partial, true);
+    assert.deepEqual(result.files, []);
+    assert.deepEqual(result.failedFiles, ["src/notes.ts"]);
+    assert.ok(result.warnings.some((warning) => warning.includes("internal budget exhausted")));
+  } finally {
+    Date.now = originalNow;
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
+});

@@ -116,6 +116,10 @@ export function analyze(args: Args): AnalyzerResult {
     ]);
     const isChangedTestFile = isTestPath(changedFile.toLowerCase());
     let completedFile = true;
+    if (budget.exhausted()) {
+      markBudgetExhausted(args.changed.slice(changedIndex));
+      break;
+    }
 
     for (let symbolIndex = 0; symbolIndex < changedCollectedSymbols.length; symbolIndex += 1) {
       if (budget.exhausted()) {
@@ -207,13 +211,22 @@ export function analyze(args: Args): AnalyzerResult {
     }
 
     const changedReferences = changedCollectedSymbols.flatMap((symbol) => symbol.analysis.references);
+    if (budget.exhausted()) {
+      markBudgetExhausted(args.changed.slice(changedIndex));
+      break;
+    }
+    const relatedTests = findRelatedTests(args.repo, repoIndex, changedFile, changedReferences);
+    if (budget.exhausted()) {
+      markBudgetExhausted(args.changed.slice(changedIndex));
+      break;
+    }
     files.push({
       path: changedFile,
       tsconfigPath: context.tsconfigPath,
       symbols,
       imports,
       exports,
-      relatedTests: findRelatedTests(args.repo, repoIndex, changedFile, changedReferences),
+      relatedTests,
       changedSymbols: changedCollectedSymbols.map((symbol) => symbol.analysis),
     });
   }

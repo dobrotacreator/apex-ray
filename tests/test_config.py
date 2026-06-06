@@ -228,6 +228,17 @@ def test_init_project_creates_team_setup_files(tmp_path: Path) -> None:
     assert "Greptile comments" in improve_skill_text
 
 
+def test_init_project_codex_agent_files_use_agents_skill_directory(tmp_path: Path) -> None:
+    init_project(tmp_path, hooks="none", agent_files="codex")
+
+    assert (tmp_path / "AGENTS.md").exists()
+    assert (tmp_path / ".apex-ray" / "skills" / "apex-ray" / "SKILL.md").exists()
+    assert (tmp_path / ".agents" / "skills" / "apex-ray" / "SKILL.md").exists()
+    assert (tmp_path / ".agents" / "skills" / "apex-ray-improve" / "SKILL.md").exists()
+    assert not (tmp_path / ".codex").exists()
+    assert not (tmp_path / ".claude").exists()
+
+
 def test_init_project_deprecates_update_gitignore_without_touching_root(tmp_path: Path) -> None:
     with pytest.warns(UserWarning, match="root .gitignore"):
         init_project(tmp_path, update_gitignore=True, hooks="none", agent_files="none")
@@ -254,12 +265,14 @@ def test_init_project_scoped_gitignore_covers_apex_local_artifacts(tmp_path: Pat
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("local\n", encoding="utf-8")
 
-        ignored = git.run_git(["check-ignore", relative_path], cwd=tmp_path, check=False)
+        ignored = git.run_git(["check-ignore", "-v", relative_path], cwd=tmp_path, check=False)
 
         assert ignored.returncode == 0, relative_path
+        assert ".apex-ray/.gitignore" in ignored.stdout, relative_path
 
     assert "review.md" not in apex_gitignore_text
     assert "review.json" not in apex_gitignore_text
+    assert git.run_git(["check-ignore", "review.json"], cwd=tmp_path, check=False).returncode == 1
 
 
 def test_init_project_extends_existing_apex_gitignore(tmp_path: Path) -> None:
