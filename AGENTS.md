@@ -47,26 +47,6 @@ Run the smallest relevant check for the changed surface:
 
 Before saying work is complete, report the verification that actually ran.
 
-## Apex Ray Review Aid
-
-Use Apex Ray itself only as an additional local review signal; it does not replace tests, linters, typecheck, security scanners, or human review.
-
-```bash
-uv run apex-ray review --worktree --no-llm --json review.json --output review.md
-uv run apex-ray review --worktree --llm --json review.json --output review.md
-uv run apex-ray review --continue-from review.json --llm
-```
-
-## Do Not Commit
-
-- `.apex-ray/config.local.yml`
-- `.apex-ray/cache/`
-- `.apex-ray/telemetry/`
-- `.apex-ray/reports/`
-- `.apex-ray/eval*/runs/`
-- generated `review.*` reports
-- local provider, model, API, or cost settings
-
 ## Git Rules
 
 - Do not commit unless explicitly asked.

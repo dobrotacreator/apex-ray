@@ -36,3 +36,17 @@ docs/specs/
 analyzer-runtimes/typescript/node_modules/
 analyzer-runtimes/typescript/dist/
 analyzer-runtimes/typescript/dist-test/
+# Apex Ray start
+.apex-ray/config.local.yml
+.apex-ray/cache/
+.apex-ray/telemetry/
+.apex-ray/reports/
+.apex-ray/eval/telemetry/
+.apex-ray/eval/runs/
+.apex-ray/evals/runs/
+.claude/settings.local.json
+.codex/config.local.toml
+/review*.md
+/review*.json
+/review*.html
+# Apex Ray end
