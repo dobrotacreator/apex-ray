@@ -199,15 +199,19 @@ def test_init_project_creates_team_setup_files(tmp_path: Path) -> None:
     assert (tmp_path / ".claude" / "skills" / "apex-ray" / "SKILL.md").exists()
     assert (tmp_path / ".claude" / "skills" / "apex-ray-improve" / "SKILL.md").exists()
     lefthook_text = (tmp_path / "lefthook.yml").read_text(encoding="utf-8")
+    assert "no_tty: true" in lefthook_text
+    assert "follow: true" in lefthook_text
     assert "apex-ray gate pre-push" in lefthook_text
     assert "--base" not in lefthook_text
     assert "--no-llm" not in lefthook_text
     agents_text = (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
     assert "APEX_RAY_START" in agents_text
+    assert "Do not bypass the configured pre-push gate by default" in agents_text
     assert "$apex-ray" in agents_text
     assert "$apex-ray-improve" in agents_text
     skill_text = (tmp_path / ".apex-ray" / "skills" / "apex-ray" / "SKILL.md").read_text(encoding="utf-8")
     assert "apex-ray review --continue-from .apex-ray/reports/review.json" in skill_text
+    assert "Do not bypass the configured pre-push gate by default" in skill_text
     assert "Use `--no-llm` or `.apex-ray/config.local.yml`" in skill_text
     improve_skill_text = (tmp_path / ".apex-ray" / "skills" / "apex-ray-improve" / "SKILL.md").read_text(
         encoding="utf-8"

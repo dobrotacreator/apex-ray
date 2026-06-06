@@ -92,13 +92,13 @@ APEX_RAY_AGENT_BLOCK_END = "<!-- APEX_RAY_END -->"
 APEX_RAY_AGENT_BLOCK = f"""{APEX_RAY_AGENT_BLOCK_START}
 ## Apex Ray
 
-This project uses Apex Ray for local diff-aware review. Use the `$apex-ray` skill for review, gate, report, telemetry, and eval workflows. Use `$apex-ray-improve` after merged PRs or review feedback to produce recommendation-only improvements for Apex Ray memory, rules, eval labels, telemetry, and config. Keep `.apex-ray/config.local.yml`, caches, telemetry, reports, and eval runs out of commits.
+This project uses Apex Ray for local diff-aware review. Use the `$apex-ray` skill for review, gate, report, telemetry, and eval workflows. Do not bypass the configured pre-push gate by default; if bypassing is unavoidable, explain why and name the equivalent checks or review already run. Use `$apex-ray-improve` after merged PRs or review feedback to produce recommendation-only improvements for Apex Ray memory, rules, eval labels, telemetry, and config. Keep `.apex-ray/config.local.yml`, caches, telemetry, reports, and eval runs out of commits.
 {APEX_RAY_AGENT_BLOCK_END}
 """
 APEX_RAY_AGENT_BLOCK_NO_SKILL = f"""{APEX_RAY_AGENT_BLOCK_START}
 ## Apex Ray
 
-This project uses Apex Ray for local diff-aware review. Run `apex-ray doctor` to check setup, `apex-ray review --output .apex-ray/reports/review.md --json .apex-ray/reports/review.json` for local reports, and `apex-ray gate pre-push` for the hook-equivalent gate. Keep `.apex-ray/config.local.yml`, caches, telemetry, reports, and eval runs out of commits.
+This project uses Apex Ray for local diff-aware review. Run `apex-ray doctor` to check setup, `apex-ray review --output .apex-ray/reports/review.md --json .apex-ray/reports/review.json` for local reports, and `apex-ray gate pre-push` for the hook-equivalent gate. Do not bypass the configured pre-push gate by default; if bypassing is unavoidable, explain why and name the equivalent checks or review already run. Keep `.apex-ray/config.local.yml`, caches, telemetry, reports, and eval runs out of commits.
 {APEX_RAY_AGENT_BLOCK_END}
 """
 
@@ -118,6 +118,7 @@ Apex Ray is the project's local diff-aware AI review tool. Use it to create dete
 - Run `apex-ray doctor` when setup, config, provider, or analyzer state is uncertain.
 - For deterministic local review, run `apex-ray review --no-llm --output .apex-ray/reports/review.md --json .apex-ray/reports/review.json`.
 - For pre-push gate parity, run `apex-ray gate pre-push`; blocking findings and critical partial coverage are printed to stdout and the full report is written under `.apex-ray/reports/`.
+- Do not bypass the configured pre-push gate by default. If bypassing is unavoidable, explain why and name the equivalent checks or review already run.
 - Use `--no-llm` or `.apex-ray/config.local.yml` when the configured local provider is unavailable or LLM cost is not appropriate.
 - If a report has partial coverage, continue unreviewed work with `apex-ray review --continue-from .apex-ray/reports/review.json --residual-priority p0 --llm` or review a specific skipped pack with `--only-pack`.
 - Use `.apex-ray/config.yml` for shared team policy and `.apex-ray/config.local.yml` for personal provider/model/cost overrides.
@@ -471,9 +472,11 @@ def _write_lefthook_hook(path: Path, *, overwrite: bool) -> bool:
         data = {}
     if not isinstance(data, dict):
         raise ConfigError(f"Invalid Lefthook config in {path}: expected a mapping")
+    data.setdefault("no_tty", True)
     pre_push = data.setdefault("pre-push", {})
     if not isinstance(pre_push, dict):
         raise ConfigError(f"Invalid Lefthook config in {path}: pre-push must be a mapping")
+    pre_push.setdefault("follow", True)
     commands = pre_push.setdefault("commands", {})
     if not isinstance(commands, dict):
         raise ConfigError(f"Invalid Lefthook config in {path}: pre-push.commands must be a mapping")

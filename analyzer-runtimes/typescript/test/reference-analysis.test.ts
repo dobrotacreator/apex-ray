@@ -11,6 +11,7 @@ import {
   collectImplementedMemberUsageReferences,
   collectReferenceConsumerImpact,
   collectReferences,
+  ReferenceScanCancelled,
 } from "../dist/references/analysis.js";
 import { collectSymbols } from "../dist/symbols/collection.js";
 import { writeFile } from "./helpers.js";
@@ -115,6 +116,73 @@ test("reference analysis captures direct refs, implemented members, callees, and
     const consumerImpact = collectReferenceConsumerImpact(program, checker, routeTarget, repo, 20);
     assert.ok(consumerImpact.references.some((reference) => reference.file === "src/app.ts" && reference.text.includes("createRouter()")));
     assert.ok(consumerImpact.callees.some((reference) => reference.file === "src/routes.ts" && reference.text.includes("createRouter")));
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("reference analysis keeps semantic references when raw text prefilters are unsafe", () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "apex-ray-ts-reference-prefilter-"));
+  try {
+    const defaultsPath = path.join(repo, "src/defaults.ts");
+    const defaultConsumerPath = path.join(repo, "src/default-consumer.ts");
+    const escapedPath = path.join(repo, "src/escaped.ts");
+    writeFile(
+      repo,
+      "tsconfig.json",
+      JSON.stringify({
+        compilerOptions: {
+          target: "ES2022",
+          module: "NodeNext",
+          moduleResolution: "NodeNext",
+          strict: true,
+        },
+        include: ["src/**/*.ts"],
+      }),
+    );
+    writeFile(repo, "src/defaults.ts", "export default function checkout(): number {\n  return 1;\n}\n");
+    writeFile(repo, "src/default-consumer.ts", "import run from './defaults.js';\nexport const value = run();\n");
+    writeFile(
+      repo,
+      "src/escaped.ts",
+      [
+        "export class Cart {",
+        "  checkout(): number {",
+        "    return 1;",
+        "  }",
+        "}",
+        "",
+        "const cart = new Cart();",
+        "export const escapedValue = cart.\\u0063heckout();",
+      ].join("\n"),
+    );
+
+    const program = ts.createProgram({
+      rootNames: [defaultsPath, defaultConsumerPath, escapedPath],
+      options: {
+        target: ts.ScriptTarget.ES2022,
+        module: ts.ModuleKind.NodeNext,
+        moduleResolution: ts.ModuleResolutionKind.NodeNext,
+        strict: true,
+      },
+    });
+    const checker = program.getTypeChecker();
+    const defaultsSource = program.getSourceFile(defaultsPath);
+    const escapedSource = program.getSourceFile(escapedPath);
+    assert.ok(defaultsSource);
+    assert.ok(escapedSource);
+
+    const defaultTarget = collectSymbols(defaultsSource, checker).find((symbol) => symbol.analysis.name === "checkout");
+    const methodTarget = collectSymbols(escapedSource, checker).find((symbol) => symbol.analysis.name === "checkout");
+    assert.ok(defaultTarget);
+    assert.ok(methodTarget);
+
+    const defaultRefs = collectReferences(program, checker, defaultTarget, repo, 20);
+    const escapedRefs = collectReferences(program, checker, methodTarget, repo, 20);
+
+    assert.ok(defaultRefs.some((reference) => reference.file === "src/default-consumer.ts" && reference.text.includes("run()")));
+    assert.ok(escapedRefs.some((reference) => reference.file === "src/escaped.ts" && reference.text.includes("\\u0063heckout")));
+    assert.throws(() => collectReferences(program, checker, defaultTarget, repo, 20, () => true), ReferenceScanCancelled);
   } finally {
     fs.rmSync(repo, { recursive: true, force: true });
   }

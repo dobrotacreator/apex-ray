@@ -7,6 +7,7 @@ import {
   collectImplementedMemberUsageReferences,
   collectReferenceConsumerImpact,
   collectReferences,
+  ReferenceScanCancelled,
 } from "./references/analysis.js";
 import { mergeReferences } from "./references/merge.js";
 import { buildRepoIndex } from "./indexes/repo.js";
@@ -136,13 +137,13 @@ export function analyze(args: Args): AnalyzerResult {
       const referenceScan =
         cachedReferenceScan ??
         collectReferenceScan(program, checker, symbol, args.repo, symbol.analysis.name.includes(":"), budget.exhausted);
-      if (referenceScanCacheKey && !cachedReferenceScan) {
-        syntheticReferenceScanCache.set(referenceScanCacheKey, referenceScan);
-      }
-      if (budget.exhausted()) {
+      if (!referenceScan.completed || budget.exhausted()) {
         markBudgetExhausted(args.changed.slice(changedIndex));
         completedFile = false;
         break;
+      }
+      if (referenceScanCacheKey && !cachedReferenceScan) {
+        syntheticReferenceScanCache.set(referenceScanCacheKey, referenceScan);
       }
 
       symbol.analysis.references = mergeReferences(
@@ -163,13 +164,18 @@ export function analyze(args: Args): AnalyzerResult {
         break;
       }
 
-      symbol.analysis.callees = mergeReferences(
-        [
-          ...collectCallees(checker, symbol, args.repo, REFERENCE_COLLECTION_LIMIT, budget.exhausted),
-          ...referenceScan.consumerImpact.callees,
-        ],
-        REFERENCE_LIMIT,
-      );
+      let calleeReferences: Reference[];
+      try {
+        calleeReferences = collectCallees(checker, symbol, args.repo, REFERENCE_COLLECTION_LIMIT, budget.exhausted);
+      } catch (error) {
+        if (error instanceof ReferenceScanCancelled) {
+          markBudgetExhausted(args.changed.slice(changedIndex));
+          completedFile = false;
+          break;
+        }
+        throw error;
+      }
+      symbol.analysis.callees = mergeReferences([...calleeReferences, ...referenceScan.consumerImpact.callees], REFERENCE_LIMIT);
       if (budget.exhausted()) {
         markBudgetExhausted(args.changed.slice(changedIndex));
         completedFile = false;
@@ -227,6 +233,7 @@ interface ReferenceScanResult {
     references: Reference[];
     callees: Reference[];
   };
+  completed: boolean;
 }
 
 function collectReferenceScan(
@@ -237,22 +244,36 @@ function collectReferenceScan(
   includeConsumerImpact: boolean,
   shouldStop: () => boolean = () => false,
 ): ReferenceScanResult {
-  const directReferences = collectReferences(program, checker, symbol, repo, REFERENCE_COLLECTION_LIMIT, shouldStop);
-  if (!shouldStop()) {
-    directReferences.push(
-      ...collectImplementedMemberUsageReferences(program, checker, symbol, repo, REFERENCE_COLLECTION_LIMIT, shouldStop),
-    );
+  try {
+    const directReferences = collectReferences(program, checker, symbol, repo, REFERENCE_COLLECTION_LIMIT, shouldStop);
+    if (!shouldStop()) {
+      directReferences.push(
+        ...collectImplementedMemberUsageReferences(program, checker, symbol, repo, REFERENCE_COLLECTION_LIMIT, shouldStop),
+      );
+    }
+    const consumerImpact = includeConsumerImpact && !shouldStop()
+      ? collectReferenceConsumerImpact(program, checker, symbol, repo, REFERENCE_COLLECTION_LIMIT, shouldStop)
+      : { references: [], callees: [] };
+    return { directReferences, consumerImpact, completed: !shouldStop() };
+  } catch (error) {
+    if (error instanceof ReferenceScanCancelled) {
+      return { directReferences: [], consumerImpact: { references: [], callees: [] }, completed: false };
+    }
+    throw error;
   }
-  const consumerImpact = includeConsumerImpact && !shouldStop()
-    ? collectReferenceConsumerImpact(program, checker, symbol, repo, REFERENCE_COLLECTION_LIMIT, shouldStop)
-    : { references: [], callees: [] };
-  return { directReferences, consumerImpact };
 }
 
 function syntheticReferenceScanCacheKey(symbol: CollectedSymbol): string | null {
   if (!symbol.analysis.name.includes(":") || !symbol.containerNode || !symbol.tsSymbol) return null;
   const source = symbol.containerNode.getSourceFile();
-  return `${source.fileName}:${symbol.containerNode.getStart(source)}:${symbol.containerNode.getEnd()}`;
+  return [
+    source.fileName,
+    symbol.containerNode.getStart(source),
+    symbol.containerNode.getEnd(),
+    symbol.analysis.name,
+    symbol.analysis.startLine,
+    symbol.analysis.endLine,
+  ].join(":");
 }
 
 function analysisBudget(timeBudgetMs: number | null): { exhausted: () => boolean } {

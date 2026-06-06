@@ -19,6 +19,15 @@ import { isDeclarationNameIdentifier, referenceForNode, referenceKind } from "./
 import type { CollectedSymbol, Reference } from "../types.js";
 import { isInsideRepo, isRepoRelativePath, normalizeRelPath, sourceFileName } from "../utils.js";
 
+type ReferenceSearchText = string | readonly string[] | null;
+
+export class ReferenceScanCancelled extends Error {
+  constructor() {
+    super("Reference scan cancelled");
+    this.name = "ReferenceScanCancelled";
+  }
+}
+
 export function collectReferences(
   program: ts.Program,
   checker: ts.TypeChecker,
@@ -35,7 +44,7 @@ export function collectReferences(
   const targetEnd = excludedNode.getEnd();
   const searchText = referenceSearchText(target);
   for (const source of program.getSourceFiles()) {
-    if (shouldStop()) break;
+    stopIfNeeded(shouldStop);
     if (source.isDeclarationFile) continue;
     if (!isInsideRepo(repo, source.fileName)) continue;
     if (!sourceMayContainReference(source, searchText)) continue;
@@ -45,7 +54,7 @@ export function collectReferences(
   return refs;
 
   function visit(node: ts.Node): void {
-    if (shouldStop()) return;
+    stopIfNeeded(shouldStop);
     if (refs.length >= limit) return;
     if (ts.isIdentifier(node) && isReferenceToTarget(node, checker, target)) {
       const source = node.getSourceFile();
@@ -102,7 +111,7 @@ export function collectImplementedMemberUsageReferences(
   const targetEnd = excludedNode.getEnd();
 
   for (const source of program.getSourceFiles()) {
-    if (shouldStop()) break;
+    stopIfNeeded(shouldStop);
     if (source.isDeclarationFile) continue;
     if (!isInsideRepo(repo, source.fileName)) continue;
     if (!sourceMayContainReference(source, methodName)) continue;
@@ -112,7 +121,7 @@ export function collectImplementedMemberUsageReferences(
   return refs;
 
   function visit(node: ts.Node): void {
-    if (shouldStop()) return;
+    stopIfNeeded(shouldStop);
     if (refs.length >= limit) return;
     if (ts.isIdentifier(node) && node.text === methodName && !isDeclarationNameIdentifier(node)) {
       const source = node.getSourceFile();
@@ -154,19 +163,19 @@ export function collectReferenceConsumerImpact(
   const searchText = referenceSearchText(target);
 
   for (const source of program.getSourceFiles()) {
-    if (shouldStop()) break;
+    stopIfNeeded(shouldStop);
     if (source.isDeclarationFile || !isInsideRepo(repo, source.fileName)) continue;
     if (!sourceMayContainReference(source, searchText)) continue;
     collectConsumerSymbols(source);
   }
 
   for (const symbol of consumerSymbols) {
-    if (shouldStop()) break;
+    stopIfNeeded(shouldStop);
     if (references.length >= limit && callees.length >= limit) break;
     collectConsumerReferences(symbol, null);
   }
   for (const name of consumerNames) {
-    if (shouldStop()) break;
+    stopIfNeeded(shouldStop);
     if (references.length >= limit && callees.length >= limit) break;
     collectConsumerReferences(null, name);
   }
@@ -177,7 +186,7 @@ export function collectReferenceConsumerImpact(
     visit(source);
 
     function visit(node: ts.Node): void {
-      if (shouldStop()) return;
+      stopIfNeeded(shouldStop);
       if (ts.isIdentifier(node) && isReferenceToTarget(node, checker, target)) {
         if (isNodeInsideTarget(node, excludedNode, targetSource)) {
           ts.forEachChild(node, visit);
@@ -200,9 +209,9 @@ export function collectReferenceConsumerImpact(
   }
 
   function collectConsumerReferences(consumerSymbol: ts.Symbol | null, consumerName: string | null): void {
-    const consumerSearchText = consumerName ?? consumerSymbol?.getName() ?? null;
+    const consumerSearchText = consumerSymbol === null ? consumerName : null;
     for (const source of program.getSourceFiles()) {
-      if (shouldStop()) return;
+      stopIfNeeded(shouldStop);
       if (source.isDeclarationFile || !isInsideRepo(repo, source.fileName)) continue;
       if (!sourceMayContainReference(source, consumerSearchText)) continue;
       visit(source);
@@ -210,7 +219,7 @@ export function collectReferenceConsumerImpact(
     }
 
     function visit(node: ts.Node): void {
-      if (shouldStop()) return;
+      stopIfNeeded(shouldStop);
       if (references.length < limit && ts.isIdentifier(node) && !isDeclarationNameIdentifier(node)) {
         const nodeSymbol = canonicalSymbol(checker, checker.getSymbolAtLocation(node));
         const matchesSymbol =
@@ -245,16 +254,26 @@ export function collectReferenceConsumerImpact(
   }
 }
 
-function referenceSearchText(target: CollectedSymbol): string | null {
+function referenceSearchText(target: CollectedSymbol): ReferenceSearchText {
+  if (target.defaultExported) return null;
   const syntheticSeparatorIndex = target.analysis.name.indexOf(":");
   if (syntheticSeparatorIndex > 0) {
-    return target.analysis.name.slice(0, syntheticSeparatorIndex);
+    const containerName = target.analysis.name.slice(0, syntheticSeparatorIndex);
+    const memberName = target.analysis.name.slice(syntheticSeparatorIndex + 1);
+    return [containerName, memberName].filter((value) => value.length > 0);
   }
-  return target.analysis.name || null;
+  return target.analysis.name ? [target.analysis.name] : null;
 }
 
-function sourceMayContainReference(source: ts.SourceFile, searchText: string | null): boolean {
-  return searchText === null || source.text.includes(searchText);
+function sourceMayContainReference(source: ts.SourceFile, searchText: ReferenceSearchText): boolean {
+  const candidates = typeof searchText === "string" ? [searchText] : searchText;
+  return candidates === null || candidates.some((value) => source.text.includes(value)) || source.text.includes("\\u");
+}
+
+function stopIfNeeded(shouldStop: () => boolean): void {
+  if (shouldStop()) {
+    throw new ReferenceScanCancelled();
+  }
 }
 
 export function collectCallees(
@@ -284,7 +303,7 @@ function collectCalleesFromNode(
   visit(node);
 
   function visit(node: ts.Node): void {
-    if (shouldStop()) return;
+    stopIfNeeded(shouldStop);
     if (refs.length >= limit) return;
     if (ts.isCallExpression(node)) {
       const calleeNode = calleeNameNode(node.expression);
