@@ -22,6 +22,8 @@ Committed `.apex-ray/config.yml` may define shared, non-secret team policy: prov
 
 Do not commit personal provider overrides, private model aliases, API keys, credentials, `.apex-ray/config.local.yml`, `.apex-ray/cache/`, `.apex-ray/telemetry/`, `.apex-ray/reports/`, raw eval runs, or generated review reports.
 
+For Apex Ray-owned artifacts, scoped ignore coverage under `.apex-ray/.gitignore` is sufficient. Do not require duplicate root `.gitignore` patterns when tests or `git check-ignore` prove the `.apex-ray/` local artifacts remain ignored. Do not treat Codex or Claude local settings as Apex Ray-owned artifacts; Apex Ray may write repo skills or agent instruction aliases, but it should not manage unrelated `.codex/config.local.toml` or `.claude/settings.local.json` policy.
+
 Fixtures, benchmark cases, docs, telemetry samples, and regression tests derived from private or corporate projects must be anonymized before they enter this repository. Strip company names, product names, customer identifiers, account numbers, real endpoints, tokens, private domain vocabulary, and proprietary object names unless the artifact is already intentionally public.
 
 Prefer minimal synthetic examples that preserve the bug shape without preserving private business data.

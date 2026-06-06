@@ -12,8 +12,6 @@ dist/
 *.egg-info/
 .codegraph/
 .code-review-graph/
-.claude/settings.local.json
-.codex/config.local.toml
 /benchmark*.md
 /benchmark*.json
 docs/specs/

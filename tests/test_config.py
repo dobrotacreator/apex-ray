@@ -200,10 +200,12 @@ def test_init_project_creates_team_setup_files(tmp_path: Path) -> None:
     assert (tmp_path / ".claude" / "CLAUDE.md").exists()
     assert (tmp_path / ".apex-ray" / "skills" / "apex-ray" / "SKILL.md").exists()
     assert (tmp_path / ".apex-ray" / "skills" / "apex-ray-improve" / "SKILL.md").exists()
-    assert (tmp_path / ".codex" / "skills" / "apex-ray" / "SKILL.md").exists()
-    assert (tmp_path / ".codex" / "skills" / "apex-ray-improve" / "SKILL.md").exists()
+    assert (tmp_path / ".agents" / "skills" / "apex-ray" / "SKILL.md").exists()
+    assert (tmp_path / ".agents" / "skills" / "apex-ray-improve" / "SKILL.md").exists()
+    assert not (tmp_path / ".codex").exists()
     assert (tmp_path / ".claude" / "skills" / "apex-ray" / "SKILL.md").exists()
     assert (tmp_path / ".claude" / "skills" / "apex-ray-improve" / "SKILL.md").exists()
+    assert not (tmp_path / ".claude" / ".gitignore").exists()
     lefthook_text = (tmp_path / "lefthook.yml").read_text(encoding="utf-8")
     assert "no_tty: true" in lefthook_text
     assert "follow: true" in lefthook_text

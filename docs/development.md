@@ -84,7 +84,7 @@ scripts/create-worktree.sh <branch-name>
 
 By default this creates `.worktrees/<branch-name>`, checks out the requested branch from `origin/main`, and then runs `scripts/setup-worktree.sh`. Use `--base <ref>`, `--path <path>`, or `--no-setup` when you need a different base, location, or manual setup.
 
-`scripts/setup-worktree.sh` copies ignored machine-local files from the primary checkout when they exist and are missing in the new worktree, including `.apex-ray/config.local.yml`, Codex/Claude local config, `.mcp.json`, and local env files. The script verifies each copied path is ignored in the target worktree before copying, so private provider settings and local review artifacts do not become tracked by accident. It then runs the normal project setup commands (`uv sync --all-groups`, TypeScript analyzer install/build, and Lefthook install when available).
+`scripts/setup-worktree.sh` copies ignored machine-local files from the primary checkout when they exist and are missing in the new worktree, including `.apex-ray/config.local.yml`, `.mcp.json`, and local env files. The script verifies each copied path is ignored in the target worktree before copying, so private provider settings and local review artifacts do not become tracked by accident. It then runs the normal project setup commands (`uv sync --all-groups`, TypeScript analyzer install/build, and Lefthook install when available).
 
 ## Docs Site
 

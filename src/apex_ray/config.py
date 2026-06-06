@@ -610,12 +610,12 @@ def _write_agent_skill(
     if _write_if_missing_or_overwrite(canonical, skill_text, overwrite=overwrite):
         written.append(canonical)
     if agent_files in {"codex", "both"} and _write_skill_alias(
-        root / ".codex" / "skills" / skill_name / "SKILL.md",
+        root / ".agents" / "skills" / skill_name / "SKILL.md",
         canonical,
         skill_text,
         overwrite=overwrite,
     ):
-        written.append(root / ".codex" / "skills" / skill_name / "SKILL.md")
+        written.append(root / ".agents" / "skills" / skill_name / "SKILL.md")
     if agent_files in {"claude", "both"} and _write_skill_alias(
         root / ".claude" / "skills" / skill_name / "SKILL.md",
         canonical,
