@@ -17,6 +17,10 @@ copy_local_file_if_missing() {
   [[ "$primary_root" != "$current_root" ]] || return 0
   [[ -f "$source" ]] || return 0
   [[ ! -e "$target" ]] || return 0
+  if ! git check-ignore -q -- "$relative_path"; then
+    warn "Skipped ${relative_path}; target path is not ignored"
+    return 0
+  fi
 
   mkdir -p "$(dirname "$target")"
   python3 - "$source" "$target" "$primary_root" "$current_root" <<'PY'
