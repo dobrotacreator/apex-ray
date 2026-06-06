@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.7](https://github.com/dobrotacreator/apex-ray/compare/v0.1.6...v0.1.7) (2026-06-06)
+
+
+### Bug Fixes
+
+* load legacy review reports for continuation ([#43](https://github.com/dobrotacreator/apex-ray/issues/43)) ([da3fa61](https://github.com/dobrotacreator/apex-ray/commit/da3fa6118d1284b9411027d8fa9e561e816d011f))
+
 ## [0.1.6](https://github.com/dobrotacreator/apex-ray/compare/v0.1.5...v0.1.6) (2026-06-05)
 
 
