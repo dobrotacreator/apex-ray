@@ -56,5 +56,5 @@ Before saying work is complete, report the verification that actually ran.
 <!-- APEX_RAY_START -->
 ## Apex Ray
 
-This project uses Apex Ray for local diff-aware review. Use the `$apex-ray` skill for review, gate, report, telemetry, and eval workflows. Do not bypass the configured pre-push gate by default; if bypassing is unavoidable, explain why and name the equivalent checks or review already run. Use `$apex-ray-improve` after merged PRs or review feedback to produce recommendation-only improvements for Apex Ray memory, rules, eval labels, telemetry, and config. Keep `.apex-ray/config.local.yml`, caches, telemetry, reports, and eval runs out of commits.
+This project uses Apex Ray for local diff-aware review. Use the `$apex-ray` skill for review, gate, report, telemetry, and eval workflows. Do not bypass the configured pre-push gate by default; if bypassing is unavoidable, explain why and name the equivalent checks or review already run. Use `$apex-ray-improve` after merged PRs or review feedback to produce recommendation-only improvements for Apex Ray memory, rules, eval labels, telemetry, and config. Keep `.apex-ray/config.local.yml`, Apex Ray caches/telemetry/reports/eval runs, generated `review.*` reports, and local provider, model, API, or cost settings out of commits.
 <!-- APEX_RAY_END -->
