@@ -230,10 +230,13 @@ def test_init_project_creates_team_setup_files(tmp_path: Path) -> None:
     agents_text = (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
     assert "APEX_RAY_START" in agents_text
     assert "LLM analysis can be long-running and may appear idle" in agents_text
+    assert "do not proactively run `apex-ray review` or `apex-ray gate pre-push`" in agents_text
+    assert "pre-push incremental retry state remains the source of truth" in agents_text
     assert "Do not bypass the configured pre-push gate by default" in agents_text
     assert "$apex-ray" in agents_text
     assert "$apex-ray-improve" in agents_text
     skill_text = (tmp_path / ".apex-ray" / "skills" / "apex-ray" / "SKILL.md").read_text(encoding="utf-8")
+    assert "do not proactively run `apex-ray review` or `apex-ray gate pre-push`" in skill_text
     assert "apex-ray review --continue-from .apex-ray/reports/review.json" in skill_text
     assert "Do not bypass the configured pre-push gate by default" in skill_text
     assert "Use `--no-llm` or `.apex-ray/config.local.yml`" in skill_text
@@ -447,6 +450,8 @@ def test_init_project_can_skip_agent_skill_files(tmp_path: Path) -> None:
 
     agents_text = (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
     assert "LLM analysis can be long-running and may appear idle" in agents_text
+    assert "For manual Apex Ray runs" in agents_text
+    assert "do not proactively run `apex-ray review` or `apex-ray gate pre-push`" in agents_text
     assert "$apex-ray" not in agents_text
     assert not (tmp_path / ".apex-ray" / "skills").exists()
     assert not (tmp_path / ".codex").exists()
