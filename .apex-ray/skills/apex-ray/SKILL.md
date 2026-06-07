@@ -12,8 +12,9 @@ Apex Ray is the project's local diff-aware AI review tool. Use it to create dete
 ## Process
 
 - Run `apex-ray doctor` when setup, config, provider, or analyzer state is uncertain.
-- For deterministic local review, run `apex-ray review --no-llm`; default reports are written under `.apex-ray/reports/`.
-- For pre-push gate parity, run `apex-ray gate pre-push`; blocking findings and critical partial coverage are printed to stdout and the full report is written under `.apex-ray/reports/`.
+- When Apex Ray is configured in a pre-push hook, do not proactively run `apex-ray review` or `apex-ray gate pre-push` as a routine final verification step; let `git push` invoke the hook so the pre-push incremental retry state remains the source of truth.
+- For deterministic local review outside pre-push, run `apex-ray review --no-llm` only when the user asks or when diagnosing Apex Ray; default reports are written under `.apex-ray/reports/`.
+- When the user asks, the hook is unavailable, or explicit pre-push gate parity is needed before pushing, run `apex-ray gate pre-push`; blocking findings and critical partial coverage are printed to stdout and the full report is written under `.apex-ray/reports/`.
 - Do not bypass the configured pre-push gate by default. If bypassing is unavoidable, explain why and name the equivalent checks or review already run.
 - Use `--no-llm` or `.apex-ray/config.local.yml` when the configured local provider is unavailable or LLM cost is not appropriate.
 - If a report has partial coverage, continue unreviewed work with `apex-ray review --continue-from .apex-ray/reports/review.json --residual-priority p0 --llm` or review a specific skipped pack with `--only-pack`.
