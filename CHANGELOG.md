@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.1.8](https://github.com/dobrotacreator/apex-ray/compare/v0.1.7...v0.1.8) (2026-06-07)
+
+
+### Features
+
+* persist local data across worktrees ([#49](https://github.com/dobrotacreator/apex-ray/issues/49)) ([e031fe0](https://github.com/dobrotacreator/apex-ray/commit/e031fe08f5e1c213b05ff416badd48c837d8664e))
+
+
+### Bug Fixes
+
+* drop stale carried gate findings ([#45](https://github.com/dobrotacreator/apex-ray/issues/45)) ([71a9ed2](https://github.com/dobrotacreator/apex-ray/commit/71a9ed2878aa57db0948728ac29607a51ff4b013))
+* harden TypeScript analyzer timeouts ([#48](https://github.com/dobrotacreator/apex-ray/issues/48)) ([3ac897e](https://github.com/dobrotacreator/apex-ray/commit/3ac897e98364a7b4576406584feb9d6a712b1cbd))
+
 ## [0.1.7](https://github.com/dobrotacreator/apex-ray/compare/v0.1.6...v0.1.7) (2026-06-06)
 
 
