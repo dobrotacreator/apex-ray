@@ -1,4 +1,6 @@
 review:
+  local_data:
+    root: git_common
   base: main
   ignore:
     - "**/*.lock"
@@ -38,12 +40,13 @@ review:
     max_deep_packs: 48
     max_input_tokens: 300000
     verify: true
+    cache_dir: ${local_data}/cache/llm
   telemetry:
-    enabled: false
-    path: .apex-ray/telemetry/review-runs.jsonl
+    enabled: true
+    path: ${local_data}/telemetry/review-runs.jsonl
   reports:
-    archive: false
-    archive_dir: .apex-ray/reports/runs
+    archive: true
+    archive_dir: ${local_data}/reports/runs
     retention: 20
   gates:
     pre_push:
