@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, ValidationError
+from pydantic import Field, ValidationError, model_validator
 
 from apex_ray.findings import context_pack_fingerprint, finding_fingerprint
 from apex_ray.models import ApexModel, ContextPack, Finding, TriageConfig
@@ -53,6 +53,13 @@ class FindingSuppression(ApexModel):
     last_matched_at: datetime | None = None
     match_count: int = 0
     report_path: str = ""
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_legacy_scope_base_ref(cls, data):
+        if isinstance(data, dict) and "target_base_ref" not in data and "scope_base_ref" in data:
+            return {**data, "target_base_ref": data["scope_base_ref"]}
+        return data
 
 
 class TriageState(ApexModel):

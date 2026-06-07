@@ -1,3 +1,4 @@
+import json
 from datetime import UTC, datetime, timedelta
 
 from apex_ray.models import ContextPack, Finding, FindingConfidence, FindingSeverity, TriageConfig
@@ -8,6 +9,7 @@ from apex_ray.triage import (
     create_suppression,
     finding_candidate,
     finding_snapshot,
+    load_triage_state,
     prune_triage_state,
 )
 
@@ -74,3 +76,32 @@ def test_triage_prunes_expired_suppressions() -> None:
     assert result.state.suppressions == []
     assert result.expired_count == 1
     assert result.events[0].event == "suppression_expired"
+
+
+def test_triage_loads_legacy_scope_base_ref(tmp_path) -> None:
+    finding = _finding()
+    pack = ContextPack(
+        id=finding.context_pack_id,
+        file=finding.file,
+        diff_snippet=["@@ -1 +1 @@", "-old", "+new"],
+    )
+    now = datetime(2026, 6, 1, tzinfo=UTC)
+    suppression, _ = create_suppression(
+        snapshot=finding_snapshot(finding, pack),
+        reason="Known false positive.",
+        config=TriageConfig(default_expiry_days=14),
+        now=now,
+        target_base_ref="main",
+    )
+    payload = TriageState(suppressions=[suppression]).model_dump(mode="json")
+    payload["suppressions"][0]["scope_base_ref"] = payload["suppressions"][0].pop("target_base_ref")
+    state_path = tmp_path / "triage-state.json"
+    state_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    state = load_triage_state(state_path)
+
+    assert state.suppressions[0].target_base_ref == "main"
+    wrong_base = apply_suppressions([finding_candidate(finding, pack)], state, target_base_ref="release", now=now)
+    matching_base = apply_suppressions([finding_candidate(finding, pack)], state, target_base_ref="main", now=now)
+    assert wrong_base.remaining_findings == [finding]
+    assert matching_base.remaining_findings == []
