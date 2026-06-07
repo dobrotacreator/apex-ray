@@ -1,4 +1,4 @@
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from apex_ray import git
 from apex_ray.models import LocalDataConfig, ReviewConfig
@@ -33,7 +33,7 @@ def resolve_config_path(repo_root: Path, local_data: LocalDataConfig, value: str
             prefix = f"{LOCAL_DATA_TOKEN}{separator}"
             if text.startswith(prefix):
                 suffix = text[len(prefix) :]
-                return resolve_local_data_root(repo_root, local_data) / Path(suffix)
+                return _resolve_local_data_child(resolve_local_data_root(repo_root, local_data), suffix, text)
         raise LocalDataPathError(f"{LOCAL_DATA_TOKEN} must be the first path segment: {text}")
 
     path = Path(text).expanduser()
@@ -51,3 +51,17 @@ def resolve_runtime_config_paths(repo_root: Path, config: ReviewConfig) -> Revie
             resolve_config_path(repo_root, effective.local_data, effective.reports.archive_dir)
         )
     return effective
+
+
+def _resolve_local_data_child(root: Path, suffix: str, original: str) -> Path:
+    normalized = suffix.replace("\\", "/")
+    path = PurePosixPath(normalized)
+    if path.is_absolute():
+        raise LocalDataPathError(f"{LOCAL_DATA_TOKEN} path must stay under local data root: {original}")
+    if path.parts and path.parts[0].endswith(":"):
+        raise LocalDataPathError(f"{LOCAL_DATA_TOKEN} path must not include a drive prefix: {original}")
+    if ".." in path.parts:
+        raise LocalDataPathError(f"{LOCAL_DATA_TOKEN} path must not contain '..': {original}")
+    if not path.parts:
+        return root
+    return root / Path(*path.parts)

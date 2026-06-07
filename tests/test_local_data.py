@@ -1,6 +1,13 @@
 from pathlib import Path
 
-from apex_ray.local_data import resolve_config_path, resolve_local_data_root, resolve_runtime_config_paths
+import pytest
+
+from apex_ray.local_data import (
+    LocalDataPathError,
+    resolve_config_path,
+    resolve_local_data_root,
+    resolve_runtime_config_paths,
+)
 from apex_ray.models import LocalDataConfig, ReviewConfig
 
 
@@ -34,6 +41,20 @@ def test_resolve_config_path_expands_local_data_token(tmp_path: Path) -> None:
     path = resolve_config_path(repo, LocalDataConfig(root=".apex-ray/shared"), "${local_data}/telemetry/runs.jsonl")
 
     assert path == repo / ".apex-ray" / "shared" / "telemetry" / "runs.jsonl"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "${local_data}//outside",
+        "${local_data}/../outside",
+        "${local_data}\\..\\outside",
+        "${local_data}/C:/outside",
+    ],
+)
+def test_resolve_config_path_rejects_local_data_escape(tmp_path: Path, value: str) -> None:
+    with pytest.raises(LocalDataPathError):
+        resolve_config_path(tmp_path, LocalDataConfig(root=".apex-ray/shared"), value)
 
 
 def test_resolve_config_path_keeps_ordinary_relative_paths_repo_scoped(tmp_path: Path) -> None:
