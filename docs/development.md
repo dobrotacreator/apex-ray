@@ -108,6 +108,7 @@ Do not commit:
 - `.apex-ray/cache/`
 - `.apex-ray/telemetry/`
 - `.apex-ray/reports/`
+- `.apex-ray/triage/`
 - `.apex-ray/eval*/runs/`
 - generated `review.*` reports
 - local provider settings

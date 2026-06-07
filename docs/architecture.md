@@ -178,10 +178,11 @@ The important review decision is context selection. Apex Ray ranks packs by risk
 It creates or updates:
 
 - `.apex-ray/config.yml`: shared project config with conservative defaults.
-- `.apex-ray/.gitignore`: ignores local cache, telemetry, reports, runs, and local overrides under `.apex-ray`.
+- `.apex-ray/.gitignore`: ignores local cache, telemetry, reports, triage, runs, and local overrides under `.apex-ray`.
 - `.apex-ray/rules/`: committed project review rules.
 - `.apex-ray/memory/`: committed team learning cards.
 - `.apex-ray/reports/`: ignored local report output.
+- `.apex-ray/triage/`: ignored local finding suppressions and lifecycle events when local data is stored under `.apex-ray`.
 - `.apex-ray/eval/`: eval support directories; run outputs are ignored.
 - `lefthook.yml`: optional local hook config with an Apex Ray pre-push gate command.
 - `AGENTS.md` / Claude agent files: short pointers for coding agents.
@@ -227,6 +228,7 @@ Telemetry is append-only JSONL and is not injected into review prompts. It is us
 - cache hits, misses, and estimated cache-saved input tokens;
 - coverage ratio and skipped packs;
 - finding counts and verifier outcomes.
+- local pre-push triage counters when findings are suppressed or suppressions are pruned.
 
 By default telemetry is local and ignored. Teams can opt into a shared telemetry path only when they intentionally review and commit that artifact.
 

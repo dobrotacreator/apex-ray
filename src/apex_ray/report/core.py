@@ -2,6 +2,7 @@ from collections import Counter
 from datetime import UTC, datetime
 
 from apex_ray import __version__
+from apex_ray.findings import finding_fingerprint
 from apex_ray.models import (
     AnalyzerResult,
     ContextPack,
@@ -415,6 +416,7 @@ def _append_findings_section(lines: list[str], report: ReviewReport) -> None:
         for finding in matching:
             location = f"{finding.file}:{finding.line}" if finding.line else finding.file
             lines.append(f"- {finding.title} (`{finding.confidence}` confidence) at `{location}`")
+            lines.append(f"  - ID: `{finding_fingerprint(finding)}`")
             if finding.context_pack_id:
                 lines.append(f"  - Context pack: `{finding.context_pack_id}`")
             lines.append(f"  - Failure mode: {finding.failure_mode}")

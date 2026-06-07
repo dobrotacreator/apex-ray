@@ -11,6 +11,7 @@ from apex_ray.analyzers import typescript_analyzer_script
 from apex_ray.cli.benchmark import register_benchmark_commands
 from apex_ray.cli.common import ensure_apex_ignore_for_outputs, ensure_distinct_outputs, resolve_output_path
 from apex_ray.cli.eval import eval_app
+from apex_ray.cli.findings import findings_app
 from apex_ray.cli.gate import gate_app
 from apex_ray.cli.memory import memory_app
 from apex_ray.config import ConfigError, find_local_config, init_project, load_config
@@ -42,6 +43,7 @@ app = typer.Typer(
     no_args_is_help=True,
 )
 app.add_typer(memory_app, name="memory")
+app.add_typer(findings_app, name="findings")
 app.add_typer(eval_app, name="eval")
 app.add_typer(gate_app, name="gate")
 register_benchmark_commands(app)

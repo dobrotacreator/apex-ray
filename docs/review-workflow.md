@@ -110,6 +110,21 @@ apex-ray gate pre-push
 
 If repeated push attempts review the same packs, Apex Ray uses the LLM response cache and analyzer caches where available to reduce repeated work.
 
+### Local False Positives
+
+For a one-off local false positive, create an expiring local suppression instead of bypassing the gate:
+
+```bash
+apex-ray findings list --from-report .apex-ray/reports/pre-push.json
+apex-ray findings suppress apex-<id> \
+  --from-report .apex-ray/reports/pre-push.json \
+  --reason "This path is guarded before the reviewed helper is called."
+```
+
+The next `apex-ray gate pre-push` run still writes the raw finding in the report, but the gate decision lists it under suppressed findings and does not block on it. Suppressions are local, expire automatically, and become stale when the matching context pack changes. Use `apex-ray findings suppressions`, `apex-ray findings unsuppress sup-<id>`, or `apex-ray findings prune` for cleanup.
+
+Commit a `kind: false_positive` memory card only for repeated, generalizable calibration. Do not commit raw local suppressions.
+
 ## Caches
 
 Apex Ray uses two local caches by default:

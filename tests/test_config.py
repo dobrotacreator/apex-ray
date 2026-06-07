@@ -53,6 +53,12 @@ def test_init_config_creates_default_file(tmp_path: Path) -> None:
     assert config.reports.archive is True
     assert config.reports.archive_dir == "${local_data}/reports/runs"
     assert config.reports.retention == 20
+    assert config.triage.enabled is True
+    assert config.triage.state_path == "${local_data}/triage/suppressions.json"
+    assert config.triage.events_path == "${local_data}/triage/events.jsonl"
+    assert config.triage.default_expiry_days == 14
+    assert config.triage.max_active_suppressions == 200
+    assert config.triage.events_retention_days == 90
     assert config.gates.pre_push.progress == "auto"
     assert config.gates.pre_push.progress_interval_seconds == 5.0
     assert config.gates.pre_push.incremental_retry.enabled is False
@@ -112,6 +118,31 @@ def test_load_config_parses_report_archive(tmp_path: Path) -> None:
     assert config.reports.archive is True
     assert config.reports.archive_dir == ".apex-ray/reports/archive"
     assert config.reports.retention == 7
+
+
+def test_load_config_parses_triage(tmp_path: Path) -> None:
+    path = tmp_path / ".apex-ray" / "config.yml"
+    path.parent.mkdir()
+    path.write_text(
+        "review:\n"
+        "  triage:\n"
+        "    enabled: true\n"
+        "    state_path: .apex-ray/triage/custom-suppressions.json\n"
+        "    events_path: .apex-ray/triage/custom-events.jsonl\n"
+        "    default_expiry_days: 30\n"
+        "    max_active_suppressions: 25\n"
+        "    events_retention_days: 120\n",
+        encoding="utf-8",
+    )
+
+    config, _ = load_config(tmp_path)
+
+    assert config.triage.enabled is True
+    assert config.triage.state_path == ".apex-ray/triage/custom-suppressions.json"
+    assert config.triage.events_path == ".apex-ray/triage/custom-events.jsonl"
+    assert config.triage.default_expiry_days == 30
+    assert config.triage.max_active_suppressions == 25
+    assert config.triage.events_retention_days == 120
 
 
 def test_load_config_parses_pre_push_incremental_retry(tmp_path: Path) -> None:
@@ -276,6 +307,7 @@ def test_init_project_scoped_gitignore_covers_apex_local_artifacts(tmp_path: Pat
         ".apex-ray/cache/example",
         ".apex-ray/telemetry/example.jsonl",
         ".apex-ray/reports/review.json",
+        ".apex-ray/triage/suppressions.json",
         ".apex-ray/eval/runs/run.json",
         ".apex-ray/evals/runs/run.json",
     ]
@@ -303,6 +335,7 @@ def test_init_project_extends_existing_apex_gitignore(tmp_path: Path) -> None:
 
     assert "custom-apex" in apex_gitignore.read_text(encoding="utf-8")
     assert "reports/" in apex_gitignore.read_text(encoding="utf-8")
+    assert "triage/" in apex_gitignore.read_text(encoding="utf-8")
 
 
 def test_ensure_apex_gitignore_preserves_custom_entries_on_overwrite(tmp_path: Path) -> None:
@@ -317,6 +350,7 @@ def test_ensure_apex_gitignore_preserves_custom_entries_on_overwrite(tmp_path: P
     assert "custom-apex\n" in text
     assert "cache/\n" in text
     assert "reports/\n" in text
+    assert "triage/\n" in text
     assert "config.local.yml\n" in text
 
 

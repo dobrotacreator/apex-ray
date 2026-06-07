@@ -47,6 +47,13 @@ review:
     archive: true
     archive_dir: ${local_data}/reports/runs
     retention: 20
+  triage:
+    enabled: true
+    state_path: ${local_data}/triage/suppressions.json
+    events_path: ${local_data}/triage/events.jsonl
+    default_expiry_days: 14
+    max_active_suppressions: 200
+    events_retention_days: 90
   gates:
     pre_push:
       enabled: true
@@ -194,6 +201,42 @@ Default behavior:
 Set `review.gates.pre_push.enabled: false` in local config to skip the hook gate. Prefer local config for personal cost/model/provider differences instead of editing the shared hook command.
 
 Set `review.llm.enabled: false` in local config when a machine should keep normal review and pre-push gate runs deterministic and offline.
+
+### Local Finding Triage
+
+When a pre-push finding is a local false positive, do not bypass the hook. Suppress the specific finding locally:
+
+```bash
+apex-ray findings list --from-report .apex-ray/reports/pre-push.json
+apex-ray findings suppress apex-<id> \
+  --from-report .apex-ray/reports/pre-push.json \
+  --reason "The repository layer already enforces this invariant."
+```
+
+Triage state is local and ignored by default. It is intended for frequent local review runs, not as shared team policy. A suppression applies only while the finding fingerprint and context-pack fingerprint still match; if the relevant context changes, Apex Ray marks the suppression stale and the finding blocks again. Suppressions expire after `review.triage.default_expiry_days` unless `--expires` is provided.
+
+Useful cleanup commands:
+
+```bash
+apex-ray findings suppressions
+apex-ray findings unsuppress sup-<id>
+apex-ray findings prune
+```
+
+Use committed memory/rules/eval/config only when a repeated false-positive pattern generalizes beyond one local run. Raw suppressions should stay local.
+
+```yaml
+review:
+  triage:
+    enabled: true
+    state_path: ${local_data}/triage/suppressions.json
+    events_path: ${local_data}/triage/events.jsonl
+    default_expiry_days: 14
+    max_active_suppressions: 200
+    events_retention_days: 90
+```
+
+When report archiving is enabled, pre-push archives include `pre-push-triage.json` with the suppressed-finding snapshot and lifecycle counters for that gate run.
 
 `review.gates.pre_push.progress` controls live hook output:
 

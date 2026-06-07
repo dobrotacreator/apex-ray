@@ -10,6 +10,7 @@ Apex Ray can inject project knowledge into review context without sending the wh
 | A finding was a false positive and reviewers should calibrate future verification | Memory |
 | A domain term, ownership rule, or recurring bug pattern should survive across reviews | Memory |
 | A high-severity constraint should apply to specific paths, symbols, or risk categories | Rule |
+| A one-off false positive only matters for the current local gate run | Local finding triage |
 | A one-off note only matters for the current PR | Do not commit it as rules or memory |
 
 Rules and memory are selected by relevance before prompt construction. They are not blindly appended to every LLM request.
@@ -68,6 +69,7 @@ Use memory for facts that should survive across local review runs and across tea
 - `max_cards_per_pack`, `max_chars_per_pack`, `max_chars_per_card`, and `max_context_ratio` cap prompt growth.
 - Memory can be dropped before contracts or metadata are removed from an over-budget context pack.
 - `false_positive` and `severity_calibration` cards are verifier-only by default; they calibrate publication decisions without suppressing the review pass.
+- For a one-off pre-push false positive, use `apex-ray findings suppress` instead of committing memory. Promote the lesson to memory only when the pattern repeats and generalizes.
 
 Useful commands:
 

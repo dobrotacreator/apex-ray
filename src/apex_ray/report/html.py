@@ -1,5 +1,6 @@
 from html import escape
 
+from apex_ray.findings import finding_fingerprint
 from apex_ray.models import Finding, ReviewReport
 from apex_ray.report.coverage import _unreviewed_pack_reason
 from apex_ray.report.formatting import summarize_notes
@@ -165,6 +166,7 @@ def _finding_html(finding: Finding) -> str:
         f"<h3>{escape(finding.title)}</h3>"
         f"<p><strong>{escape(str(finding.severity)).title()}</strong> "
         f"at <code>{escape(location)}</code>, confidence <code>{escape(str(finding.confidence))}</code></p>"
+        f"<p><strong>ID:</strong> <code>{escape(finding_fingerprint(finding))}</code></p>"
         f"<p><strong>Failure mode:</strong> {escape(finding.failure_mode)}</p>"
         f"<p><strong>Evidence:</strong> {escape(finding.evidence)}</p>"
         f"<p><strong>Suggested fix:</strong> {escape(finding.suggested_fix)}</p>"
