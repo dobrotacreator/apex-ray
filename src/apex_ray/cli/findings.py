@@ -82,7 +82,7 @@ def suppress_finding(
         config=config.triage,
         verdict=cast(SuppressionVerdict, verdict),
         expires_at=expires_at,
-        scope_base_ref=report.diff.base,
+        target_base_ref=report.diff.base,
         report_path=from_report,
     )
     state = add_or_replace_suppression(state, suppression)

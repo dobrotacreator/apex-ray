@@ -47,7 +47,7 @@ class FindingSuppression(ApexModel):
     confidence: str
     verdict: SuppressionVerdict = "false_positive"
     reason: str
-    scope_base_ref: str | None = None
+    target_base_ref: str | None = None
     created_at: datetime
     expires_at: datetime | None = None
     last_matched_at: datetime | None = None
@@ -186,7 +186,7 @@ def create_suppression(
     now: datetime | None = None,
     verdict: SuppressionVerdict = "false_positive",
     expires_at: datetime | None = None,
-    scope_base_ref: str | None = None,
+    target_base_ref: str | None = None,
     report_path: Path | None = None,
 ) -> tuple[FindingSuppression, TriageEvent]:
     created_at = _as_utc(now or datetime.now(UTC))
@@ -203,7 +203,7 @@ def create_suppression(
         confidence=snapshot.confidence,
         verdict=verdict,
         reason=reason,
-        scope_base_ref=scope_base_ref,
+        target_base_ref=target_base_ref,
         created_at=created_at,
         expires_at=effective_expires_at,
         report_path=str(report_path) if report_path else "",
@@ -218,7 +218,7 @@ def add_or_replace_suppression(state: TriageState, suppression: FindingSuppressi
         if not (
             existing.finding_fingerprint == suppression.finding_fingerprint
             and existing.context_pack_id == suppression.context_pack_id
-            and existing.scope_base_ref == suppression.scope_base_ref
+            and existing.target_base_ref == suppression.target_base_ref
         )
     ]
     return TriageState(suppressions=[*kept, suppression])
@@ -276,7 +276,7 @@ def apply_suppressions(
     candidates: list[FindingCandidate],
     state: TriageState,
     *,
-    base_ref: str | None = None,
+    target_base_ref: str | None = None,
     now: datetime | None = None,
 ) -> TriageApplyResult:
     timestamp = _as_utc(now or datetime.now(UTC))
@@ -288,7 +288,12 @@ def apply_suppressions(
     updated_by_id: dict[str, FindingSuppression] = {}
 
     for candidate in candidates:
-        match = _matching_suppression(candidate.snapshot, suppressions, base_ref=base_ref, now=timestamp)
+        match = _matching_suppression(
+            candidate.snapshot,
+            suppressions,
+            target_base_ref=target_base_ref,
+            now=timestamp,
+        )
         if match is None:
             remaining.append(candidate.finding)
             continue
@@ -383,7 +388,7 @@ def _matching_suppression(
     snapshot: FindingSnapshot,
     suppressions: list[FindingSuppression],
     *,
-    base_ref: str | None,
+    target_base_ref: str | None,
     now: datetime,
 ) -> tuple[FindingSuppression, str] | None:
     for suppression in suppressions:
@@ -391,7 +396,7 @@ def _matching_suppression(
             continue
         if _is_expired(suppression, now):
             continue
-        if suppression.scope_base_ref and base_ref and suppression.scope_base_ref != base_ref:
+        if suppression.target_base_ref and target_base_ref and suppression.target_base_ref != target_base_ref:
             continue
         if suppression.context_pack_fingerprint and snapshot.context_pack_fingerprint:
             if suppression.context_pack_fingerprint != snapshot.context_pack_fingerprint:

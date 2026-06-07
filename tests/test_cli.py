@@ -215,6 +215,34 @@ def test_memory_suggest_writes_cards_from_report(tmp_path: Path) -> None:
     assert "The cart total undercharges" in text
 
 
+def test_findings_list_prints_fingerprints_from_report(tmp_path: Path) -> None:
+    finding = Finding(
+        title="Cart total ignores quantity",
+        severity=FindingSeverity.HIGH,
+        confidence=FindingConfidence.HIGH,
+        file="src/cart.ts",
+        line=6,
+        failure_mode="The cart total undercharges multi-quantity items.",
+        evidence="The diff returns item.price without item.quantity.",
+        suggested_fix="Restore price * quantity.",
+        suggested_test="Add a multi-quantity cart total case.",
+    )
+    report = build_report(
+        ProjectProfile(root="/repo", is_git_repo=True),
+        ReviewConfig(),
+        DiffSummary(target_mode=TargetMode.PATCH, stats=DiffStats(files_changed=1)),
+        findings=[finding],
+    )
+    report_path = tmp_path / "review.json"
+    report_path.write_text(report.model_dump_json(indent=2), encoding="utf-8")
+
+    result = runner.invoke(app, ["findings", "list", "--from-report", str(report_path)], catch_exceptions=False)
+
+    assert result.exit_code == 0
+    assert finding_fingerprint(finding) in result.stdout
+    assert "Cart total ignores quantity" in result.stdout
+
+
 def test_review_patch_writes_markdown_and_json(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
     patch = tmp_path / "sample.diff"

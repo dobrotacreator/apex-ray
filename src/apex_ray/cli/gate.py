@@ -193,7 +193,11 @@ def pre_push(
         current_triage = apply_suppressions(
             finding_candidates_for_report(report, current_decision.blocking_findings),
             triage_state,
-            base_ref=target_base,
+            # Suppressions scope to the pre-push target base, not the incremental
+            # retry diff range, so a user's explicit triage keeps applying across
+            # repeated push attempts. The context-pack fingerprint still prevents
+            # stale suppressions from hiding changed evidence.
+            target_base_ref=target_base,
         )
         triage_state = current_triage.state
         triage_events.extend(current_triage.events)
@@ -217,7 +221,7 @@ def pre_push(
         carried_triage = apply_suppressions(
             [finding_candidate(carried.finding, carried.context_pack) for carried in active_carried_findings],
             triage_state,
-            base_ref=target_base,
+            target_base_ref=target_base,
         )
         remaining_carried_ids = {id(finding) for finding in carried_triage.remaining_findings}
         active_carried_findings = [
