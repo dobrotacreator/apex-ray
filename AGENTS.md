@@ -49,7 +49,7 @@ Before saying work is complete, report the verification that actually ran.
 
 ## Git Rules
 
-- Commit messages use Conventional Commits.
+- Commit messages and PR titles use Conventional Commits. PR titles must be suitable as squash-merge commit titles.
 - Mark breaking changes with `!` and a `BREAKING CHANGE:` footer.
 
 <!-- APEX_RAY_START -->
