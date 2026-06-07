@@ -229,6 +229,7 @@ def test_init_project_creates_team_setup_files(tmp_path: Path) -> None:
     assert "--no-llm" not in lefthook_text
     agents_text = (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
     assert "APEX_RAY_START" in agents_text
+    assert "LLM analysis can be long-running and may appear idle" in agents_text
     assert "Do not bypass the configured pre-push gate by default" in agents_text
     assert "$apex-ray" in agents_text
     assert "$apex-ray-improve" in agents_text
@@ -444,7 +445,9 @@ def test_init_project_leaves_existing_root_gitignore_untouched(tmp_path: Path) -
 def test_init_project_can_skip_agent_skill_files(tmp_path: Path) -> None:
     init_project(tmp_path, agent_skill=False)
 
-    assert (tmp_path / "AGENTS.md").exists()
+    agents_text = (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
+    assert "LLM analysis can be long-running and may appear idle" in agents_text
+    assert "$apex-ray" not in agents_text
     assert not (tmp_path / ".apex-ray" / "skills").exists()
     assert not (tmp_path / ".codex").exists()
     assert not (tmp_path / ".claude" / "skills").exists()
