@@ -40,16 +40,18 @@ def test_init_config_creates_default_file(tmp_path: Path) -> None:
     assert config.rule_paths == [".apex-ray/rules"]
     assert config.memory.paths == [".apex-ray/memory"]
     assert config.memory.max_cards_per_pack == 4
+    assert config.local_data.root == "git_common"
     assert config.llm.profiles == {}
     assert config.llm.enabled is True
     assert config.llm.effort == "medium"
     assert config.llm.max_packs == 64
     assert config.llm.max_deep_packs == 48
     assert config.llm.max_input_tokens == 300_000
-    assert config.telemetry.enabled is False
-    assert config.telemetry.path == ".apex-ray/telemetry/review-runs.jsonl"
-    assert config.reports.archive is False
-    assert config.reports.archive_dir == ".apex-ray/reports/runs"
+    assert config.llm.cache_dir == "${local_data}/cache/llm"
+    assert config.telemetry.enabled is True
+    assert config.telemetry.path == "${local_data}/telemetry/review-runs.jsonl"
+    assert config.reports.archive is True
+    assert config.reports.archive_dir == "${local_data}/reports/runs"
     assert config.reports.retention == 20
     assert config.gates.pre_push.progress == "auto"
     assert config.gates.pre_push.progress_interval_seconds == 5.0
@@ -82,6 +84,19 @@ def test_load_config_parses_review_telemetry(tmp_path: Path) -> None:
 
     assert config.telemetry.enabled is True
     assert config.telemetry.path == ".apex-ray/telemetry/custom.jsonl"
+
+
+def test_load_config_parses_local_data(tmp_path: Path) -> None:
+    path = tmp_path / ".apex-ray" / "config.yml"
+    path.parent.mkdir()
+    path.write_text(
+        "review:\n  local_data:\n    root: git_common\n",
+        encoding="utf-8",
+    )
+
+    config, _ = load_config(tmp_path)
+
+    assert config.local_data.root == "git_common"
 
 
 def test_load_config_parses_report_archive(tmp_path: Path) -> None:
@@ -214,6 +229,7 @@ def test_init_project_creates_team_setup_files(tmp_path: Path) -> None:
     assert "--no-llm" not in lefthook_text
     agents_text = (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
     assert "APEX_RAY_START" in agents_text
+    assert "LLM analysis can be long-running and may appear idle" in agents_text
     assert "Do not bypass the configured pre-push gate by default" in agents_text
     assert "$apex-ray" in agents_text
     assert "$apex-ray-improve" in agents_text
@@ -429,7 +445,9 @@ def test_init_project_leaves_existing_root_gitignore_untouched(tmp_path: Path) -
 def test_init_project_can_skip_agent_skill_files(tmp_path: Path) -> None:
     init_project(tmp_path, agent_skill=False)
 
-    assert (tmp_path / "AGENTS.md").exists()
+    agents_text = (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
+    assert "LLM analysis can be long-running and may appear idle" in agents_text
+    assert "$apex-ray" not in agents_text
     assert not (tmp_path / ".apex-ray" / "skills").exists()
     assert not (tmp_path / ".codex").exists()
     assert not (tmp_path / ".claude" / "skills").exists()

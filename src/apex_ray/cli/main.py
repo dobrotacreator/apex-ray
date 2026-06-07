@@ -17,6 +17,7 @@ from apex_ray.config import ConfigError, find_local_config, init_project, load_c
 from apex_ray.discovery import discover_project
 from apex_ray.invocation import ReviewOverrides, apply_review_overrides
 from apex_ray.llm import LLMProviderError
+from apex_ray.local_data import LOCAL_DATA_TOKEN, LocalDataPathError, resolve_config_path, resolve_runtime_config_paths
 from apex_ray.models import LLMCoverageMode, LLMProviderName, ReviewReport, TargetMode
 from apex_ray.pipeline import continue_review_from_report, run_review_pipeline
 from apex_ray.report import (
@@ -29,7 +30,6 @@ from apex_ray.report import (
 )
 from apex_ray.report.coverage import continue_command_for_pack
 from apex_ray.telemetry import (
-    DEFAULT_REVIEW_TELEMETRY_PATH,
     TelemetryError,
     append_review_telemetry,
     load_review_telemetry,
@@ -171,13 +171,20 @@ def _python_analyzer_available() -> bool:
 @app.command("telemetry-summary")
 def review_telemetry_summary(
     telemetry_path: Annotated[
-        Path,
+        Path | None,
         typer.Option("--telemetry-path", help="Review telemetry JSONL path."),
-    ] = Path(DEFAULT_REVIEW_TELEMETRY_PATH),
+    ] = None,
 ) -> None:
     """Summarize long-lived local review telemetry."""
     root = git.repo_root(Path.cwd()) or Path.cwd()
-    path = telemetry_path if telemetry_path.is_absolute() else root / telemetry_path
+    if telemetry_path is not None and LOCAL_DATA_TOKEN not in str(telemetry_path):
+        path = telemetry_path if telemetry_path.is_absolute() else root / telemetry_path
+    else:
+        try:
+            review_config, _ = load_config(root)
+            path = resolve_config_path(root, review_config.local_data, telemetry_path or review_config.telemetry.path)
+        except (ConfigError, LocalDataPathError) as exc:
+            raise typer.BadParameter(str(exc)) from exc
     try:
         entries = load_review_telemetry(path)
     except TelemetryError as exc:
@@ -351,12 +358,21 @@ def review(
             analyzer_cache_dir=analyzer_cache_dir,
         ),
     )
+    try:
+        effective_config = resolve_runtime_config_paths(root, effective_config)
+    except LocalDataPathError as exc:
+        raise typer.BadParameter(str(exc)) from exc
     telemetry_enabled = (
         effective_config.telemetry.enabled or telemetry or telemetry_path is not None
     ) and not no_telemetry
-    effective_telemetry_path = telemetry_path or Path(effective_config.telemetry.path)
-    if not effective_telemetry_path.is_absolute():
-        effective_telemetry_path = root / effective_telemetry_path
+    try:
+        effective_telemetry_path = resolve_config_path(
+            root,
+            effective_config.local_data,
+            telemetry_path or effective_config.telemetry.path,
+        )
+    except LocalDataPathError as exc:
+        raise typer.BadParameter(str(exc)) from exc
 
     started_monotonic = time.monotonic()
     try:

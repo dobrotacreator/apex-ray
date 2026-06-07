@@ -17,6 +17,8 @@ AGENT_FILE_MODES = {"none", "codex", "claude", "both"}
 
 def default_config_text(base: str = DEFAULT_BASE_BRANCH) -> str:
     return f"""review:
+  local_data:
+    root: git_common
   base: {base}
   ignore:
     - "**/*.lock"
@@ -36,12 +38,13 @@ def default_config_text(base: str = DEFAULT_BASE_BRANCH) -> str:
     max_deep_packs: 48
     max_input_tokens: 300000
     verify: true
+    cache_dir: ${{local_data}}/cache/llm
   telemetry:
-    enabled: false
-    path: .apex-ray/telemetry/review-runs.jsonl
+    enabled: true
+    path: ${{local_data}}/telemetry/review-runs.jsonl
   reports:
-    archive: false
-    archive_dir: .apex-ray/reports/runs
+    archive: true
+    archive_dir: ${{local_data}}/reports/runs
     retention: 20
   gates:
     pre_push:
@@ -77,13 +80,13 @@ APEX_RAY_AGENT_BLOCK_END = "<!-- APEX_RAY_END -->"
 APEX_RAY_AGENT_BLOCK = f"""{APEX_RAY_AGENT_BLOCK_START}
 ## Apex Ray
 
-This project uses Apex Ray for local diff-aware review. Use the `$apex-ray` skill for review, gate, report, telemetry, and eval workflows. Do not bypass the configured pre-push gate by default; if bypassing is unavoidable, explain why and name the equivalent checks or review already run. Use `$apex-ray-improve` after merged PRs or review feedback to produce recommendation-only improvements for Apex Ray memory, rules, eval labels, telemetry, and config. Keep `.apex-ray/config.local.yml`, Apex Ray caches/telemetry/reports/eval runs, generated review artifacts, and local provider, model, API, or cost settings out of commits.
+This project uses Apex Ray for local diff-aware review. Use the `$apex-ray` skill for review, gate, report, telemetry, and eval workflows. Apex Ray runs that use LLM analysis can be long-running and may appear idle; do not interrupt or kill the process just because it takes a long time. Wait for completion unless it exits, errors, or the user asks to stop. Do not bypass the configured pre-push gate by default; if bypassing is unavoidable, explain why and name the equivalent checks or review already run. Use `$apex-ray-improve` after merged PRs or review feedback to produce recommendation-only improvements for Apex Ray memory, rules, eval labels, telemetry, and config. Keep `.apex-ray/config.local.yml`, Apex Ray caches/telemetry/reports/eval runs, generated review artifacts, and local provider, model, API, or cost settings out of commits.
 {APEX_RAY_AGENT_BLOCK_END}
 """
 APEX_RAY_AGENT_BLOCK_NO_SKILL = f"""{APEX_RAY_AGENT_BLOCK_START}
 ## Apex Ray
 
-This project uses Apex Ray for local diff-aware review. Run `apex-ray doctor` to check setup, `apex-ray review --no-llm` for deterministic local reports under `.apex-ray/reports/`, and `apex-ray gate pre-push` for the hook-equivalent gate. Do not bypass the configured pre-push gate by default; if bypassing is unavoidable, explain why and name the equivalent checks or review already run. Keep `.apex-ray/config.local.yml`, Apex Ray caches/telemetry/reports/eval runs, generated review artifacts, and local provider, model, API, or cost settings out of commits.
+This project uses Apex Ray for local diff-aware review. Run `apex-ray doctor` to check setup, `apex-ray review --no-llm` for deterministic local reports under `.apex-ray/reports/`, and `apex-ray gate pre-push` for the hook-equivalent gate. Apex Ray runs that use LLM analysis can be long-running and may appear idle; do not interrupt or kill the process just because it takes a long time. Wait for completion unless it exits, errors, or the user asks to stop. Do not bypass the configured pre-push gate by default; if bypassing is unavoidable, explain why and name the equivalent checks or review already run. Keep `.apex-ray/config.local.yml`, Apex Ray caches/telemetry/reports/eval runs, generated review artifacts, and local provider, model, API, or cost settings out of commits.
 {APEX_RAY_AGENT_BLOCK_END}
 """
 
@@ -108,8 +111,8 @@ Apex Ray is the project's local diff-aware AI review tool. Use it to create dete
 - If a report has partial coverage, continue unreviewed work with `apex-ray review --continue-from .apex-ray/reports/review.json --residual-priority p0 --llm` or review a specific skipped pack with `--only-pack`.
 - Use `.apex-ray/config.yml` for shared team policy and `.apex-ray/config.local.yml` for personal provider/model/cost overrides.
 - Use `.apex-ray/rules/` for stable review rules and `.apex-ray/memory/` for curated team learning.
-- Use `apex-ray telemetry-summary --telemetry-path .apex-ray/telemetry/review-runs.jsonl` when tuning cost, latency, coverage, or model routing.
-- Treat `.apex-ray/reports/*.md/json/html` as latest snapshots. Use `review.reports.archive: true` only when full per-run report history is needed for quality debugging.
+- Use `apex-ray telemetry-summary` when tuning cost, latency, coverage, or model routing.
+- Treat `.apex-ray/reports/*.md/json/html` as latest snapshots. Archived run reports live under configured local data when `review.reports.archive: true`.
 - Use `apex-ray eval capture-prs` and `apex-ray eval run-prs` only for historical PR benchmark/eval work.
 
 ## Outputs
@@ -340,6 +343,7 @@ def _read_review_config(config_path: Path) -> dict[str, Any]:
             "languages",
             "rules",
             "rule_paths",
+            "local_data",
             "memory",
             "analyzer",
             "context",
@@ -371,6 +375,7 @@ def _normalize_review_config(review: dict[str, Any]) -> dict[str, Any]:
         "languages": review.get("languages", []),
         "rules": review.get("rules", []),
         "rule_paths": review.get("rule_paths", [".apex-ray/rules"]),
+        "local_data": review.get("local_data", {}),
         "memory": review.get("memory", {}),
         "analyzer": review.get("analyzer", {}),
         "context": review.get("context", {}),

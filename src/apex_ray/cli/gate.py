@@ -25,6 +25,7 @@ from apex_ray.gate_retry import (
 from apex_ray.gates import PrePushGateDecision, PrePushRetrySummary, evaluate_pre_push_gate, render_pre_push_gate_stdout
 from apex_ray.llm import LLMProviderError
 from apex_ray.llm.providers import provider_from_config
+from apex_ray.local_data import LocalDataPathError, resolve_config_path, resolve_runtime_config_paths
 from apex_ray.models import ReviewReport, TargetMode
 from apex_ray.pipeline import continue_review_from_report, run_review_pipeline
 from apex_ray.progress import NoopProgress, ProgressSink, StreamProgress, progress_enabled
@@ -71,6 +72,10 @@ def pre_push(
     try:
         review_config, config_path = load_config(root, config)
     except ConfigError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    try:
+        review_config = resolve_runtime_config_paths(root, review_config)
+    except LocalDataPathError as exc:
         raise typer.BadParameter(str(exc)) from exc
 
     gate_config = review_config.gates.pre_push
@@ -246,9 +251,14 @@ def pre_push(
     telemetry_enabled = (
         review_config.telemetry.enabled or telemetry or telemetry_path is not None
     ) and not no_telemetry
-    effective_telemetry_path = telemetry_path or Path(review_config.telemetry.path)
-    if not effective_telemetry_path.is_absolute():
-        effective_telemetry_path = root / effective_telemetry_path
+    try:
+        effective_telemetry_path = resolve_config_path(
+            root,
+            review_config.local_data,
+            telemetry_path or review_config.telemetry.path,
+        )
+    except LocalDataPathError as exc:
+        raise typer.BadParameter(str(exc)) from exc
     if telemetry_enabled:
         try:
             progress.event("appending telemetry", force=True)

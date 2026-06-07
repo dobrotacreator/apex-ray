@@ -53,13 +53,13 @@ Apex Ray writes:
 
 Reports include findings, analyzer warnings, selected context packs, skipped packs, LLM routes, cache usage, token estimates, coverage status, and continuation commands.
 
-Report paths are latest snapshots by default. Reusing the same paths overwrites the previous latest report. Enable report archives only when a team needs per-run artifacts for quality debugging:
+Report paths are latest snapshots by default. Reusing the same paths overwrites the previous latest report. `apex-ray init` enables report archives so per-run artifacts survive short-lived worktrees:
 
 ```yaml
 review:
   reports:
     archive: true
-    archive_dir: .apex-ray/reports/runs
+    archive_dir: ${local_data}/reports/runs
     retention: 20
 ```
 
@@ -114,7 +114,7 @@ If repeated push attempts review the same packs, Apex Ray uses the LLM response 
 
 Apex Ray uses two local caches by default:
 
-- `.apex-ray/cache/llm` for provider responses keyed by prompt context and routing.
+- `${local_data}/cache/llm` for provider responses keyed by prompt context and routing. With the default `review.local_data.root: git_common`, linked worktrees from the same local clone share this cache.
 - analyzer repo index caches where a backend supports them. Today this applies to TypeScript/JavaScript repository analysis; the Python analyzer is in-process and does not yet maintain a persistent repo index cache.
 
 Refresh LLM cache entries:

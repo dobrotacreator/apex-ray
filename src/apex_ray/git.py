@@ -37,6 +37,18 @@ def repo_root(cwd: Path) -> Path | None:
     return Path(proc.stdout.strip()).resolve()
 
 
+def common_dir(cwd: Path) -> Path | None:
+    if not git_available():
+        return None
+    proc = run_git(["rev-parse", "--git-common-dir"], cwd=cwd, check=False)
+    if proc.returncode != 0:
+        return None
+    path = Path(proc.stdout.strip())
+    if not path.is_absolute():
+        path = cwd / path
+    return path.resolve()
+
+
 def is_git_repo(cwd: Path) -> bool:
     if not git_available():
         return False

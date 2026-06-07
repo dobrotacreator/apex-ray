@@ -21,6 +21,7 @@ except ImportError:  # pragma: no cover - fcntl is not available on Windows.
 from apex_ray import git
 from apex_ray.config import ConfigError, load_config
 from apex_ray.invocation import ReviewOverrides, apply_review_overrides
+from apex_ray.local_data import LocalDataPathError, resolve_runtime_config_paths
 from apex_ray.models import (
     LLMCoverageMode,
     LLMProviderName,
@@ -714,6 +715,10 @@ def _run_one_pr_eval_case(
                     analyzer_timeout_seconds=analyzer_timeout_seconds,
                 ),
             )
+            try:
+                config = resolve_runtime_config_paths(worktree, config)
+            except LocalDataPathError as exc:
+                raise PrEvalError(f"PR #{case.number}: invalid Apex Ray local data path: {exc}") from exc
 
             if status_path is not None:
                 _write_case_status(
