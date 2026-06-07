@@ -113,6 +113,46 @@ def test_doctor_reports_local_config(tmp_path: Path, monkeypatch) -> None:
     assert "- Python analyzer available: true" in result.stdout
 
 
+def test_telemetry_summary_uses_configured_local_data_path(tmp_path: Path, monkeypatch) -> None:
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    config = tmp_path / ".apex-ray" / "config.yml"
+    config.parent.mkdir()
+    config.write_text(
+        "review:\n"
+        "  local_data:\n"
+        "    root: git_common\n"
+        "  telemetry:\n"
+        "    path: ${local_data}/telemetry/review-runs.jsonl\n",
+        encoding="utf-8",
+    )
+    telemetry_path = tmp_path / ".git" / "apex-ray" / "telemetry" / "review-runs.jsonl"
+    telemetry_path.parent.mkdir(parents=True)
+    telemetry_path.write_text(
+        json.dumps(
+            {
+                "created_at": "2026-06-01T00:00:00Z",
+                "run_id": "unit",
+                "target_mode": "worktree",
+                "findings_count": 0,
+                "coverage_ratio": 1.0,
+                "high_risk_coverage_ratio": 1.0,
+                "partial_severity": "none",
+                "llm_estimated_input_tokens": 0,
+                "duration_ms": 1,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["telemetry-summary"], catch_exceptions=False)
+
+    assert result.exit_code == 0
+    assert "- Runs: `1`" in result.stdout
+    assert "unit" in result.stdout
+
+
 def test_benchmark_help_uses_generic_analyzer_cache_wording() -> None:
     result = runner.invoke(app, ["benchmark", "--help"], catch_exceptions=False)
     plain_output = _plain_cli_output(result.stdout)
@@ -239,6 +279,50 @@ def test_review_patch_defaults_to_repo_reports_dir_from_subdir(tmp_path: Path, m
     assert output.exists()
     assert json_output.exists()
     assert not (subdir / ".apex-ray").exists()
+
+
+def test_review_worktree_uses_git_common_local_data_for_telemetry_and_archives(tmp_path: Path, monkeypatch) -> None:
+    repo = tmp_path / "repo"
+    worktree = tmp_path / "worktree"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True)
+    config = repo / ".apex-ray" / "config.yml"
+    config.parent.mkdir()
+    config.write_text(
+        "review:\n"
+        "  local_data:\n"
+        "    root: git_common\n"
+        "  llm:\n"
+        "    enabled: false\n"
+        "  telemetry:\n"
+        "    enabled: true\n"
+        "    path: ${local_data}/telemetry/review-runs.jsonl\n"
+        "  reports:\n"
+        "    archive: true\n"
+        "    archive_dir: ${local_data}/reports/runs\n",
+        encoding="utf-8",
+    )
+    (repo / "app.py").write_text("value = 1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "initial"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "worktree", "add", str(worktree), "-b", "feature"], cwd=repo, check=True)
+    (worktree / "app.py").write_text("value = 2\n", encoding="utf-8")
+    monkeypatch.chdir(worktree)
+
+    result = runner.invoke(app, ["review", "--worktree", "--no-llm"], catch_exceptions=False)
+
+    shared_root = repo / ".git" / "apex-ray"
+    assert result.exit_code == 0
+    assert (worktree / ".apex-ray" / "reports" / "review.md").exists()
+    assert (worktree / ".apex-ray" / "reports" / "review.json").exists()
+    assert (shared_root / "telemetry" / "review-runs.jsonl").exists()
+    archive_dirs = list((shared_root / "reports" / "runs").iterdir())
+    assert len(archive_dirs) == 1
+    assert (archive_dirs[0] / "review.md").exists()
+    assert (archive_dirs[0] / "review.json").exists()
+    assert not (worktree / ".apex-ray" / "telemetry").exists()
 
 
 def test_review_patch_archives_reports_when_enabled(tmp_path: Path, monkeypatch) -> None:

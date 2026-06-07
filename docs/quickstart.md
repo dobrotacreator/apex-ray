@@ -47,6 +47,8 @@ Inspect and commit the generated setup before reviewing application changes. `ap
 
 Generated shared files are meant to be reviewed like normal project configuration. Machine-specific settings belong in `.apex-ray/config.local.yml`, which is ignored by default.
 
+The generated config stores telemetry, LLM cache entries, and archived report runs under a shared local-data directory for the current git clone, so linked worktrees can be deleted without losing those accumulated metrics.
+
 ## First Deterministic Review
 
 Run a no-LLM review first. This verifies diff parsing, project discovery, analyzer coverage, context pack construction, and report rendering without provider cost:

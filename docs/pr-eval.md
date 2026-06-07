@@ -38,7 +38,7 @@ For smoke tests, use `--no-llm`. The run command creates a temporary detached wo
 
 Use `--analyzer-timeout <seconds>` for quick smoke runs on very large historical PRs. Full quality runs should normally use the repository configuration.
 
-Replay worktrees are temporary, so LLM replay uses the source repository `.apex-ray/cache/llm` by default when no `--cache-dir` is supplied. This keeps repeated eval runs from paying again for unchanged context packs.
+Replay worktrees are temporary. With the default initialized config, LLM replay uses `${local_data}/cache/llm`, which resolves through the source repository's shared git common directory. If no cache path is configured and no `--cache-dir` is supplied, PR eval falls back to the source repository `.apex-ray/cache/llm`. This keeps repeated eval runs from paying again for unchanged context packs.
 
 For large local replay suites, use case supervision:
 

@@ -18,6 +18,8 @@ Maps are merged deeply. Lists are replaced. This lets shared config own policy w
 
 ```yaml
 review:
+  local_data:
+    root: git_common
   base: main
   ignore:
     - "**/*.lock"
@@ -37,12 +39,13 @@ review:
     max_deep_packs: 48
     max_input_tokens: 300000
     verify: true
+    cache_dir: ${local_data}/cache/llm
   telemetry:
-    enabled: false
-    path: .apex-ray/telemetry/review-runs.jsonl
+    enabled: true
+    path: ${local_data}/telemetry/review-runs.jsonl
   reports:
-    archive: false
-    archive_dir: .apex-ray/reports/runs
+    archive: true
+    archive_dir: ${local_data}/reports/runs
     retention: 20
   gates:
     pre_push:
@@ -58,6 +61,12 @@ review:
       progress_interval_seconds: 5
 ```
 
+## Local Data
+
+`review.local_data.root` defines where long-lived local artifacts are stored when a path starts with `${local_data}`. `apex-ray init` sets it to `git_common`, which resolves to an Apex Ray directory under the repository's shared git common directory. Linked worktrees from the same local clone then share telemetry, LLM cache entries, and archived report runs, even when individual worktree directories are deleted.
+
+Latest report outputs still stay at their configured `--output`, `--json`, and `--html` paths, usually under the current worktree's `.apex-ray/reports/`, so parallel worktrees do not overwrite each other's latest snapshots.
+
 ## Local Override Example
 
 ```yaml
@@ -71,7 +80,7 @@ review:
     timeout_seconds: 900
     max_input_tokens: 80000
   telemetry:
-    path: .apex-ray/telemetry/local-review-runs.jsonl
+    path: ${local_data}/telemetry/local-review-runs.jsonl
 ```
 
 ## Common Local Overrides
@@ -95,13 +104,13 @@ review:
     max_input_tokens: 80000
 ```
 
-Keep telemetry local to your machine:
+Keep telemetry in a different local file:
 
 ```yaml
 review:
   telemetry:
     enabled: true
-    path: .apex-ray/telemetry/local-review-runs.jsonl
+    path: ${local_data}/telemetry/local-review-runs.jsonl
 ```
 
 Use `.apex-ray/config.yml` for shared policy and `.apex-ray/config.local.yml` for provider, model, cost, cache, timeout, and telemetry differences between contributors.
@@ -163,11 +172,11 @@ Set `review.reports.archive: true` to also copy each generated report into a run
 review:
   reports:
     archive: true
-    archive_dir: .apex-ray/reports/runs
+    archive_dir: ${local_data}/reports/runs
     retention: 20
 ```
 
-`retention` keeps the newest run directories and prunes older ones. Set `retention: null` to disable pruning. Report archives may contain source snippets, findings, file paths, and provider metadata; keep `.apex-ray/reports/` ignored unless the team intentionally curates a specific artifact.
+`retention` keeps the newest run directories and prunes older ones. Set `retention: null` to disable pruning. Report archives may contain source snippets, findings, file paths, and provider metadata; keep generated reports ignored unless the team intentionally curates a specific artifact.
 
 ## Pre-Push Gate
 

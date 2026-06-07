@@ -8,10 +8,14 @@ Enable telemetry in project config:
 
 ```yaml
 review:
+  local_data:
+    root: git_common
   telemetry:
     enabled: true
-    path: .apex-ray/telemetry/review-runs.jsonl
+    path: ${local_data}/telemetry/review-runs.jsonl
 ```
+
+`git_common` keeps telemetry under the shared git common directory for the local clone, so linked worktrees append to the same JSONL file instead of losing metrics when a temporary worktree is removed.
 
 Or enable it for one run:
 
@@ -22,7 +26,7 @@ apex-ray review --worktree --llm --telemetry
 Summarize entries:
 
 ```bash
-apex-ray telemetry-summary --telemetry-path .apex-ray/telemetry/review-runs.jsonl
+apex-ray telemetry-summary
 ```
 
 Entries include a schema version, run duration, target mode, diff size, finding counts, context-pack counts, coverage ratios, partial severity, residual P0/P1 counts, LLM duration, cache hit/miss counts, failed LLM runs, pack statuses, and model routes.

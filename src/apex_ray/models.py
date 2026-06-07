@@ -263,6 +263,10 @@ class AnalyzerConfig(StrictApexModel):
     script_path: str | None = None
 
 
+class LocalDataConfig(StrictApexModel):
+    root: str = ".apex-ray"
+
+
 class TelemetryConfig(StrictApexModel):
     enabled: bool = False
     path: str = ".apex-ray/telemetry/review-runs.jsonl"
@@ -309,6 +313,7 @@ class ReviewConfig(StrictApexModel):
     memory_definitions: list[MemoryCard] = Field(default_factory=list)
     analyzer: AnalyzerConfig = Field(default_factory=AnalyzerConfig)
     context: ContextConfig = Field(default_factory=ContextConfig)
+    local_data: LocalDataConfig = Field(default_factory=LocalDataConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
     telemetry: TelemetryConfig = Field(default_factory=TelemetryConfig)
     reports: ReportsConfig = Field(default_factory=ReportsConfig)
