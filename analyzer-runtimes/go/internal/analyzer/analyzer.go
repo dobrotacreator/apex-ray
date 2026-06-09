@@ -69,7 +69,7 @@ func Analyze(args Args) AnalyzerResult {
 		ShardFailures: []ShardFailure{},
 	}
 	changed := validChangedPaths(args)
-	deletedOnly := validDeletedOnlyPaths(args, changed)
+	deletedOnly := validDeletedOnlyLines(args, changed)
 	if len(changed) == 0 && len(deletedOnly) == 0 {
 		return result
 	}
@@ -106,8 +106,8 @@ func Analyze(args Args) AnalyzerResult {
 			result.Partial = true
 		}
 	}
-	for _, path := range deletedOnly {
-		result.Files = append(result.Files, deletedFileAnalysis(path, args.DeletedLines[path]))
+	for _, path := range sortedDeletedPaths(deletedOnly) {
+		result.Files = append(result.Files, deletedFileAnalysis(path, deletedOnly[path]))
 	}
 	if len(result.Warnings) > 0 || len(result.FailedFiles) > 0 {
 		result.Partial = true
@@ -134,13 +134,12 @@ func validChangedPaths(args Args) []string {
 	return paths
 }
 
-func validDeletedOnlyPaths(args Args, changed []string) []string {
+func validDeletedOnlyLines(args Args, changed []string) map[string][]DeletedLine {
 	changedSet := map[string]struct{}{}
 	for _, path := range changed {
 		changedSet[path] = struct{}{}
 	}
-	seen := map[string]struct{}{}
-	var paths []string
+	deletedOnly := map[string][]DeletedLine{}
 	for path, lines := range args.DeletedLines {
 		normalized := normalizeRelPath(path)
 		if !validGoPath(normalized) || len(lines) == 0 {
@@ -149,11 +148,15 @@ func validDeletedOnlyPaths(args Args, changed []string) []string {
 		if _, ok := changedSet[normalized]; ok {
 			continue
 		}
-		if _, ok := seen[normalized]; ok {
-			continue
-		}
-		seen[normalized] = struct{}{}
-		paths = append(paths, normalized)
+		deletedOnly[normalized] = append(deletedOnly[normalized], lines...)
+	}
+	return deletedOnly
+}
+
+func sortedDeletedPaths(deleted map[string][]DeletedLine) []string {
+	paths := make([]string, 0, len(deleted))
+	for path := range deleted {
+		paths = append(paths, path)
 	}
 	sort.Strings(paths)
 	return paths
@@ -507,18 +510,19 @@ func rangesOverlap(startA, endA, startB, endB int) bool {
 
 func deletedSymbols(info *fileInfo, deleted []DeletedLine) []*symbolInfo {
 	var symbols []*symbolInfo
-	for _, line := range deleted {
+	for index, line := range deleted {
 		name, kind, ok := deletedSymbolName(line.Text)
 		if !ok {
 			continue
 		}
+		endLine := deletedSymbolEndLine(deleted, index, line.Line)
 		symbols = append(symbols, &symbolInfo{
 			file: info,
 			analysis: AnalyzerSymbol{
 				Name:       name,
 				Kind:       kind,
 				StartLine:  line.Line,
-				EndLine:    line.Line,
+				EndLine:    endLine,
 				Exported:   ast.IsExported(name),
 				Signature:  "removed Go " + kind + ": " + strings.TrimSpace(line.Text),
 				References: []AnalyzerReference{},
@@ -529,6 +533,21 @@ func deletedSymbols(info *fileInfo, deleted []DeletedLine) []*symbolInfo {
 		})
 	}
 	return symbols
+}
+
+func deletedSymbolEndLine(deleted []DeletedLine, startIndex int, startLine int) int {
+	endLine := startLine
+	for index := startIndex + 1; index < len(deleted); index++ {
+		line := deleted[index]
+		if line.Line != endLine+1 {
+			break
+		}
+		if _, _, ok := deletedSymbolName(line.Text); ok {
+			break
+		}
+		endLine = line.Line
+	}
+	return endLine
 }
 
 func deletedSymbolName(text string) (string, string, bool) {

@@ -289,7 +289,7 @@ def test_go_analyzer_passes_deleted_go_files_as_diff_only_context(
                             "name": "Removed",
                             "kind": "function",
                             "startLine": 1,
-                            "endLine": 1,
+                            "endLine": 2,
                             "exported": True,
                             "signature": "removed Go function: func Removed() error {",
                             "references": [],
@@ -325,9 +325,18 @@ def test_go_analyzer_passes_deleted_go_files_as_diff_only_context(
         "1",
         "func Removed() error {",
     ] in [seen_command[index : index + 4] for index, value in enumerate(seen_command) if value == "--deleted-line"]
+    assert [
+        "--deleted-line",
+        "internal/auth/removed.go",
+        "2",
+        "    return nil",
+    ] in [seen_command[index : index + 4] for index, value in enumerate(seen_command) if value == "--deleted-line"]
     assert result.partial is False
     assert result.failed_files == []
-    assert result.files[0].changed_symbols[0].name == "Removed"
+    symbol = result.files[0].changed_symbols[0]
+    assert symbol.name == "Removed"
+    assert symbol.start_line == 1
+    assert symbol.end_line == 2
 
 
 def test_go_analyzer_collects_semantic_context(tmp_path: Path) -> None:

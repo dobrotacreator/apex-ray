@@ -98,7 +98,10 @@ func TestAnalyzeCollectsDeletedOnlyGoFileFromDiffLines(t *testing.T) {
 		Changed:       []string{},
 		ChangedRanges: map[string][]LineRange{},
 		DeletedLines: map[string][]DeletedLine{
-			"internal/auth/removed.go": {{Line: 1, Text: "func Removed() error {"}},
+			"./internal/auth/removed.go": {
+				{Line: 1, Text: "func Removed() error {"},
+				{Line: 2, Text: "    return nil"},
+			},
 		},
 		AnalysisTimeBudgetMS: 30000,
 	})
@@ -116,6 +119,9 @@ func TestAnalyzeCollectsDeletedOnlyGoFileFromDiffLines(t *testing.T) {
 	symbol := file.ChangedSymbols[0]
 	if symbol.Name != "Removed" || symbol.Signature != "removed Go function: func Removed() error {" {
 		t.Fatalf("unexpected deleted symbol: %#v", symbol)
+	}
+	if symbol.StartLine != 1 || symbol.EndLine != 2 {
+		t.Fatalf("unexpected deleted symbol range: %#v", symbol)
 	}
 	if result.Partial || len(result.FailedFiles) != 0 {
 		t.Fatalf("deleted-only diff analysis should not be partial: %#v", result)

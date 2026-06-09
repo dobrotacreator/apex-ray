@@ -166,5 +166,5 @@ def _deleted_lines(file: ChangedFile) -> list[tuple[int, str]]:
             if line.new_line is not None:
                 next_new_line = line.new_line + 1
             if line.kind == "delete":
-                lines.append((next_new_line, line.content))
+                lines.append((line.old_line or next_new_line, line.content))
     return lines
