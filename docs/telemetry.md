@@ -29,9 +29,13 @@ Summarize entries:
 apex-ray telemetry-summary
 ```
 
-Entries include a schema version, run duration, target mode, diff size, finding counts, context-pack counts, coverage ratios, partial severity, residual P0/P1 counts, LLM duration, cache hit/miss counts, failed LLM runs, pack statuses, and model routes.
+Entries include a schema version, run duration, target mode, diff size, finding counts, context-pack counts, coverage ratios, partial severity, residual P0/P1 counts, LLM duration, cache hit/miss counts, failed LLM runs, pack statuses, model routes, and pre-push triage counters when a gate run suppresses or prunes findings.
 
 Telemetry is intentionally metric-oriented. It does not store the full Markdown/JSON review artifact. If a team needs full per-run findings, evidence, skipped-pack details, and source-context snapshots for quality debugging, enable `review.reports.archive: true`.
+
+## Local Triage Events
+
+Finding suppressions append local lifecycle events to `review.triage.events_path`, including created, matched, stale, expired, pruned, and removed suppressions. Stale events keep the prior suppression reason so a later agent can re-check the finding instead of blindly renewing it. These events are local audit/tuning data and should stay ignored. `review.triage.events_retention_days` bounds the local event log; set it to `null` only when a team intentionally wants longer local audit history.
 
 Token fields are intentionally split:
 

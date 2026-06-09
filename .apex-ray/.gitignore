@@ -6,3 +6,4 @@ eval/telemetry/
 eval/runs/
 evals/runs/
 *.tmp
+triage/

@@ -1,6 +1,7 @@
 import json
 import uuid
 from collections import Counter
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -24,6 +25,7 @@ def append_review_telemetry(
     output_path: Path | None = None,
     json_output_path: Path | None = None,
     html_output_path: Path | None = None,
+    triage_counts: Mapping[str, int] | None = None,
 ) -> Path:
     coverage = report.llm_coverage
     entry: dict[str, Any] = {
@@ -85,6 +87,8 @@ def append_review_telemetry(
         "pack_status_counts": dict(sorted(Counter(status.status for status in coverage.pack_statuses).items())),
         "routes": [route.model_dump(mode="json", exclude_none=True) for route in coverage.routes],
     }
+    if triage_counts:
+        entry.update(triage_counts)
     try:
         telemetry_path.parent.mkdir(parents=True, exist_ok=True)
         with telemetry_path.open("a", encoding="utf-8") as handle:

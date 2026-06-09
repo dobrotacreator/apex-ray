@@ -278,6 +278,15 @@ class ReportsConfig(StrictApexModel):
     retention: int | None = Field(default=20, ge=1)
 
 
+class TriageConfig(StrictApexModel):
+    enabled: bool = True
+    state_path: str = ".apex-ray/triage/suppressions.json"
+    events_path: str = ".apex-ray/triage/events.jsonl"
+    default_expiry_days: int = Field(default=14, ge=1)
+    max_active_suppressions: int = Field(default=200, ge=1)
+    events_retention_days: int | None = Field(default=90, ge=1)
+
+
 class IncrementalPrePushRetryConfig(StrictApexModel):
     enabled: bool = False
     state_path: str = ".apex-ray/reports/pre-push-state.json"
@@ -317,6 +326,7 @@ class ReviewConfig(StrictApexModel):
     llm: LLMConfig = Field(default_factory=LLMConfig)
     telemetry: TelemetryConfig = Field(default_factory=TelemetryConfig)
     reports: ReportsConfig = Field(default_factory=ReportsConfig)
+    triage: TriageConfig = Field(default_factory=TriageConfig)
     gates: GatesConfig = Field(default_factory=GatesConfig)
 
 

@@ -39,6 +39,18 @@ from apex_ray.report import (
 )
 from apex_ray.report.coverage import continue_command_for_pack
 from apex_ray.telemetry import TelemetryError, append_review_telemetry
+from apex_ray.triage import (
+    StaleSuppression,
+    SuppressedFinding,
+    append_triage_events,
+    apply_suppressions,
+    finding_candidate,
+    finding_candidates_for_report,
+    load_triage_state,
+    prune_triage_state,
+    render_triage_snapshot,
+    write_triage_state,
+)
 
 gate_app = typer.Typer(help="Run configured Apex Ray quality gates.")
 
@@ -164,6 +176,37 @@ def pre_push(
     _set_continue_commands(report, json_output)
     previous_decision = evaluate_pre_push_gate(previous_report, gate_config) if previous_report else None
     current_decision = evaluate_pre_push_gate(report, gate_config)
+    suppressed_findings: list[SuppressedFinding] = []
+    stale_suppression_details: list[StaleSuppression] = []
+    stale_suppressions = 0
+    expired_suppressions = 0
+    pruned_suppressions = 0
+    triage_state = None
+    triage_events = []
+    triage_state_path = Path(review_config.triage.state_path)
+    triage_events_path = Path(review_config.triage.events_path)
+    if review_config.triage.enabled:
+        triage_state = load_triage_state(triage_state_path)
+        pruned = prune_triage_state(triage_state, review_config.triage)
+        triage_state = pruned.state
+        triage_events.extend(pruned.events)
+        expired_suppressions += pruned.expired_count
+        pruned_suppressions += pruned.pruned_count
+        current_triage = apply_suppressions(
+            finding_candidates_for_report(report, current_decision.blocking_findings),
+            triage_state,
+            # Suppressions scope to the pre-push target base, not the incremental
+            # retry diff range, so a user's explicit triage keeps applying across
+            # repeated push attempts. The context-pack fingerprint still prevents
+            # stale suppressions from hiding changed evidence.
+            target_base_ref=target_base,
+        )
+        triage_state = current_triage.state
+        triage_events.extend(current_triage.events)
+        stale_suppressions += current_triage.stale_count
+        suppressed_findings.extend(current_triage.suppressed_findings)
+        stale_suppression_details.extend(current_triage.stale_suppressions)
+        current_decision = _replace_blocking_findings(current_decision, current_triage.remaining_findings, gate_config)
     active_carried_findings: list[CarriedFinding] = []
     resolved_carried_count = 0
     carried_coverage_debt = CoverageDebt()
@@ -177,6 +220,21 @@ def pre_push(
         )
         if retry_state.coverage_debt.quality_gate_failed or retry_state.coverage_debt.partial_blocked:
             carried_coverage_debt = retry_state.coverage_debt
+    if review_config.triage.enabled and active_carried_findings and triage_state is not None:
+        carried_triage = apply_suppressions(
+            [finding_candidate(carried.finding, carried.context_pack) for carried in active_carried_findings],
+            triage_state,
+            target_base_ref=target_base,
+        )
+        remaining_carried_ids = {id(finding) for finding in carried_triage.remaining_findings}
+        active_carried_findings = [
+            carried for carried in active_carried_findings if id(carried.finding) in remaining_carried_ids
+        ]
+        triage_state = carried_triage.state
+        triage_events.extend(carried_triage.events)
+        stale_suppressions += carried_triage.stale_count
+        suppressed_findings.extend(carried_triage.suppressed_findings)
+        stale_suppression_details.extend(carried_triage.stale_suppressions)
     current_coverage_debt = coverage_debt_from_decision(
         report,
         quality_gate_failed=current_decision.quality_gate_failed,
@@ -198,8 +256,13 @@ def pre_push(
         )
 
     markdown_text = render_markdown(report)
-    if retry_summary is not None:
-        markdown_text = _prepend_retry_summary_markdown(markdown_text, retry_summary, decision)
+    if retry_summary is not None or stale_suppression_details:
+        markdown_text = _prepend_gate_summary_markdown(
+            markdown_text,
+            decision,
+            retry_summary=retry_summary,
+            stale_suppressions=stale_suppression_details,
+        )
     json_text = report.model_dump_json(indent=2)
     html_text = render_html(report) if html_output is not None else None
     ensure_apex_ignore_for_outputs(root, output, json_output, html_output)
@@ -217,12 +280,39 @@ def pre_push(
     ]
     if html_output is not None and html_text is not None:
         artifacts.append(ReportArtifact(html_output, html_text))
+    if review_config.triage.enabled:
+        artifacts.append(
+            ReportArtifact(
+                Path("pre-push-triage.json"),
+                render_triage_snapshot(
+                    suppressed_findings=suppressed_findings,
+                    stale_suppressions=stale_suppression_details,
+                    active_suppressions=triage_state.suppressions if triage_state is not None else [],
+                    stale_count=stale_suppressions,
+                    expired_count=expired_suppressions,
+                    pruned_count=pruned_suppressions,
+                ),
+            )
+        )
     archive_path = archive_report_artifacts(
         root,
         review_config.reports,
         artifacts,
         created_at=report.generated_at,
     )
+
+    if (
+        review_config.triage.enabled
+        and triage_state is not None
+        and (triage_state_path.exists() or triage_state.suppressions or triage_events)
+    ):
+        ensure_apex_ignore_for_outputs(root, triage_state_path, triage_events_path)
+        write_triage_state(triage_state_path, triage_state)
+        append_triage_events(
+            triage_events_path,
+            triage_events,
+            retention_days=review_config.triage.events_retention_days,
+        )
 
     if gate_config.incremental_retry.enabled:
         state_coverage_debt = _merge_coverage_debt(carried_coverage_debt, current_coverage_debt)
@@ -270,6 +360,15 @@ def pre_push(
                 output_path=output,
                 json_output_path=json_output,
                 html_output_path=html_output,
+                triage_counts={
+                    "triage_suppressed_findings_count": len(suppressed_findings),
+                    "triage_stale_suppressions_count": stale_suppressions,
+                    "triage_expired_suppressions_count": expired_suppressions,
+                    "triage_pruned_suppressions_count": pruned_suppressions,
+                    "triage_active_suppressions_count": len(triage_state.suppressions)
+                    if triage_state is not None
+                    else 0,
+                },
             )
         except TelemetryError as exc:
             raise typer.BadParameter(str(exc)) from exc
@@ -285,6 +384,11 @@ def pre_push(
             config=gate_config,
             previous_decision=previous_decision,
             retry_summary=retry_summary,
+            suppressed_findings=suppressed_findings,
+            stale_suppression_details=stale_suppression_details,
+            stale_suppressions=stale_suppressions,
+            expired_suppressions=expired_suppressions,
+            pruned_suppressions=pruned_suppressions,
         ),
         nl=False,
     )
@@ -326,6 +430,23 @@ def _load_previous_report(path: Path) -> ReviewReport | None:
 def _set_continue_commands(report: ReviewReport, json_output: Path) -> None:
     for todo in report.llm_coverage.coverage_todos:
         todo.suggested_command = continue_command_for_pack(todo.context_pack_id, str(json_output))
+
+
+def _replace_blocking_findings(
+    decision: PrePushGateDecision,
+    blocking_findings,
+    gate_config,
+) -> PrePushGateDecision:
+    reasons = [reason for reason in decision.reasons if not reason.startswith("Blocking findings:")]
+    if blocking_findings and gate_config.min_finding_severity is not None:
+        reasons.insert(0, f"Blocking findings: {len(blocking_findings)} >= {gate_config.min_finding_severity!s}")
+    return PrePushGateDecision(
+        blocked=bool(reasons),
+        reasons=reasons,
+        blocking_findings=list(blocking_findings),
+        quality_gate_failed=decision.quality_gate_failed,
+        partial_blocked=decision.partial_blocked,
+    )
 
 
 def _progress_for_gate(config) -> ProgressSink:
@@ -462,25 +583,58 @@ def _merge_coverage_debt(carried: CoverageDebt, current: CoverageDebt) -> Covera
     )
 
 
-def _prepend_retry_summary_markdown(
+def _prepend_gate_summary_markdown(
     markdown_text: str,
-    retry_summary: PrePushRetrySummary,
     decision: PrePushGateDecision,
+    *,
+    retry_summary: PrePushRetrySummary | None,
+    stale_suppressions: list[StaleSuppression],
 ) -> str:
     title = "blocked" if decision.blocked else "passed"
     lines = [
         "## Pre-Push Gate",
         "",
         f"- Decision: `{title}`",
-        f"- Mode: `{retry_summary.mode}`",
-        f"- New blocking findings: `{retry_summary.new_blocking_findings}`",
-        f"- Still blocking carried findings: `{retry_summary.still_blocking_carried_findings}`",
-        f"- Uncertain carried findings: `{retry_summary.uncertain_carried_findings}`",
-        f"- Resolved carried findings: `{retry_summary.resolved_carried_findings}`",
     ]
-    if retry_summary.fallback_reason:
-        lines.append(f"- Fallback reason: `{retry_summary.fallback_reason}`")
-    if retry_summary.carried_coverage_reasons:
-        lines.append(f"- Carried coverage debt: `{len(retry_summary.carried_coverage_reasons)}`")
+    if retry_summary is not None:
+        lines.extend(
+            [
+                f"- Mode: `{retry_summary.mode}`",
+                f"- New blocking findings: `{retry_summary.new_blocking_findings}`",
+                f"- Still blocking carried findings: `{retry_summary.still_blocking_carried_findings}`",
+                f"- Uncertain carried findings: `{retry_summary.uncertain_carried_findings}`",
+                f"- Resolved carried findings: `{retry_summary.resolved_carried_findings}`",
+            ]
+        )
+        if retry_summary.fallback_reason:
+            lines.append(f"- Fallback reason: `{retry_summary.fallback_reason}`")
+        if retry_summary.carried_coverage_reasons:
+            lines.append(f"- Carried coverage debt: `{len(retry_summary.carried_coverage_reasons)}`")
+    if stale_suppressions:
+        lines.extend(["", "### Local Triage", ""])
+        lines.append(f"- Stale suppressions requiring review: `{len(stale_suppressions)}`")
+        for item in stale_suppressions[:10]:
+            location = (
+                item.snapshot.file if item.snapshot.line is None else f"{item.snapshot.file}:{item.snapshot.line}"
+            )
+            lines.append(
+                f"- `{item.snapshot.fingerprint}` `{item.suppression.id}` "
+                f"`{item.snapshot.severity}` {item.snapshot.title} at `{location}`"
+            )
+            lines.append(f"  Prior reason: {_markdown_one_line(item.suppression.reason)}")
+            lines.append(f"  Stale reason: {_markdown_one_line(item.reason)}")
+        if len(stale_suppressions) > 10:
+            lines.append(f"- ... `{len(stale_suppressions) - 10}` more stale suppression(s).")
+        lines.append(
+            "- Re-check stale findings before suppressing again; if a finding is still objectively false positive, "
+            "create a fresh local suppression from the current report with a new concrete reason."
+        )
     lines.append("")
     return "\n".join(lines) + markdown_text
+
+
+def _markdown_one_line(value: str, max_chars: int = 220) -> str:
+    compact = " ".join(value.split())
+    if len(compact) > max_chars:
+        compact = compact[: max_chars - 3].rstrip() + "..."
+    return compact.replace("|", "\\|")

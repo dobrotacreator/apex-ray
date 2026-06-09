@@ -50,6 +50,14 @@ def resolve_runtime_config_paths(repo_root: Path, config: ReviewConfig) -> Revie
         effective.reports.archive_dir = str(
             resolve_config_path(repo_root, effective.local_data, effective.reports.archive_dir)
         )
+    if effective.triage.state_path:
+        effective.triage.state_path = str(
+            resolve_config_path(repo_root, effective.local_data, effective.triage.state_path)
+        )
+    if effective.triage.events_path:
+        effective.triage.events_path = str(
+            resolve_config_path(repo_root, effective.local_data, effective.triage.events_path)
+        )
     return effective
 
 

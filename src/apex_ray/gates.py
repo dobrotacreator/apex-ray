@@ -2,7 +2,9 @@ from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
+from apex_ray.findings import finding_fingerprint
 from apex_ray.models import Finding, PrePushGateConfig, ReviewReport
+from apex_ray.triage import StaleSuppression, SuppressedFinding
 
 _FINDING_SEVERITY_RANK = {
     "low": 1,
@@ -79,6 +81,11 @@ def render_pre_push_gate_stdout(
     config: PrePushGateConfig,
     previous_decision: PrePushGateDecision | None = None,
     retry_summary: PrePushRetrySummary | None = None,
+    suppressed_findings: list[SuppressedFinding] | None = None,
+    stale_suppression_details: list[StaleSuppression] | None = None,
+    stale_suppressions: int = 0,
+    expired_suppressions: int = 0,
+    pruned_suppressions: int = 0,
 ) -> str:
     title = "APEX RAY GATE: BLOCKED" if decision.blocked else "APEX RAY GATE: PASSED"
     lines = [
@@ -98,6 +105,23 @@ def render_pre_push_gate_stdout(
     if decision.reasons:
         lines.append("Reasons:")
         lines.extend(f"- {reason}" for reason in decision.reasons)
+        lines.append("")
+    if (
+        suppressed_findings
+        or stale_suppression_details
+        or stale_suppressions
+        or expired_suppressions
+        or pruned_suppressions
+    ):
+        lines.extend(
+            _render_triage_summary(
+                suppressed_findings or [],
+                stale_suppression_details=stale_suppression_details or [],
+                stale_suppressions=stale_suppressions,
+                expired_suppressions=expired_suppressions,
+                pruned_suppressions=pruned_suppressions,
+            )
+        )
         lines.append("")
     if config.stdout_format == "compact":
         lines.append(f"Blocking findings: {len(decision.blocking_findings)}")
@@ -210,6 +234,7 @@ def _render_findings(findings: list[Finding], max_findings: int) -> list[str]:
         lines.extend(
             [
                 f"{index}. [{finding.severity}] {finding.title}",
+                f"   ID: {finding_fingerprint(finding)}",
                 f"   {location}",
                 f"   Failure: {_one_line(finding.failure_mode)}",
                 f"   Evidence: {_one_line(finding.evidence)}",
@@ -224,6 +249,45 @@ def _render_findings(findings: list[Finding], max_findings: int) -> list[str]:
     if len(findings) > len(visible):
         lines.append(f"... {len(findings) - len(visible)} more blocking finding(s) in the report.")
         lines.append("")
+    return lines
+
+
+def _render_triage_summary(
+    suppressed_findings: list[SuppressedFinding],
+    *,
+    stale_suppression_details: list[StaleSuppression],
+    stale_suppressions: int,
+    expired_suppressions: int,
+    pruned_suppressions: int,
+) -> list[str]:
+    lines = [f"Suppressed findings: {len(suppressed_findings)}"]
+    for item in suppressed_findings[:10]:
+        location = item.snapshot.file if item.snapshot.line is None else f"{item.snapshot.file}:{item.snapshot.line}"
+        expires = item.suppression.expires_at.isoformat() if item.suppression.expires_at else "never"
+        lines.append(
+            f"- {item.snapshot.fingerprint} [{item.snapshot.severity}] {item.snapshot.title} "
+            f"at {location} ({item.suppression.verdict}, expires {expires})"
+        )
+    if len(suppressed_findings) > 10:
+        lines.append(f"- ... {len(suppressed_findings) - 10} more suppressed finding(s).")
+    if stale_suppressions:
+        lines.append(f"Stale suppressions removed: {stale_suppressions}")
+    for item in stale_suppression_details[:10]:
+        location = item.snapshot.file if item.snapshot.line is None else f"{item.snapshot.file}:{item.snapshot.line}"
+        lines.append(f"- {item.snapshot.fingerprint} [{item.snapshot.severity}] {item.snapshot.title} at {location}")
+        lines.append(f"  Prior suppression: {item.suppression.id} ({item.suppression.verdict})")
+        lines.append(f"  Prior reason: {_one_line(item.suppression.reason)}")
+        lines.append(f"  Stale reason: {_one_line(item.reason)}")
+        lines.append(
+            "  Re-check the current finding; if it is still objectively false positive, "
+            "create a fresh suppression from the current report with a new reason."
+        )
+    if len(stale_suppression_details) > 10:
+        lines.append(f"- ... {len(stale_suppression_details) - 10} more stale suppression(s).")
+    if expired_suppressions:
+        lines.append(f"Expired suppressions pruned: {expired_suppressions}")
+    if pruned_suppressions:
+        lines.append(f"Over-limit suppressions pruned: {pruned_suppressions}")
     return lines
 
 

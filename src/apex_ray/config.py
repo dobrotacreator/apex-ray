@@ -46,6 +46,13 @@ def default_config_text(base: str = DEFAULT_BASE_BRANCH) -> str:
     archive: true
     archive_dir: ${{local_data}}/reports/runs
     retention: 20
+  triage:
+    enabled: true
+    state_path: ${{local_data}}/triage/suppressions.json
+    events_path: ${{local_data}}/triage/events.jsonl
+    default_expiry_days: 14
+    max_active_suppressions: 200
+    events_retention_days: 90
   gates:
     pre_push:
       enabled: true
@@ -66,6 +73,7 @@ APEX_RAY_GITIGNORE_LINES = (
     "cache/",
     "telemetry/",
     "reports/",
+    "triage/",
     "eval/telemetry/",
     "eval/runs/",
     "evals/runs/",
@@ -80,13 +88,13 @@ APEX_RAY_AGENT_BLOCK_END = "<!-- APEX_RAY_END -->"
 APEX_RAY_AGENT_BLOCK = f"""{APEX_RAY_AGENT_BLOCK_START}
 ## Apex Ray
 
-This project uses Apex Ray for local diff-aware review. Use the `$apex-ray` skill for review, gate, report, telemetry, and eval workflows. Apex Ray runs that use LLM analysis can be long-running and may appear idle; do not interrupt or kill the process just because it takes a long time. Wait for completion unless it exits, errors, or the user asks to stop. When a pre-push hook is configured, do not proactively run `apex-ray review` or `apex-ray gate pre-push` as a routine final verification step; let `git push` invoke the hook so the pre-push incremental retry state remains the source of truth. Run Apex Ray manually only when the user asks, when debugging/tuning Apex Ray, when the hook is unavailable, or when explicit gate parity is needed before a push. Do not bypass the configured pre-push gate by default; if bypassing is unavoidable, explain why and name the equivalent checks or review already run. Use `$apex-ray-improve` after merged PRs or review feedback to produce recommendation-only improvements for Apex Ray memory, rules, eval labels, telemetry, and config. Keep `.apex-ray/config.local.yml`, Apex Ray caches/telemetry/reports/eval runs, generated review artifacts, and local provider, model, API, or cost settings out of commits.
+This project uses Apex Ray for local diff-aware review. Use the `$apex-ray` skill for review, gate, report, telemetry, and eval workflows. Apex Ray runs that use LLM analysis can be long-running and may appear idle; do not interrupt or kill the process just because it takes a long time. Wait for completion unless it exits, errors, or the user asks to stop. When a pre-push hook is configured, do not proactively run `apex-ray review` or `apex-ray gate pre-push` as a routine final verification step; let `git push` invoke the hook so the pre-push incremental retry state remains the source of truth. Run Apex Ray manually only when the user asks, when debugging/tuning Apex Ray, when the hook is unavailable, or when explicit gate parity is needed before a push. Do not bypass the configured pre-push gate by default; use `apex-ray findings suppress` only for a confirmed local false positive after checking the finding evidence, current code, and relevant tests or invariants, and always provide a concrete objective reason. Do not suppress uncertain findings, real defects, or findings merely to get a push through. If bypassing is unavoidable, explain why and name the equivalent checks or review already run. Use `$apex-ray-improve` after merged PRs or review feedback to produce recommendation-only improvements for Apex Ray memory, rules, eval labels, telemetry, and config. Keep `.apex-ray/config.local.yml`, Apex Ray caches/telemetry/reports/triage/eval runs, generated review artifacts, and local provider, model, API, or cost settings out of commits.
 {APEX_RAY_AGENT_BLOCK_END}
 """
 APEX_RAY_AGENT_BLOCK_NO_SKILL = f"""{APEX_RAY_AGENT_BLOCK_START}
 ## Apex Ray
 
-This project uses Apex Ray for local diff-aware review. Use `apex-ray doctor` to check setup. For manual Apex Ray runs, `apex-ray review --no-llm` creates deterministic local reports under `.apex-ray/reports/`, and `apex-ray gate pre-push` runs the hook-equivalent gate. Apex Ray runs that use LLM analysis can be long-running and may appear idle; do not interrupt or kill the process just because it takes a long time. Wait for completion unless it exits, errors, or the user asks to stop. When a pre-push hook is configured, do not proactively run `apex-ray review` or `apex-ray gate pre-push` as a routine final verification step; let `git push` invoke the hook so the pre-push incremental retry state remains the source of truth. Run Apex Ray manually only when the user asks, when debugging/tuning Apex Ray, when the hook is unavailable, or when explicit gate parity is needed before a push. Do not bypass the configured pre-push gate by default; if bypassing is unavoidable, explain why and name the equivalent checks or review already run. Keep `.apex-ray/config.local.yml`, Apex Ray caches/telemetry/reports/eval runs, generated review artifacts, and local provider, model, API, or cost settings out of commits.
+This project uses Apex Ray for local diff-aware review. Use `apex-ray doctor` to check setup. For manual Apex Ray runs, `apex-ray review --no-llm` creates deterministic local reports under `.apex-ray/reports/`, and `apex-ray gate pre-push` runs the hook-equivalent gate. Apex Ray runs that use LLM analysis can be long-running and may appear idle; do not interrupt or kill the process just because it takes a long time. Wait for completion unless it exits, errors, or the user asks to stop. When a pre-push hook is configured, do not proactively run `apex-ray review` or `apex-ray gate pre-push` as a routine final verification step; let `git push` invoke the hook so the pre-push incremental retry state remains the source of truth. Run Apex Ray manually only when the user asks, when debugging/tuning Apex Ray, when the hook is unavailable, or when explicit gate parity is needed before a push. Do not bypass the configured pre-push gate by default; use `apex-ray findings suppress` only for a confirmed local false positive after checking the finding evidence, current code, and relevant tests or invariants, and always provide a concrete objective reason. Do not suppress uncertain findings, real defects, or findings merely to get a push through. If bypassing is unavoidable, explain why and name the equivalent checks or review already run. Keep `.apex-ray/config.local.yml`, Apex Ray caches/telemetry/reports/triage/eval runs, generated review artifacts, and local provider, model, API, or cost settings out of commits.
 {APEX_RAY_AGENT_BLOCK_END}
 """
 
@@ -107,13 +115,15 @@ Apex Ray is the project's local diff-aware AI review tool. Use it to create dete
 - When Apex Ray is configured in a pre-push hook, do not proactively run `apex-ray review` or `apex-ray gate pre-push` as a routine final verification step; let `git push` invoke the hook so the pre-push incremental retry state remains the source of truth.
 - For deterministic local review outside pre-push, run `apex-ray review --no-llm` only when the user asks or when diagnosing Apex Ray; default reports are written under `.apex-ray/reports/`.
 - When the user asks, the hook is unavailable, or explicit pre-push gate parity is needed before pushing, run `apex-ray gate pre-push`; blocking findings and critical partial coverage are printed to stdout and the full report is written under `.apex-ray/reports/`.
-- Do not bypass the configured pre-push gate by default. If bypassing is unavoidable, explain why and name the equivalent checks or review already run.
+- Do not bypass the configured pre-push gate by default. Use `apex-ray findings suppress` only for confirmed local false positives after checking the finding evidence, current code, and relevant tests or invariants. Provide a concrete objective reason; do not suppress uncertain findings, real defects, or findings merely to get a push through.
+- If bypassing is unavoidable, explain why and name the equivalent checks or review already run.
 - Use `--no-llm` or `.apex-ray/config.local.yml` when the configured local provider is unavailable or LLM cost is not appropriate.
 - If a report has partial coverage, continue unreviewed work with `apex-ray review --continue-from .apex-ray/reports/review.json --residual-priority p0 --llm` or review a specific skipped pack with `--only-pack`.
 - Use `.apex-ray/config.yml` for shared team policy and `.apex-ray/config.local.yml` for personal provider/model/cost overrides.
 - Use `.apex-ray/rules/` for stable review rules and `.apex-ray/memory/` for curated team learning.
 - Use `apex-ray telemetry-summary` when tuning cost, latency, coverage, or model routing.
 - Treat `.apex-ray/reports/*.md/json/html` as latest snapshots. Archived run reports live under configured local data when `review.reports.archive: true`.
+- Treat `.apex-ray/triage/` as local ephemeral finding state and audit events; do not commit raw suppressions.
 - Use `apex-ray eval capture-prs` and `apex-ray eval run-prs` only for historical PR benchmark/eval work.
 
 ## Outputs
@@ -123,6 +133,29 @@ Prefer writing generated review artifacts under `.apex-ray/reports/`. Keep Markd
 ## Boundaries
 
 Do not treat Apex Ray as a replacement for tests, linters, typecheck, CI, dependency scanners, SAST, or human review. Do not commit `.apex-ray/config.local.yml`, `.apex-ray/cache/`, `.apex-ray/telemetry/`, `.apex-ray/reports/`, eval run directories, generated review artifacts, or local provider, model, API, or cost settings unless the team intentionally curates a specific artifact.
+
+### Local Finding Triage
+
+When a pre-push finding is a confirmed local false positive, suppress the specific finding locally instead of bypassing the hook:
+
+```bash
+apex-ray findings list --from-report .apex-ray/reports/pre-push.json
+apex-ray findings suppress apex-<id> \
+  --from-report .apex-ray/reports/pre-push.json \
+  --reason "The repository layer already enforces this invariant."
+```
+
+Use suppressions sparingly. Before suppressing, inspect the finding evidence, the current code, and relevant tests, invariants, or ownership assumptions. The reason must be concrete and objective enough for a later agent to audit. Do not suppress when the finding might be real, when you are unsure, or merely to get a push through.
+
+Triage state is local and ignored by default. It is intended for frequent local review runs, not as shared team policy. A suppression applies only while the finding fingerprint and context-pack fingerprint still match; if relevant context changes, Apex Ray marks the suppression stale, prints the prior reason, and lets the finding block again. Re-check stale findings before suppressing again.
+
+Useful cleanup commands:
+
+```bash
+apex-ray findings suppressions
+apex-ray findings unsuppress sup-<id>
+apex-ray findings prune
+```
 """
 
 APEX_RAY_IMPROVE_SKILL_TEXT = """---
@@ -351,6 +384,7 @@ def _read_review_config(config_path: Path) -> dict[str, Any]:
             "llm",
             "telemetry",
             "reports",
+            "triage",
             "gates",
         },
         f"{config_path}:review",
@@ -383,6 +417,7 @@ def _normalize_review_config(review: dict[str, Any]) -> dict[str, Any]:
         "llm": review.get("llm", {}),
         "telemetry": review.get("telemetry", {}),
         "reports": review.get("reports", {}),
+        "triage": review.get("triage", {}),
         "gates": review.get("gates", {}),
     }
 
