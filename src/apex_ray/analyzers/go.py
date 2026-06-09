@@ -25,7 +25,7 @@ def go_changed_files(files: list[ChangedFile]) -> list[ChangedFile]:
         if file.language in GO_LANGUAGES
         and file.file_kind in {FileKind.SOURCE, FileKind.TEST}
         and not file.is_ignored
-        and file.new_path is not None
+        and (file.new_path is not None or file.old_path is not None)
     ]
 
 
@@ -72,7 +72,7 @@ def _go_analyzer_args(repo_root: Path, changed_files: list[ChangedFile], config:
         str(repo_root),
         "--changed",
     ]
-    args.extend(file.new_path for file in changed_files if file.new_path)
+    args.extend(file.path for file in changed_files)
     args.extend(["--analysis-time-budget-ms", str(_analysis_time_budget_ms(config.timeout_seconds))])
     for file in changed_files:
         for start, end in _changed_new_line_ranges(file):
@@ -160,8 +160,6 @@ def _changed_new_line_ranges(file: ChangedFile) -> list[tuple[int, int]]:
 def _deleted_lines(file: ChangedFile) -> list[tuple[int, str]]:
     lines: list[tuple[int, str]] = []
     for hunk in file.hunks:
-        if any(line.kind == "add" for line in hunk.lines):
-            continue
         next_new_line = hunk.new_start
         for line in hunk.lines:
             if line.new_line is not None:

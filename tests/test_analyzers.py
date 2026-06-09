@@ -147,6 +147,7 @@ def test_go_analyzer_passes_internal_time_budget_ranges_and_deleted_lines(
                 "new_start": 10,
                 "new_lines": 3,
                 "lines": [
+                    {"kind": "delete", "old_line": 10, "content": "func removed() error {"},
                     {"kind": "add", "new_line": 10, "content": "func added() error {"},
                     {"kind": "add", "new_line": 11, "content": "    return nil"},
                 ],
@@ -203,13 +204,83 @@ def test_go_analyzer_passes_internal_time_budget_ranges_and_deleted_lines(
     assert ["--range", "internal/auth/service.go:10-11"] == seen_command[
         seen_command.index("--range") : seen_command.index("--range") + 2
     ]
-    deleted_index = seen_command.index("--deleted-line")
-    assert seen_command[deleted_index : deleted_index + 4] == [
+    deleted_line_args = [
+        seen_command[index : index + 4] for index, value in enumerate(seen_command) if value == "--deleted-line"
+    ]
+    assert [
+        "--deleted-line",
+        "internal/auth/service.go",
+        "10",
+        "func removed() error {",
+    ] in deleted_line_args
+    assert [
         "--deleted-line",
         "internal/auth/service.go",
         "20",
         "func removed() error {",
-    ]
+    ] in deleted_line_args
+
+
+def test_go_analyzer_includes_deleted_go_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    changed = ChangedFile(
+        old_path="internal/auth/removed.go",
+        new_path=None,
+        language="go",
+        file_kind=FileKind.SOURCE,
+        hunks=[
+            {
+                "old_start": 1,
+                "old_lines": 2,
+                "new_start": 1,
+                "new_lines": 0,
+                "lines": [
+                    {"kind": "delete", "old_line": 1, "content": "func Removed() error {"},
+                    {"kind": "delete", "old_line": 2, "content": "    return nil"},
+                ],
+            }
+        ],
+    )
+    seen_command: list[str] | None = None
+    runtime_dir = tmp_path / "go-runtime"
+    runtime_dir.mkdir()
+
+    monkeypatch.setattr("apex_ray.analyzers.go.shutil.which", lambda name: "/usr/bin/go")
+    monkeypatch.setattr("apex_ray.analyzers.go.go_analyzer_runtime_dir", lambda: runtime_dir)
+
+    def fake_run(
+        args: list[str],
+        *,
+        cwd: Path,
+        timeout: float,
+    ) -> subprocess.CompletedProcess[str]:
+        nonlocal seen_command
+        seen_command = args
+        payload = {
+            "language": "go",
+            "projectRoot": str(tmp_path),
+            "tsconfigPath": None,
+            "files": [],
+            "warnings": ["Unable to parse Go file internal/auth/removed.go"],
+            "indexCache": None,
+            "partial": True,
+            "failedFiles": ["internal/auth/removed.go"],
+            "shardFailures": [],
+        }
+        return subprocess.CompletedProcess(args, 0, stdout=json.dumps(payload), stderr="")
+
+    monkeypatch.setattr("apex_ray.analyzers.go._run_analyzer_process", fake_run)
+
+    result = run_go_analyzer(tmp_path, [changed], AnalyzerConfig(timeout_seconds=10))
+
+    assert result is not None
+    assert seen_command is not None
+    changed_index = seen_command.index("--changed")
+    assert seen_command[changed_index + 1] == "internal/auth/removed.go"
+    assert result.partial is True
+    assert result.failed_files == ["internal/auth/removed.go"]
 
 
 def test_go_analyzer_collects_semantic_context(tmp_path: Path) -> None:

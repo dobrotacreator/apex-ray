@@ -30,7 +30,7 @@ pre-push:
     ts-analyzer:
       run: npm --prefix analyzer-runtimes/typescript run typecheck && npm --prefix analyzer-runtimes/typescript run coverage
     python-coverage:
-      run: uv run coverage run -m pytest -q && uv run coverage report -m
+      run: bash -c 'unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_PREFIX GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES; uv run coverage run -m pytest -q && uv run coverage report -m'
     package:
       run: uv build --sdist --wheel && uv run twine check dist/*
     apex-ray-review:
