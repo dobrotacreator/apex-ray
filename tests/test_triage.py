@@ -57,6 +57,11 @@ def test_triage_suppression_matches_only_same_context_pack() -> None:
     assert len(matched.suppressed_findings) == 1
     assert stale.remaining_findings == [finding]
     assert stale.stale_count == 1
+    assert len(stale.stale_suppressions) == 1
+    assert stale.stale_suppressions[0].suppression.reason == "Known false positive."
+    assert stale.stale_suppressions[0].reason == "Context pack changed since suppression was created."
+    assert stale.events[0].reason == "Context pack changed since suppression was created."
+    assert stale.events[0].suppression_reason == "Known false positive."
     assert stale.state.suppressions == []
 
 

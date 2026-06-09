@@ -35,7 +35,7 @@ Telemetry is intentionally metric-oriented. It does not store the full Markdown/
 
 ## Local Triage Events
 
-Finding suppressions append local lifecycle events to `review.triage.events_path`, including created, matched, stale, expired, pruned, and removed suppressions. These events are local audit/tuning data and should stay ignored. `review.triage.events_retention_days` bounds the local event log; set it to `null` only when a team intentionally wants longer local audit history.
+Finding suppressions append local lifecycle events to `review.triage.events_path`, including created, matched, stale, expired, pruned, and removed suppressions. Stale events keep the prior suppression reason so a later agent can re-check the finding instead of blindly renewing it. These events are local audit/tuning data and should stay ignored. `review.triage.events_retention_days` bounds the local event log; set it to `null` only when a team intentionally wants longer local audit history.
 
 Token fields are intentionally split:
 

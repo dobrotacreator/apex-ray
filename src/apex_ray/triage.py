@@ -75,6 +75,7 @@ class TriageEvent(ApexModel):
     created_at: datetime
     verdict: str = ""
     reason: str = ""
+    suppression_reason: str = ""
     file: str = ""
     line: int | None = None
     title: str = ""
@@ -96,6 +97,14 @@ class SuppressedFinding:
 
 
 @dataclass(frozen=True)
+class StaleSuppression:
+    finding: Finding
+    suppression: FindingSuppression
+    snapshot: FindingSnapshot
+    reason: str
+
+
+@dataclass(frozen=True)
 class TriagePruneResult:
     state: TriageState
     events: list[TriageEvent]
@@ -107,6 +116,7 @@ class TriagePruneResult:
 class TriageApplyResult:
     remaining_findings: list[Finding]
     suppressed_findings: list[SuppressedFinding]
+    stale_suppressions: list[StaleSuppression]
     state: TriageState
     events: list[TriageEvent]
     stale_count: int
@@ -290,6 +300,7 @@ def apply_suppressions(
     suppressions = list(state.suppressions)
     remaining: list[Finding] = []
     suppressed: list[SuppressedFinding] = []
+    stale: list[StaleSuppression] = []
     events: list[TriageEvent] = []
     stale_ids: set[str] = set()
     updated_by_id: dict[str, FindingSuppression] = {}
@@ -308,6 +319,7 @@ def apply_suppressions(
         if stale_reason:
             if suppression.id not in stale_ids:
                 stale_ids.add(suppression.id)
+                stale.append(StaleSuppression(candidate.finding, suppression, candidate.snapshot, stale_reason))
                 events.append(triage_event("suppression_stale", suppression, timestamp, reason=stale_reason))
             remaining.append(candidate.finding)
             continue
@@ -329,6 +341,7 @@ def apply_suppressions(
     return TriageApplyResult(
         remaining_findings=remaining,
         suppressed_findings=suppressed,
+        stale_suppressions=stale,
         state=TriageState(suppressions=next_suppressions),
         events=events,
         stale_count=len(stale_ids),
@@ -338,6 +351,7 @@ def apply_suppressions(
 def render_triage_snapshot(
     *,
     suppressed_findings: list[SuppressedFinding],
+    stale_suppressions: list[StaleSuppression] | None = None,
     active_suppressions: list[FindingSuppression],
     stale_count: int,
     expired_count: int,
@@ -361,6 +375,23 @@ def render_triage_snapshot(
             }
             for item in suppressed_findings
         ],
+        "stale_suppressions": [
+            {
+                "suppression_id": item.suppression.id,
+                "finding_fingerprint": item.snapshot.fingerprint,
+                "stale_reason": item.reason,
+                "prior_reason": item.suppression.reason,
+                "verdict": item.suppression.verdict,
+                "file": item.snapshot.file,
+                "line": item.snapshot.line,
+                "title": item.snapshot.title,
+                "severity": item.snapshot.severity,
+                "context_pack_id": item.snapshot.context_pack_id,
+                "previous_context_pack_fingerprint": item.suppression.context_pack_fingerprint,
+                "current_context_pack_fingerprint": item.snapshot.context_pack_fingerprint,
+            }
+            for item in (stale_suppressions or [])
+        ],
         "active_suppressions_count": len(active_suppressions),
         "stale_suppressions_count": stale_count,
         "expired_suppressions_count": expired_count,
@@ -383,6 +414,7 @@ def triage_event(
         created_at=created_at,
         verdict=suppression.verdict,
         reason=reason,
+        suppression_reason=suppression.reason,
         file=suppression.file,
         line=suppression.line,
         title=suppression.title,

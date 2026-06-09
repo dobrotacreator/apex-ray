@@ -523,6 +523,118 @@ def test_findings_suppress_unblocks_matching_pre_push_finding(tmp_path: Path, mo
     assert fingerprint in gate.stdout
 
 
+def test_gate_pre_push_reports_stale_suppression_details(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    config = tmp_path / ".apex-ray" / "config.yml"
+    config.parent.mkdir(parents=True)
+    config.write_text("review:\n  reports:\n    archive: true\n", encoding="utf-8")
+    finding = Finding(
+        title="Missing tenant predicate",
+        severity=FindingSeverity.HIGH,
+        confidence=FindingConfidence.HIGH,
+        file="src/orders.ts",
+        line=84,
+        failure_mode="The changed query can return another tenant's order.",
+        evidence="The diff removes tenantId from the lookup predicate.",
+        suggested_fix="Restore the tenantId predicate.",
+        suggested_test="Add a cross-tenant lookup regression test.",
+        context_pack_id="src/orders.ts#getOrder:1",
+    )
+    original_pack = ContextPack(
+        id=finding.context_pack_id,
+        file=finding.file,
+        diff_snippet=[
+            "@@ -83,1 +83,1 @@",
+            "-  return orders.find({ id, tenantId });",
+            "+  return orders.find({ id });",
+        ],
+    )
+    changed_pack = ContextPack(
+        id=finding.context_pack_id,
+        file=finding.file,
+        diff_snippet=[
+            "@@ -83,1 +83,1 @@",
+            "-  return orders.find({ id, tenantId });",
+            "+  return orders.find({ id, accountId });",
+        ],
+    )
+    original_report = build_report(
+        ProjectProfile(root=str(tmp_path), is_git_repo=True),
+        ReviewConfig(),
+        DiffSummary(target_mode=TargetMode.BASE, base="main", stats=DiffStats(files_changed=1)),
+        context_packs=[original_pack],
+        findings=[finding],
+        verifications=[
+            FindingVerification(
+                finding=finding,
+                approved=True,
+                confidence=FindingConfidence.HIGH,
+                reason="Concrete diff-caused issue.",
+            )
+        ],
+    )
+    changed_report = build_report(
+        ProjectProfile(root=str(tmp_path), is_git_repo=True),
+        ReviewConfig(),
+        DiffSummary(target_mode=TargetMode.BASE, base="main", stats=DiffStats(files_changed=1)),
+        context_packs=[changed_pack],
+        findings=[finding],
+        verifications=[
+            FindingVerification(
+                finding=finding,
+                approved=True,
+                confidence=FindingConfidence.HIGH,
+                reason="Concrete diff-caused issue.",
+            )
+        ],
+    )
+    report_path = tmp_path / ".apex-ray" / "reports" / "pre-push.json"
+    report_path.parent.mkdir(parents=True)
+    report_path.write_text(original_report.model_dump_json(indent=2), encoding="utf-8")
+    fingerprint = finding_fingerprint(finding)
+    suppress = runner.invoke(
+        app,
+        [
+            "findings",
+            "suppress",
+            fingerprint,
+            "--from-report",
+            str(report_path),
+            "--reason",
+            "The repository layer already applies tenant scoping before this helper.",
+        ],
+        catch_exceptions=False,
+    )
+
+    def fake_run_review_pipeline(*args, **kwargs):
+        return changed_report
+
+    monkeypatch.setattr("apex_ray.cli.gate.git.repo_root", lambda _cwd: tmp_path)
+    monkeypatch.setattr("apex_ray.cli.gate.git.is_git_repo", lambda _root: True)
+    monkeypatch.setattr(
+        "apex_ray.cli.gate.git.diff_base", lambda _root, _base: "diff --git a/src/orders.ts b/src/orders.ts\n"
+    )
+    monkeypatch.setattr("apex_ray.cli.gate.run_review_pipeline", fake_run_review_pipeline)
+    monkeypatch.setattr("apex_ray.cli.gate.continue_review_from_report", lambda report, **_kwargs: (report, []))
+
+    gate = runner.invoke(app, ["gate", "pre-push"])
+    markdown = (tmp_path / ".apex-ray" / "reports" / "pre-push.md").read_text(encoding="utf-8")
+    archive_dirs = list((tmp_path / ".apex-ray" / "reports" / "runs").iterdir())
+    triage_snapshot = json.loads((archive_dirs[0] / "pre-push-triage.json").read_text(encoding="utf-8"))
+
+    assert suppress.exit_code == 0
+    assert gate.exit_code == 1
+    assert "Stale suppressions removed: 1" in gate.stdout
+    assert "Prior reason: The repository layer already applies tenant scoping" in gate.stdout
+    assert "Re-check the current finding" in gate.stdout
+    assert "### Local Triage" in markdown
+    assert "Stale suppressions requiring review" in markdown
+    assert "The repository layer already applies tenant scoping" in markdown
+    assert triage_snapshot["stale_suppressions_count"] == 1
+    assert triage_snapshot["stale_suppressions"][0]["finding_fingerprint"] == fingerprint
+    assert "tenant scoping" in triage_snapshot["stale_suppressions"][0]["prior_reason"]
+
+
 def test_gate_pre_push_archives_reports_when_enabled(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
     config = tmp_path / ".apex-ray" / "config.yml"

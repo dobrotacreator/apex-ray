@@ -204,7 +204,7 @@ Set `review.llm.enabled: false` in local config when a machine should keep norma
 
 ### Local Finding Triage
 
-When a pre-push finding is a local false positive, do not bypass the hook. Suppress the specific finding locally:
+When a pre-push finding is a confirmed local false positive, do not bypass the hook. Suppress the specific finding locally:
 
 ```bash
 apex-ray findings list --from-report .apex-ray/reports/pre-push.json
@@ -213,7 +213,9 @@ apex-ray findings suppress apex-<id> \
   --reason "The repository layer already enforces this invariant."
 ```
 
-Triage state is local and ignored by default. It is intended for frequent local review runs, not as shared team policy. A suppression applies only while the finding fingerprint and context-pack fingerprint still match; if the relevant context changes, Apex Ray marks the suppression stale and the finding blocks again. Suppressions expire after `review.triage.default_expiry_days` unless `--expires` is provided.
+Use suppressions sparingly. Before suppressing, inspect the finding evidence, the current code, and relevant tests, invariants, or ownership assumptions. The reason must be concrete and objective enough for a later agent to audit. Do not suppress when the finding might be real, when you are unsure, or merely to get a push through.
+
+Triage state is local and ignored by default. It is intended for frequent local review runs, not as shared team policy. A suppression applies only while the finding fingerprint and context-pack fingerprint still match; if the relevant context changes, Apex Ray marks the suppression stale, prints the prior reason in the gate output/report, and lets the finding block again. Re-check stale findings before suppressing again. Suppressions expire after `review.triage.default_expiry_days` unless `--expires` is provided.
 
 Useful cleanup commands:
 

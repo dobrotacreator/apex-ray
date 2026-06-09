@@ -264,12 +264,17 @@ def test_init_project_creates_team_setup_files(tmp_path: Path) -> None:
     assert "do not proactively run `apex-ray review` or `apex-ray gate pre-push`" in agents_text
     assert "pre-push incremental retry state remains the source of truth" in agents_text
     assert "Do not bypass the configured pre-push gate by default" in agents_text
+    assert "confirmed local false positive" in agents_text
+    assert "concrete objective reason" in agents_text
+    assert "merely to get a push through" in agents_text
     assert "$apex-ray" in agents_text
     assert "$apex-ray-improve" in agents_text
     skill_text = (tmp_path / ".apex-ray" / "skills" / "apex-ray" / "SKILL.md").read_text(encoding="utf-8")
     assert "do not proactively run `apex-ray review` or `apex-ray gate pre-push`" in skill_text
     assert "apex-ray review --continue-from .apex-ray/reports/review.json" in skill_text
     assert "Do not bypass the configured pre-push gate by default" in skill_text
+    assert "Use suppressions sparingly" in skill_text
+    assert "Re-check stale findings before suppressing again" in skill_text
     assert "Use `--no-llm` or `.apex-ray/config.local.yml`" in skill_text
     improve_skill_text = (tmp_path / ".apex-ray" / "skills" / "apex-ray-improve" / "SKILL.md").read_text(
         encoding="utf-8"
