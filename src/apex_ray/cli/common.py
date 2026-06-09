@@ -2,7 +2,7 @@ from pathlib import Path
 
 import typer
 
-from apex_ray.config import ensure_apex_gitignore
+from apex_ray.config import ConfigError, agent_artifact_refresh_warning, ensure_apex_gitignore
 
 
 def ensure_distinct_outputs(output: Path, json_output: Path, html_output: Path | None = None) -> None:
@@ -28,3 +28,12 @@ def ensure_apex_ignore_for_outputs(root: Path, *paths: Path | None) -> None:
         if path is not None and path.resolve().is_relative_to(apex_dir):
             ensure_apex_gitignore(root)
             return
+
+
+def warn_outdated_agent_artifacts(root: Path) -> None:
+    try:
+        warning = agent_artifact_refresh_warning(root)
+    except ConfigError:
+        return
+    if warning:
+        typer.echo(f"Warning: {warning}", err=True)

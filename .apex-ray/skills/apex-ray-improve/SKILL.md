@@ -1,6 +1,7 @@
 ---
 name: apex-ray-improve
 description: Use after merged PRs or review feedback to produce recommendation-only improvements for Apex Ray memory, rules, eval labels, telemetry, coverage, model routing, or config from PR comments, Greptile findings, Apex reports, and telemetry.
+apex_ray_template_version: 2
 ---
 
 # Apex Ray Improve
