@@ -1,3 +1,4 @@
+import re
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
@@ -100,6 +101,7 @@ CODEX_REPO_SKILL_DIR = ".agents"
 APEX_RAY_AGENT_BLOCK_START = "<!-- APEX_RAY_START -->"
 APEX_RAY_AGENT_BLOCK_END = "<!-- APEX_RAY_END -->"
 APEX_RAY_AGENT_TEMPLATE_MARKER = f"<!-- apex-ray-agent-artifacts: version={AGENT_ARTIFACT_TEMPLATE_VERSION} -->"
+APEX_RAY_SKILL_TOKEN_RE = re.compile(r"(?<![\w-])\$apex-ray(?![\w-])")
 APEX_RAY_AGENT_BLOCK = f"""{APEX_RAY_AGENT_BLOCK_START}
 {APEX_RAY_AGENT_TEMPLATE_MARKER}
 ## Apex Ray
@@ -158,7 +160,7 @@ When a pre-push finding is a confirmed local false positive, suppress the specif
 
 ```bash
 apex-ray findings list --from-report .apex-ray/reports/pre-push.json
-apex-ray findings suppress apex-<id> \\
+apex-ray findings suppress apex-ID \\
   --from-report .apex-ray/reports/pre-push.json \\
   --reason "The repository layer already enforces this invariant."
 ```
@@ -171,7 +173,7 @@ Useful cleanup commands:
 
 ```bash
 apex-ray findings suppressions
-apex-ray findings unsuppress sup-<id>
+apex-ray findings unsuppress sup-ID
 apex-ray findings prune
 ```
 """
@@ -558,11 +560,13 @@ def _agent_file_status_targets(root: Path, *, agent_files: str, include_missing:
     if agent_files in {"claude", "both"}:
         root_claude_file = root / "CLAUDE.md"
         claude_file = root / ".claude" / "CLAUDE.md"
-        if root_claude_file.exists() or root_claude_file.is_symlink():
+        root_claude_exists = root_claude_file.exists() or root_claude_file.is_symlink()
+        nested_claude_exists = claude_file.exists() or claude_file.is_symlink()
+        if root_claude_exists:
             targets.append(root_claude_file)
-        elif claude_file.exists() or claude_file.is_symlink():
+        if nested_claude_exists:
             targets.append(claude_file)
-        elif include_missing:
+        if include_missing and not root_claude_exists and not nested_claude_exists:
             targets.append(claude_file)
     return targets
 
@@ -632,9 +636,9 @@ def _agent_skill_status(
                 canonical,
                 skill_name=skill_name,
                 expected=expected,
-                include_missing=include_missing,
+                include_missing=True,
             )
-            if canonical_status is None or canonical_status.status == "current":
+            if canonical_status is not None and canonical_status.status == "current":
                 return AgentArtifactStatus(path, "agent_skill", "current")
             return AgentArtifactStatus(path, "agent_skill", "outdated", "canonical skill is not current")
         return AgentArtifactStatus(path, "agent_skill", "outdated", "symlink does not point to canonical skill")
@@ -657,7 +661,7 @@ def _extract_agent_block(text: str) -> str | None:
 
 
 def _detect_agent_skill_from_block(block: str) -> bool:
-    return "$apex-ray" in block or "Use the `$apex-ray` skill" in block
+    return APEX_RAY_SKILL_TOKEN_RE.search(block) is not None
 
 
 def _normalize_artifact_text(text: str) -> str:

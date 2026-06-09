@@ -41,7 +41,7 @@ When a pre-push finding is a confirmed local false positive, suppress the specif
 
 ```bash
 apex-ray findings list --from-report .apex-ray/reports/pre-push.json
-apex-ray findings suppress apex-<id> \
+apex-ray findings suppress apex-ID \
   --from-report .apex-ray/reports/pre-push.json \
   --reason "The repository layer already enforces this invariant."
 ```
@@ -54,6 +54,6 @@ Useful cleanup commands:
 
 ```bash
 apex-ray findings suppressions
-apex-ray findings unsuppress sup-<id>
+apex-ray findings unsuppress sup-ID
 apex-ray findings prune
 ```
