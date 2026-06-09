@@ -69,39 +69,45 @@ func Analyze(args Args) AnalyzerResult {
 		ShardFailures: []ShardFailure{},
 	}
 	changed := validChangedPaths(args)
-	if len(changed) == 0 {
+	deletedOnly := validDeletedOnlyPaths(args, changed)
+	if len(changed) == 0 && len(deletedOnly) == 0 {
 		return result
 	}
 
-	pkgs, loadWarnings := loadPackages(args)
-	result.Warnings = append(result.Warnings, loadWarnings...)
-	ws := buildWorkspace(args.Repo, pkgs, &result)
-	changedByPath := map[string][]*symbolInfo{}
-	for _, path := range changed {
-		info := ws.files[path]
-		if info == nil {
-			continue
+	if len(changed) > 0 {
+		pkgs, loadWarnings := loadPackages(args)
+		result.Warnings = append(result.Warnings, loadWarnings...)
+		ws := buildWorkspace(args.Repo, pkgs, &result)
+		changedByPath := map[string][]*symbolInfo{}
+		for _, path := range changed {
+			info := ws.files[path]
+			if info == nil {
+				continue
+			}
+			changedByPath[path] = changedSymbolsForFile(info, args.ChangedRanges[path], args.DeletedLines[path])
 		}
-		changedByPath[path] = changedSymbolsForFile(info, args.ChangedRanges[path], args.DeletedLines[path])
-	}
-	enrichChangedSymbols(ws, changedByPath)
+		enrichChangedSymbols(ws, changedByPath)
 
-	for _, path := range changed {
-		if info := ws.files[path]; info != nil {
-			result.Files = append(result.Files, fileAnalysis(info, changedByPath[path], relatedTests(ws, info, changedByPath[path])))
-			continue
-		}
-		fallback, warning, failed := fallbackFileAnalysis(args.Repo, path, args.ChangedRanges[path], args.DeletedLines[path])
-		if warning != "" {
-			result.Warnings = append(result.Warnings, warning)
+		for _, path := range changed {
+			if info := ws.files[path]; info != nil {
+				result.Files = append(result.Files, fileAnalysis(info, changedByPath[path], relatedTests(ws, info, changedByPath[path])))
+				continue
+			}
+			fallback, warning, failed := fallbackFileAnalysis(args.Repo, path, args.ChangedRanges[path], args.DeletedLines[path])
+			if warning != "" {
+				result.Warnings = append(result.Warnings, warning)
+				result.Partial = true
+			}
+			if failed {
+				result.FailedFiles = append(result.FailedFiles, path)
+				continue
+			}
+			result.Files = append(result.Files, fallback)
 			result.Partial = true
 		}
-		if failed {
-			result.FailedFiles = append(result.FailedFiles, path)
-			continue
-		}
-		result.Files = append(result.Files, fallback)
-		result.Partial = true
+	}
+	for _, path := range deletedOnly {
+		result.Files = append(result.Files, deletedFileAnalysis(path, args.DeletedLines[path]))
 	}
 	if len(result.Warnings) > 0 || len(result.FailedFiles) > 0 {
 		result.Partial = true
@@ -115,10 +121,7 @@ func validChangedPaths(args Args) []string {
 	var paths []string
 	for _, path := range args.Changed {
 		normalized := normalizeRelPath(path)
-		if normalized == "." || strings.HasPrefix(normalized, "../") || filepath.IsAbs(normalized) {
-			continue
-		}
-		if filepath.Ext(normalized) != ".go" {
+		if !validGoPath(normalized) {
 			continue
 		}
 		if _, ok := seen[normalized]; ok {
@@ -129,6 +132,38 @@ func validChangedPaths(args Args) []string {
 	}
 	sort.Strings(paths)
 	return paths
+}
+
+func validDeletedOnlyPaths(args Args, changed []string) []string {
+	changedSet := map[string]struct{}{}
+	for _, path := range changed {
+		changedSet[path] = struct{}{}
+	}
+	seen := map[string]struct{}{}
+	var paths []string
+	for path, lines := range args.DeletedLines {
+		normalized := normalizeRelPath(path)
+		if !validGoPath(normalized) || len(lines) == 0 {
+			continue
+		}
+		if _, ok := changedSet[normalized]; ok {
+			continue
+		}
+		if _, ok := seen[normalized]; ok {
+			continue
+		}
+		seen[normalized] = struct{}{}
+		paths = append(paths, normalized)
+	}
+	sort.Strings(paths)
+	return paths
+}
+
+func validGoPath(normalized string) bool {
+	return normalized != "." &&
+		!strings.HasPrefix(normalized, "../") &&
+		!filepath.IsAbs(normalized) &&
+		filepath.Ext(normalized) == ".go"
 }
 
 func loadPackages(args Args) ([]*packages.Package, []string) {
@@ -888,6 +923,11 @@ func fileAnalysis(info *fileInfo, changed []*symbolInfo, related []string) FileA
 		RelatedTests:   related,
 		ChangedSymbols: cloneSymbols(changed),
 	}
+}
+
+func deletedFileAnalysis(path string, deleted []DeletedLine) FileAnalysis {
+	info := &fileInfo{path: path}
+	return fileAnalysis(info, changedSymbolsForFile(info, nil, deleted), nil)
 }
 
 func cloneSymbols(symbols []*symbolInfo) []AnalyzerSymbol {

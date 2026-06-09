@@ -227,6 +227,14 @@ jobs:
           git add .
           git commit -m "initial"
           perl -0pi -e 's/return nil/return fmt.Errorf("unauthorized: %w", context.Canceled)/' internal/auth/service.go
+          "$GITHUB_WORKSPACE/.ci-smoke-venv/bin/python" - <<'PY'
+          from apex_ray.analyzers import go_analyzer_runtime_dir
+
+          runtime = go_analyzer_runtime_dir()
+          assert runtime.name == "go", runtime
+          assert runtime.parent.name == "_bundled", runtime
+          assert (runtime / "go.mod").exists(), runtime
+          PY
           "$GITHUB_WORKSPACE/.ci-smoke-venv/bin/apex-ray" review --worktree --no-llm --output go-review.md --json go-review.json
           test -s go-review.md
           test -s go-review.json

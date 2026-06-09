@@ -89,6 +89,39 @@ func TestAnalyzeCollectsSemanticGoContext(t *testing.T) {
 	}
 }
 
+func TestAnalyzeCollectsDeletedOnlyGoFileFromDiffLines(t *testing.T) {
+	repo := t.TempDir()
+	writeFile(t, repo, "go.mod", "module example.com/review\n\ngo 1.24\n")
+
+	result := Analyze(Args{
+		Repo:          repo,
+		Changed:       []string{},
+		ChangedRanges: map[string][]LineRange{},
+		DeletedLines: map[string][]DeletedLine{
+			"internal/auth/removed.go": {{Line: 1, Text: "func Removed() error {"}},
+		},
+		AnalysisTimeBudgetMS: 30000,
+	})
+
+	if len(result.Files) != 1 {
+		t.Fatalf("expected one deleted-only file, got %d: %#v", len(result.Files), result.Warnings)
+	}
+	file := result.Files[0]
+	if file.Path != "internal/auth/removed.go" {
+		t.Fatalf("unexpected file path: %s", file.Path)
+	}
+	if len(file.ChangedSymbols) != 1 {
+		t.Fatalf("unexpected changed symbols: %#v", file.ChangedSymbols)
+	}
+	symbol := file.ChangedSymbols[0]
+	if symbol.Name != "Removed" || symbol.Signature != "removed Go function: func Removed() error {" {
+		t.Fatalf("unexpected deleted symbol: %#v", symbol)
+	}
+	if result.Partial || len(result.FailedFiles) != 0 {
+		t.Fatalf("deleted-only diff analysis should not be partial: %#v", result)
+	}
+}
+
 func writeFile(t *testing.T, root string, rel string, content string) {
 	t.Helper()
 	path := filepath.Join(root, filepath.FromSlash(rel))

@@ -5,12 +5,14 @@ from pathlib import Path
 
 import pytest
 
+import apex_ray.analyzers.go as go_analyzer_module
 from apex_ray.analyzers import (
     PYTHON_DELETED_SYMBOL_RE,
     PYTHON_LANGUAGES,
     PYTHON_READ_ERRORS,
     PYTHON_SCAN_IGNORED_DIRS,
     AnalyzerError,
+    go_analyzer_runtime_dir,
     python_changed_files,
     run_analyzers,
     run_go_analyzer,
@@ -131,6 +133,18 @@ def test_typescript_analyzer_passes_internal_time_budget(
     assert seen_command[budget_index + 1] == "9500"
 
 
+def test_go_analyzer_prefers_bundled_runtime_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    module_file = tmp_path / "site-packages" / "apex_ray" / "analyzers" / "go.py"
+    bundled_runtime = tmp_path / "site-packages" / "apex_ray" / "_bundled" / "go"
+    module_file.parent.mkdir(parents=True)
+    bundled_runtime.mkdir(parents=True)
+    module_file.write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(go_analyzer_module, "__file__", str(module_file))
+
+    assert go_analyzer_runtime_dir() == bundled_runtime
+
+
 def test_go_analyzer_passes_internal_time_budget_ranges_and_deleted_lines(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -221,7 +235,7 @@ def test_go_analyzer_passes_internal_time_budget_ranges_and_deleted_lines(
     ] in deleted_line_args
 
 
-def test_go_analyzer_includes_deleted_go_files(
+def test_go_analyzer_passes_deleted_go_files_as_diff_only_context(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -262,11 +276,34 @@ def test_go_analyzer_includes_deleted_go_files(
             "language": "go",
             "projectRoot": str(tmp_path),
             "tsconfigPath": None,
-            "files": [],
-            "warnings": ["Unable to parse Go file internal/auth/removed.go"],
+            "files": [
+                {
+                    "path": "internal/auth/removed.go",
+                    "tsconfigPath": None,
+                    "symbols": [],
+                    "imports": [],
+                    "exports": [],
+                    "relatedTests": [],
+                    "changedSymbols": [
+                        {
+                            "name": "Removed",
+                            "kind": "function",
+                            "startLine": 1,
+                            "endLine": 1,
+                            "exported": True,
+                            "signature": "removed Go function: func Removed() error {",
+                            "references": [],
+                            "callees": [],
+                            "contracts": [],
+                            "metadata": [],
+                        }
+                    ],
+                }
+            ],
+            "warnings": [],
             "indexCache": None,
-            "partial": True,
-            "failedFiles": ["internal/auth/removed.go"],
+            "partial": False,
+            "failedFiles": [],
             "shardFailures": [],
         }
         return subprocess.CompletedProcess(args, 0, stdout=json.dumps(payload), stderr="")
@@ -278,9 +315,19 @@ def test_go_analyzer_includes_deleted_go_files(
     assert result is not None
     assert seen_command is not None
     changed_index = seen_command.index("--changed")
-    assert seen_command[changed_index + 1] == "internal/auth/removed.go"
-    assert result.partial is True
-    assert result.failed_files == ["internal/auth/removed.go"]
+    next_option = next(
+        index for index in range(changed_index + 1, len(seen_command)) if seen_command[index].startswith("--")
+    )
+    assert seen_command[changed_index + 1 : next_option] == []
+    assert [
+        "--deleted-line",
+        "internal/auth/removed.go",
+        "1",
+        "func Removed() error {",
+    ] in [seen_command[index : index + 4] for index, value in enumerate(seen_command) if value == "--deleted-line"]
+    assert result.partial is False
+    assert result.failed_files == []
+    assert result.files[0].changed_symbols[0].name == "Removed"
 
 
 def test_go_analyzer_collects_semantic_context(tmp_path: Path) -> None:

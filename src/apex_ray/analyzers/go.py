@@ -72,11 +72,12 @@ def _go_analyzer_args(repo_root: Path, changed_files: list[ChangedFile], config:
         str(repo_root),
         "--changed",
     ]
-    args.extend(file.path for file in changed_files)
+    args.extend(file.new_path for file in changed_files if file.new_path is not None)
     args.extend(["--analysis-time-budget-ms", str(_analysis_time_budget_ms(config.timeout_seconds))])
     for file in changed_files:
-        for start, end in _changed_new_line_ranges(file):
-            args.extend(["--range", f"{file.path}:{start}-{end}"])
+        if file.new_path is not None:
+            for start, end in _changed_new_line_ranges(file):
+                args.extend(["--range", f"{file.new_path}:{start}-{end}"])
         for line, content in _deleted_lines(file):
             args.extend(["--deleted-line", file.path, str(line), content])
     return args
