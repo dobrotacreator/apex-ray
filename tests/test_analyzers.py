@@ -1,4 +1,5 @@
 import json
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -12,6 +13,7 @@ from apex_ray.analyzers import (
     AnalyzerError,
     python_changed_files,
     run_analyzers,
+    run_go_analyzer,
     run_python_analyzer,
     run_typescript_analyzer,
     typescript_analyzer_script,
@@ -129,6 +131,198 @@ def test_typescript_analyzer_passes_internal_time_budget(
     assert seen_command[budget_index + 1] == "9500"
 
 
+def test_go_analyzer_passes_internal_time_budget_ranges_and_deleted_lines(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    changed = ChangedFile(
+        old_path="internal/auth/service.go",
+        new_path="internal/auth/service.go",
+        language="go",
+        file_kind=FileKind.SOURCE,
+        hunks=[
+            {
+                "old_start": 10,
+                "old_lines": 3,
+                "new_start": 10,
+                "new_lines": 3,
+                "lines": [
+                    {"kind": "add", "new_line": 10, "content": "func added() error {"},
+                    {"kind": "add", "new_line": 11, "content": "    return nil"},
+                ],
+            },
+            {
+                "old_start": 20,
+                "old_lines": 2,
+                "new_start": 20,
+                "new_lines": 0,
+                "lines": [
+                    {"kind": "delete", "old_line": 20, "content": "func removed() error {"},
+                    {"kind": "delete", "old_line": 21, "content": "    return nil"},
+                ],
+            },
+        ],
+    )
+    seen_command: list[str] | None = None
+    runtime_dir = tmp_path / "go-runtime"
+    runtime_dir.mkdir()
+
+    monkeypatch.setattr("apex_ray.analyzers.go.shutil.which", lambda name: "/usr/bin/go")
+    monkeypatch.setattr("apex_ray.analyzers.go.go_analyzer_runtime_dir", lambda: runtime_dir)
+
+    def fake_run(
+        args: list[str],
+        *,
+        cwd: Path,
+        timeout: float,
+    ) -> subprocess.CompletedProcess[str]:
+        nonlocal seen_command
+        seen_command = args
+        assert cwd == runtime_dir
+        assert timeout == 10
+        payload = {
+            "language": "go",
+            "projectRoot": str(tmp_path),
+            "tsconfigPath": None,
+            "files": [],
+            "warnings": [],
+            "indexCache": None,
+        }
+        return subprocess.CompletedProcess(args, 0, stdout=json.dumps(payload), stderr="")
+
+    monkeypatch.setattr("apex_ray.analyzers.go._run_analyzer_process", fake_run)
+
+    result = run_go_analyzer(tmp_path, [changed], AnalyzerConfig(timeout_seconds=10))
+
+    assert result is not None
+    assert seen_command is not None
+    assert seen_command[:6] == ["go", "run", "./cmd/apex-ray-go-analyzer", "--repo", str(tmp_path), "--changed"]
+    assert "internal/auth/service.go" in seen_command
+    budget_index = seen_command.index("--analysis-time-budget-ms")
+    assert seen_command[budget_index + 1] == "9500"
+    assert ["--range", "internal/auth/service.go:10-11"] == seen_command[
+        seen_command.index("--range") : seen_command.index("--range") + 2
+    ]
+    deleted_index = seen_command.index("--deleted-line")
+    assert seen_command[deleted_index : deleted_index + 4] == [
+        "--deleted-line",
+        "internal/auth/service.go",
+        "20",
+        "func removed() error {",
+    ]
+
+
+def test_go_analyzer_collects_semantic_context(tmp_path: Path) -> None:
+    if shutil.which("go") is None:
+        pytest.skip("go is required for the Go analyzer integration test")
+    (tmp_path / "internal" / "auth").mkdir(parents=True)
+    (tmp_path / "internal" / "api").mkdir(parents=True)
+    (tmp_path / "go.mod").write_text("module example.com/review\n\ngo 1.24\n", encoding="utf-8")
+    auth_source = (
+        "package auth\n\n"
+        "import (\n"
+        '    "context"\n'
+        '    "fmt"\n'
+        ")\n\n"
+        "type Repository interface {\n"
+        "    Save(context.Context, string) error\n"
+        "}\n\n"
+        "type Authorizer interface {\n"
+        "    Authorize(context.Context, string) error\n"
+        "}\n\n"
+        "type Service struct {\n"
+        "    repo Repository\n"
+        "}\n\n"
+        "func NewService(repo Repository) *Service {\n"
+        "    return &Service{repo: repo}\n"
+        "}\n\n"
+        "func (s *Service) Authorize(ctx context.Context, id string) error {\n"
+        "    if err := s.repo.Save(ctx, id); err != nil {\n"
+        '        return fmt.Errorf("save auth: %w", err)\n'
+        "    }\n"
+        "    return nil\n"
+        "}\n"
+    )
+    (tmp_path / "internal" / "auth" / "service.go").write_text(auth_source, encoding="utf-8")
+    (tmp_path / "internal" / "api" / "handler.go").write_text(
+        "package api\n\n"
+        "import (\n"
+        '    "net/http"\n\n'
+        '    "example.com/review/internal/auth"\n'
+        ")\n\n"
+        "func Register(mux *http.ServeMux, svc *auth.Service) {\n"
+        '    mux.HandleFunc("/resource", func(w http.ResponseWriter, r *http.Request) {\n'
+        '        _ = svc.Authorize(r.Context(), "resource-id")\n'
+        "    })\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "internal" / "auth" / "service_test.go").write_text(
+        "package auth\n\n"
+        "import (\n"
+        '    "context"\n'
+        '    "testing"\n'
+        ")\n\n"
+        "type fakeRepo struct{}\n\n"
+        "func (fakeRepo) Save(context.Context, string) error { return nil }\n\n"
+        "func TestAuthorize(t *testing.T) {\n"
+        "    service := NewService(fakeRepo{})\n"
+        '    if err := service.Authorize(context.Background(), "id"); err != nil {\n'
+        "        t.Fatal(err)\n"
+        "    }\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    changed_line = next(index for index, line in enumerate(auth_source.splitlines(), start=1) if "s.repo.Save" in line)
+    changed = ChangedFile(
+        old_path="internal/auth/service.go",
+        new_path="internal/auth/service.go",
+        language="go",
+        file_kind=FileKind.SOURCE,
+        hunks=[
+            {
+                "old_start": changed_line,
+                "old_lines": 1,
+                "new_start": changed_line,
+                "new_lines": 1,
+                "lines": [
+                    {
+                        "kind": "delete",
+                        "old_line": changed_line,
+                        "content": "    if err := s.repo.Save(ctx, id); err != nil {",
+                    },
+                    {
+                        "kind": "add",
+                        "new_line": changed_line,
+                        "content": "    if err := s.repo.Save(ctx, id); err != nil {",
+                    },
+                ],
+            }
+        ],
+    )
+
+    result = run_go_analyzer(tmp_path, [changed], AnalyzerConfig(timeout_seconds=30))
+
+    assert result is not None
+    assert result.language == "go"
+    file_result = result.files[0]
+    assert file_result.path == "internal/auth/service.go"
+    assert "context" in file_result.imports
+    assert {"Authorizer", "NewService", "Repository", "Service"} <= set(file_result.exports)
+    assert [symbol.name for symbol in file_result.changed_symbols] == ["Service.Authorize"]
+    symbol = file_result.changed_symbols[0]
+    assert "func (s *Service) Authorize(ctx context.Context, id string) error" in symbol.signature
+    assert ("internal/api/handler.go", "call", 'svc.Authorize(r.Context(), "resource-id")') in {
+        (reference.file, reference.kind, reference.text) for reference in symbol.references
+    }
+    assert any(reference.file == "internal/auth/service_test.go" for reference in symbol.references)
+    assert any(reference.text == "Save(context.Context, string) error" for reference in symbol.callees)
+    assert any(reference.text.startswith("type Service struct") for reference in symbol.contracts)
+    assert "context boundary: context.Context" in {reference.text for reference in symbol.metadata}
+    assert any(reference.text.startswith("error wrapping: fmt.Errorf") for reference in symbol.metadata)
+    assert file_result.related_tests == ["internal/auth/service_test.go"]
+
+
 def test_run_analyzers_scopes_unavailable_backend_fallback_to_matching_files(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -165,8 +359,52 @@ def test_run_analyzers_scopes_unavailable_backend_fallback_to_matching_files(
     assert result.backend_runs[0].name == "typescript"
     assert result.backend_runs[0].changed_files_count == 1
     assert result.backend_runs[0].warning == "TypeScript analyzer unavailable: boom"
-    assert result.backend_runs[1].name == "python"
+    assert result.backend_runs[1].name == "go"
+    assert result.backend_runs[1].changed_files_count == 0
+    assert result.backend_runs[2].name == "python"
+    assert result.backend_runs[2].changed_files_count == 1
+
+
+def test_run_analyzers_scopes_unavailable_go_backend_to_go_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "review.py").write_text("def review() -> bool:\n    return True\n", encoding="utf-8")
+    changed = [
+        ChangedFile(
+            old_path="internal/auth/service.go",
+            new_path="internal/auth/service.go",
+            language="go",
+            file_kind=FileKind.SOURCE,
+        ),
+        ChangedFile(
+            old_path="src/review.py",
+            new_path="src/review.py",
+            language="python",
+            file_kind=FileKind.SOURCE,
+        ),
+    ]
+
+    def fail_go(*args: object, **kwargs: object) -> AnalyzerResult | None:
+        raise AnalyzerError("go missing")
+
+    monkeypatch.setattr("apex_ray.analyzers.run_go_analyzer", fail_go)
+
+    result = run_analyzers(tmp_path, changed)
+
+    assert [analyzer_result.language for analyzer_result in result.results] == ["python"]
+    assert result.warnings == ["Go analyzer unavailable: go missing"]
+    assert result.fallback_reasons_by_path == {
+        "internal/auth/service.go": "Go analyzer unavailable: go missing; using diff-only fallback context."
+    }
+    assert result.backend_runs[0].name == "typescript"
+    assert result.backend_runs[0].changed_files_count == 0
+    assert result.backend_runs[1].name == "go"
     assert result.backend_runs[1].changed_files_count == 1
+    assert result.backend_runs[1].warning == "Go analyzer unavailable: go missing"
+    assert result.backend_runs[2].name == "python"
+    assert result.backend_runs[2].changed_files_count == 1
 
 
 def test_run_analyzers_returns_backend_results_and_partial_fallbacks(

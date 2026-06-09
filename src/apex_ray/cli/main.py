@@ -7,7 +7,7 @@ from typing import Annotated
 import typer
 
 from apex_ray import __version__, git
-from apex_ray.analyzers import typescript_analyzer_script
+from apex_ray.analyzers import go_analyzer_runtime_dir, typescript_analyzer_script
 from apex_ray.cli.benchmark import register_benchmark_commands
 from apex_ray.cli.common import ensure_apex_ignore_for_outputs, ensure_distinct_outputs, resolve_output_path
 from apex_ray.cli.eval import eval_app
@@ -155,8 +155,12 @@ def doctor(
     typer.echo(f"- Package managers: {', '.join(project.package_managers) or 'none'}")
     typer.echo(f"- Framework hints: {', '.join(project.framework_hints) or 'none'}")
     analyzer_script = typescript_analyzer_script(review_config.analyzer, root)
+    go_runtime = go_analyzer_runtime_dir()
     typer.echo("- Python analyzer: built in")
     typer.echo(f"- Python analyzer available: {str(_python_analyzer_available()).lower()}")
+    typer.echo(f"- Go available: {str(shutil.which('go') is not None).lower()}")
+    typer.echo(f"- Go analyzer: {go_runtime}")
+    typer.echo(f"- Go analyzer available: {str(go_runtime.exists()).lower()}")
     typer.echo(f"- Node available: {str(shutil.which('node') is not None).lower()}")
     typer.echo(f"- TypeScript analyzer: {analyzer_script}")
     typer.echo(f"- TypeScript analyzer built: {str(analyzer_script.exists()).lower()}")

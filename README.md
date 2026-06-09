@@ -88,7 +88,7 @@ See the full [Quick Start](https://dobrotacreator.github.io/apex-ray/quickstart/
 
 - Builds context packs from changed files, symbols, callers, callees, contracts, metadata, and related tests.
 - Runs a language-neutral diff -> context pack -> optional LLM review workflow.
-- Uses enhanced analyzers for TypeScript/JavaScript and Python today, with Go and Rust analyzers planned next.
+- Uses enhanced analyzers for TypeScript/JavaScript, Python, and Go today, with Rust planned next.
 - Supports project-specific rules and repo-committed review memory.
 - Runs without LLM calls, or with Codex CLI / Claude Code CLI when configured.
 - Routes cheap and strong models through profiles.

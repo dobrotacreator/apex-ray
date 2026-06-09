@@ -112,6 +112,9 @@ def test_doctor_reports_local_config(tmp_path: Path, monkeypatch) -> None:
     assert f"- Local config: {tmp_path / '.apex-ray' / 'config.local.yml'}" in result.stdout
     assert "- Python analyzer: built in" in result.stdout
     assert "- Python analyzer available: true" in result.stdout
+    assert "- Go available:" in result.stdout
+    assert "- Go analyzer:" in result.stdout
+    assert "- Go analyzer available:" in result.stdout
 
 
 def test_telemetry_summary_uses_configured_local_data_path(tmp_path: Path, monkeypatch) -> None:

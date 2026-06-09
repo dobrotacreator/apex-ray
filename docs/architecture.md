@@ -85,6 +85,18 @@ The analyzer under `analyzer-runtimes/typescript/src/` is a Node/TypeScript prog
 
 Python calls the analyzer as a subprocess, receives structured JSON, and falls back to diff-only context when analyzer coverage is unavailable for a file.
 
+### Go Analyzer
+
+The analyzer under `analyzer-runtimes/go/` is a Go program bundled as source into the Python package. It uses `golang.org/x/tools/go/packages` to load packages with syntax and type information:
+
+- changed functions, methods, types, interfaces, structs, constants, variables, and deleted symbols;
+- typed callers, callees, imports, exports, and related tests;
+- receiver, parameter, return, interface, struct field, embedded type, alias, and generic contracts;
+- HTTP, context, database transaction, goroutine, channel, defer, mutex, filesystem, process, and error-boundary metadata;
+- syntax-only partial fallback when semantic package loading cannot include an affected file.
+
+Python calls the analyzer as a subprocess through `go run`, receives structured JSON, and falls back to diff-only context when the Go toolchain or analyzer runtime is unavailable.
+
 ### Python Analyzer
 
 The Python analyzer lives under `src/apex_ray/analyzers/python/` and runs in-process with the Python stdlib `ast` parser. It builds repository-aware context for Python changes:

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-info() { printf '-> %s\n' "$1"; }
+info() { printf -- '-> %s\n' "$1"; }
 warn() { printf 'WARN %s\n' "$1" >&2; }
 
 current_root="$(cd "$(git rev-parse --show-toplevel)" && pwd -P)"
@@ -40,15 +40,15 @@ copy_local_file_if_missing ".mcp.json"
 copy_local_file_if_missing ".env"
 copy_local_file_if_missing ".env.local"
 
-if [[ -f "pyproject.toml" ]]; then
-  info "Installing Python dependencies"
-  uv sync --all-groups
-fi
-
 if [[ -f "analyzer-runtimes/typescript/package-lock.json" ]]; then
   info "Installing TypeScript analyzer dependencies"
   npm --prefix analyzer-runtimes/typescript ci
   npm --prefix analyzer-runtimes/typescript run build
+fi
+
+if [[ -f "pyproject.toml" ]]; then
+  info "Installing Python dependencies"
+  uv sync --all-groups
 fi
 
 if [[ -f "lefthook.yml" ]] && command -v lefthook >/dev/null 2>&1; then

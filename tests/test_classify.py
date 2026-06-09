@@ -7,6 +7,7 @@ from apex_ray.models import FileKind, TargetMode
 
 def test_detect_file_kind() -> None:
     assert detect_file_kind("src/app.test.ts") == FileKind.TEST
+    assert detect_file_kind("internal/auth/service_test.go") == FileKind.TEST
     assert detect_file_kind("docs/usage.md") == FileKind.DOCS
     assert detect_file_kind("db/migrations/001_create_users.sql") == FileKind.MIGRATION
     assert detect_file_kind("schema.prisma") == FileKind.SCHEMA
@@ -16,6 +17,7 @@ def test_detect_file_kind() -> None:
 def test_detect_language() -> None:
     assert detect_language("src/app.ts") == "typescript"
     assert detect_language("src/app.py") == "python"
+    assert detect_language("internal/auth/service.go") == "go"
     assert detect_language("unknown.file") == "unknown"
 
 

@@ -5,6 +5,7 @@
 - Python 3.14+
 - Node.js 24+
 - npm
+- Go 1.24+ for Go analyzer development
 - uv
 - git
 
@@ -14,6 +15,7 @@
 uv sync --all-groups
 npm --prefix analyzer-runtimes/typescript ci
 npm --prefix analyzer-runtimes/typescript run build
+go -C analyzer-runtimes/go mod download
 ```
 
 ## Architecture Map
@@ -48,6 +50,8 @@ The Python analyzer lives under `src/apex_ray/analyzers/python/`. Keep it groupe
 - `related_tests.py`: related test discovery and ranking.
 - `state.py`, `utils.py`, and `constants.py`: shared data structures, helpers, and patchable analyzer limits.
 
+The bundled Go analyzer lives under `analyzer-runtimes/go/`. It uses `golang.org/x/tools/go/packages` for semantic package loading and emits the same analyzer JSON contract consumed by Python. Keep Go analyzer code grouped under `cmd/` and `internal/`; Python integration belongs in `src/apex_ray/analyzers/go.py`.
+
 Avoid adding new flat prefix modules like `cli_*.py`, `pipeline_*.py`, `llm_*.py`, `report_*.py`, `contract-*.ts`, or `workspace-*.ts`; use package-local names inside the relevant directory. Keep Python package `__init__.py` files thin and focused on public re-exports.
 
 ## Checks
@@ -63,6 +67,7 @@ uv run coverage report -m
 npm --prefix analyzer-runtimes/typescript run typecheck
 npm --prefix analyzer-runtimes/typescript test
 npm --prefix analyzer-runtimes/typescript run coverage
+go -C analyzer-runtimes/go test ./...
 uv build --sdist --wheel
 uv run twine check dist/*
 git diff --check
