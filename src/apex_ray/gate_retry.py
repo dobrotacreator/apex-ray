@@ -1,3 +1,4 @@
+import fnmatch
 import hashlib
 import json
 from dataclasses import dataclass
@@ -198,6 +199,8 @@ def relevant_files_for_finding(report: ReviewReport, finding: Finding) -> list[s
     if pack is not None:
         files.add(pack.file)
         files.update(pack.related_tests)
+        for rule in pack.rule_matches:
+            files.update(rule.resolution_surfaces)
         for reference in [*pack.references, *pack.callees, *pack.contracts, *pack.metadata]:
             files.add(reference.file)
         for snippet in [
@@ -222,6 +225,26 @@ def changed_paths(report: ReviewReport) -> set[str]:
     return paths
 
 
+def relevance_matches_changed_path(relevant_path: str, changed_path: str) -> bool:
+    relevant = relevant_path.strip()
+    changed = changed_path.strip()
+    if not relevant or not changed:
+        return False
+    if relevant == changed:
+        return True
+    if _looks_like_glob(relevant):
+        return fnmatch.fnmatchcase(changed, relevant)
+    return False
+
+
+def any_relevant_path_changed(relevant_paths: set[str], changed: set[str]) -> bool:
+    return any(
+        relevance_matches_changed_path(relevant_path, changed_path)
+        for relevant_path in relevant_paths
+        for changed_path in changed
+    )
+
+
 def finding_key(finding: Finding) -> tuple[object, ...]:
     return (
         str(finding.severity),
@@ -242,6 +265,10 @@ def dedupe_carried_findings(findings: list[CarriedFinding]) -> list[CarriedFindi
         seen.add(key)
         deduped.append(carried)
     return deduped
+
+
+def _looks_like_glob(value: str) -> bool:
+    return any(char in value for char in "*?[]")
 
 
 def stale_carried_finding_reason(carried: CarriedFinding, repo_root: Path) -> str | None:
