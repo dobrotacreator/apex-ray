@@ -49,6 +49,13 @@ git status --short
 
 Inspect and commit the setup files before using the first worktree review for application changes.
 
+If Apex Ray later warns that generated agent instructions are outdated, refresh only those managed artifacts with:
+
+```bash
+apex-ray init --refresh-agent-artifacts --dry-run
+apex-ray init --refresh-agent-artifacts
+```
+
 Run a deterministic no-LLM review:
 
 ```bash

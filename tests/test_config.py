@@ -4,12 +4,16 @@ import pytest
 
 from apex_ray import git
 from apex_ray.config import (
+    AGENT_ARTIFACT_TEMPLATE_VERSION,
     ConfigError,
+    _detect_agent_skill_from_block,
+    agent_artifact_statuses,
     ensure_apex_gitignore,
     find_local_config,
     init_config,
     init_project,
     load_config,
+    refresh_agent_artifacts,
 )
 
 
@@ -260,6 +264,7 @@ def test_init_project_creates_team_setup_files(tmp_path: Path) -> None:
     assert "--no-llm" not in lefthook_text
     agents_text = (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
     assert "APEX_RAY_START" in agents_text
+    assert f"apex-ray-agent-artifacts: version={AGENT_ARTIFACT_TEMPLATE_VERSION}" in agents_text
     assert "LLM analysis can be long-running and may appear idle" in agents_text
     assert "do not proactively run `apex-ray review` or `apex-ray gate pre-push`" in agents_text
     assert "pre-push incremental retry state remains the source of truth" in agents_text
@@ -270,11 +275,13 @@ def test_init_project_creates_team_setup_files(tmp_path: Path) -> None:
     assert "$apex-ray" in agents_text
     assert "$apex-ray-improve" in agents_text
     skill_text = (tmp_path / ".apex-ray" / "skills" / "apex-ray" / "SKILL.md").read_text(encoding="utf-8")
+    assert f"apex_ray_template_version: {AGENT_ARTIFACT_TEMPLATE_VERSION}" in skill_text
     assert "do not proactively run `apex-ray review` or `apex-ray gate pre-push`" in skill_text
     assert "apex-ray review --continue-from .apex-ray/reports/review.json" in skill_text
     assert "Do not bypass the configured pre-push gate by default" in skill_text
     assert "Use suppressions sparingly" in skill_text
     assert "Re-check stale findings before suppressing again" in skill_text
+    assert "apex-ray findings suppress apex-ID \\\n" in skill_text
     assert "Use `--no-llm` or `.apex-ray/config.local.yml`" in skill_text
     improve_skill_text = (tmp_path / ".apex-ray" / "skills" / "apex-ray-improve" / "SKILL.md").read_text(
         encoding="utf-8"
@@ -443,6 +450,94 @@ def test_init_project_reports_only_changed_files_on_second_run(tmp_path: Path) -
     written = init_project(tmp_path)
 
     assert written == []
+
+
+def test_refresh_agent_artifacts_updates_old_managed_files(tmp_path: Path) -> None:
+    init_project(tmp_path)
+    agents_path = tmp_path / "AGENTS.md"
+    skill_path = tmp_path / ".apex-ray" / "skills" / "apex-ray" / "SKILL.md"
+    config_path = tmp_path / ".apex-ray" / "config.yml"
+    config_before = config_path.read_text(encoding="utf-8")
+    agents_path.write_text(
+        "<!-- APEX_RAY_START -->\n## Apex Ray\n\nOld instructions.\n<!-- APEX_RAY_END -->\n",
+        encoding="utf-8",
+    )
+    skill_path.write_text("---\nname: apex-ray\n---\n# Old Skill\n", encoding="utf-8")
+
+    statuses = agent_artifact_statuses(tmp_path)
+    dry_run = refresh_agent_artifacts(tmp_path, dry_run=True)
+
+    assert any(status.path == agents_path and status.status == "outdated" for status in statuses)
+    assert any(status.path == skill_path and status.status == "outdated" for status in statuses)
+    assert agents_path in dry_run
+    assert skill_path in dry_run
+    assert "Old instructions" in agents_path.read_text(encoding="utf-8")
+
+    written = refresh_agent_artifacts(tmp_path)
+
+    assert agents_path in written
+    assert skill_path in written
+    assert "Old instructions" not in agents_path.read_text(encoding="utf-8")
+    assert f"apex-ray-agent-artifacts: version={AGENT_ARTIFACT_TEMPLATE_VERSION}" in agents_path.read_text(
+        encoding="utf-8"
+    )
+    assert f"apex_ray_template_version: {AGENT_ARTIFACT_TEMPLATE_VERSION}" in skill_path.read_text(encoding="utf-8")
+    assert config_path.read_text(encoding="utf-8") == config_before
+    assert all(status.status == "current" for status in agent_artifact_statuses(tmp_path))
+
+
+def test_agent_artifact_statuses_tolerates_malformed_managed_block(tmp_path: Path) -> None:
+    agents_path = tmp_path / "AGENTS.md"
+    agents_path.write_text(
+        "<!-- APEX_RAY_END -->\nProject instructions.\n<!-- APEX_RAY_START -->\n",
+        encoding="utf-8",
+    )
+
+    default_statuses = agent_artifact_statuses(tmp_path)
+    unmanaged_statuses = agent_artifact_statuses(tmp_path, include_unmanaged=True)
+
+    assert default_statuses == []
+    assert len(unmanaged_statuses) == 1
+    assert unmanaged_statuses[0].path == agents_path
+    assert unmanaged_statuses[0].status == "unmanaged"
+
+
+def test_agent_artifact_statuses_checks_all_existing_claude_files(tmp_path: Path) -> None:
+    init_project(tmp_path, hooks="none", agent_files="claude")
+    root_claude_path = tmp_path / "CLAUDE.md"
+    nested_claude_path = tmp_path / ".claude" / "CLAUDE.md"
+    root_claude_path.write_text(nested_claude_path.read_text(encoding="utf-8"), encoding="utf-8")
+    nested_claude_path.write_text(
+        "<!-- APEX_RAY_START -->\n## Apex Ray\n\nOld Claude instructions.\n<!-- APEX_RAY_END -->\n",
+        encoding="utf-8",
+    )
+
+    statuses = agent_artifact_statuses(tmp_path, agent_files="claude")
+
+    assert any(status.path == root_claude_path and status.status == "current" for status in statuses)
+    assert any(status.path == nested_claude_path and status.status == "outdated" for status in statuses)
+
+
+def test_agent_artifact_statuses_reports_missing_canonical_skill_alias(tmp_path: Path) -> None:
+    alias_path = tmp_path / ".agents" / "skills" / "apex-ray" / "SKILL.md"
+    canonical_path = tmp_path / ".apex-ray" / "skills" / "apex-ray" / "SKILL.md"
+    alias_path.parent.mkdir(parents=True)
+    try:
+        alias_path.symlink_to(canonical_path)
+    except OSError as exc:
+        pytest.skip(f"symlink creation is unavailable: {exc}")
+
+    statuses = agent_artifact_statuses(tmp_path, agent_files="codex")
+
+    assert any(
+        status.path == alias_path and status.status == "outdated" and "canonical skill" in status.reason
+        for status in statuses
+    )
+
+
+def test_detect_agent_skill_requires_standalone_apex_ray_token() -> None:
+    assert _detect_agent_skill_from_block("Use `$apex-ray` for local review.")
+    assert not _detect_agent_skill_from_block("Use `$apex-ray-improve` after merged PRs.")
 
 
 def test_init_project_validates_options_before_writing(tmp_path: Path) -> None:

@@ -1,4 +1,6 @@
+import re
 import warnings
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +15,19 @@ from apex_ray.rules import RuleError, load_rule_definitions
 DEFAULT_BASE_BRANCH = "main"
 HOOK_MODES = {"lefthook", "git", "none"}
 AGENT_FILE_MODES = {"none", "codex", "claude", "both"}
+AGENT_ARTIFACT_TEMPLATE_VERSION = 2
+
+
+@dataclass(frozen=True)
+class AgentArtifactStatus:
+    path: Path
+    kind: str
+    status: str
+    reason: str = ""
+
+    @property
+    def needs_refresh(self) -> bool:
+        return self.status in {"missing", "outdated", "unmanaged"}
 
 
 def default_config_text(base: str = DEFAULT_BASE_BRANCH) -> str:
@@ -85,22 +100,27 @@ CODEX_REPO_SKILL_DIR = ".agents"
 
 APEX_RAY_AGENT_BLOCK_START = "<!-- APEX_RAY_START -->"
 APEX_RAY_AGENT_BLOCK_END = "<!-- APEX_RAY_END -->"
+APEX_RAY_AGENT_TEMPLATE_MARKER = f"<!-- apex-ray-agent-artifacts: version={AGENT_ARTIFACT_TEMPLATE_VERSION} -->"
+APEX_RAY_SKILL_TOKEN_RE = re.compile(r"(?<![\w-])\$apex-ray(?![\w-])")
 APEX_RAY_AGENT_BLOCK = f"""{APEX_RAY_AGENT_BLOCK_START}
+{APEX_RAY_AGENT_TEMPLATE_MARKER}
 ## Apex Ray
 
 This project uses Apex Ray for local diff-aware review. Use the `$apex-ray` skill for review, gate, report, telemetry, and eval workflows. Apex Ray runs that use LLM analysis can be long-running and may appear idle; do not interrupt or kill the process just because it takes a long time. Wait for completion unless it exits, errors, or the user asks to stop. When a pre-push hook is configured, do not proactively run `apex-ray review` or `apex-ray gate pre-push` as a routine final verification step; let `git push` invoke the hook so the pre-push incremental retry state remains the source of truth. Run Apex Ray manually only when the user asks, when debugging/tuning Apex Ray, when the hook is unavailable, or when explicit gate parity is needed before a push. Do not bypass the configured pre-push gate by default; use `apex-ray findings suppress` only for a confirmed local false positive after checking the finding evidence, current code, and relevant tests or invariants, and always provide a concrete objective reason. Do not suppress uncertain findings, real defects, or findings merely to get a push through. If bypassing is unavoidable, explain why and name the equivalent checks or review already run. Use `$apex-ray-improve` after merged PRs or review feedback to produce recommendation-only improvements for Apex Ray memory, rules, eval labels, telemetry, and config. Keep `.apex-ray/config.local.yml`, Apex Ray caches/telemetry/reports/triage/eval runs, generated review artifacts, and local provider, model, API, or cost settings out of commits.
 {APEX_RAY_AGENT_BLOCK_END}
 """
 APEX_RAY_AGENT_BLOCK_NO_SKILL = f"""{APEX_RAY_AGENT_BLOCK_START}
+{APEX_RAY_AGENT_TEMPLATE_MARKER}
 ## Apex Ray
 
 This project uses Apex Ray for local diff-aware review. Use `apex-ray doctor` to check setup. For manual Apex Ray runs, `apex-ray review --no-llm` creates deterministic local reports under `.apex-ray/reports/`, and `apex-ray gate pre-push` runs the hook-equivalent gate. Apex Ray runs that use LLM analysis can be long-running and may appear idle; do not interrupt or kill the process just because it takes a long time. Wait for completion unless it exits, errors, or the user asks to stop. When a pre-push hook is configured, do not proactively run `apex-ray review` or `apex-ray gate pre-push` as a routine final verification step; let `git push` invoke the hook so the pre-push incremental retry state remains the source of truth. Run Apex Ray manually only when the user asks, when debugging/tuning Apex Ray, when the hook is unavailable, or when explicit gate parity is needed before a push. Do not bypass the configured pre-push gate by default; use `apex-ray findings suppress` only for a confirmed local false positive after checking the finding evidence, current code, and relevant tests or invariants, and always provide a concrete objective reason. Do not suppress uncertain findings, real defects, or findings merely to get a push through. If bypassing is unavoidable, explain why and name the equivalent checks or review already run. Keep `.apex-ray/config.local.yml`, Apex Ray caches/telemetry/reports/triage/eval runs, generated review artifacts, and local provider, model, API, or cost settings out of commits.
 {APEX_RAY_AGENT_BLOCK_END}
 """
 
-APEX_RAY_SKILL_TEXT = """---
+APEX_RAY_SKILL_TEXT = f"""---
 name: apex-ray
 description: Use when running or configuring Apex Ray local code reviews, interpreting reports, continuing partial reviews, tuning rules, memory, telemetry, or historical PR evals.
+apex_ray_template_version: {AGENT_ARTIFACT_TEMPLATE_VERSION}
 ---
 
 # Apex Ray
@@ -140,8 +160,8 @@ When a pre-push finding is a confirmed local false positive, suppress the specif
 
 ```bash
 apex-ray findings list --from-report .apex-ray/reports/pre-push.json
-apex-ray findings suppress apex-<id> \
-  --from-report .apex-ray/reports/pre-push.json \
+apex-ray findings suppress apex-ID \\
+  --from-report .apex-ray/reports/pre-push.json \\
   --reason "The repository layer already enforces this invariant."
 ```
 
@@ -153,14 +173,15 @@ Useful cleanup commands:
 
 ```bash
 apex-ray findings suppressions
-apex-ray findings unsuppress sup-<id>
+apex-ray findings unsuppress sup-ID
 apex-ray findings prune
 ```
 """
 
-APEX_RAY_IMPROVE_SKILL_TEXT = """---
+APEX_RAY_IMPROVE_SKILL_TEXT = f"""---
 name: apex-ray-improve
 description: Use after merged PRs or review feedback to produce recommendation-only improvements for Apex Ray memory, rules, eval labels, telemetry, coverage, model routing, or config from PR comments, Greptile findings, Apex reports, and telemetry.
+apex_ray_template_version: {AGENT_ARTIFACT_TEMPLATE_VERSION}
 ---
 
 # Apex Ray Improve
@@ -299,6 +320,84 @@ def init_project(
     if agent_skill and agent_files != "none":
         written.extend(_write_agent_skill_files(root, agent_files=agent_files, overwrite=overwrite))
     return written
+
+
+def refresh_agent_artifacts(
+    root: Path,
+    *,
+    agent_files: str = "both",
+    agent_skill: bool = True,
+    dry_run: bool = False,
+) -> list[Path]:
+    """Refresh only Apex Ray-managed agent instruction artifacts."""
+    if agent_files not in AGENT_FILE_MODES:
+        raise ConfigError("Unsupported agent-files value. Use none, codex, claude, or both.")
+    if agent_files == "none":
+        return []
+    if dry_run:
+        statuses = agent_artifact_statuses(
+            root,
+            agent_files=agent_files,
+            agent_skill=agent_skill,
+            include_missing=True,
+            include_unmanaged=True,
+        )
+        if not agent_skill:
+            statuses = [status for status in statuses if status.kind != "agent_skill"]
+        return _dedupe_paths([status.path for status in statuses if status.needs_refresh])
+    written = _write_agent_files(root, agent_files=agent_files, agent_skill=agent_skill, overwrite=True)
+    if agent_skill:
+        written.extend(_write_agent_skill_files(root, agent_files=agent_files, overwrite=True))
+    return _dedupe_paths(written)
+
+
+def agent_artifact_statuses(
+    root: Path,
+    *,
+    agent_files: str = "both",
+    agent_skill: bool | None = None,
+    include_missing: bool = False,
+    include_unmanaged: bool = False,
+) -> list[AgentArtifactStatus]:
+    """Return local generated-agent-artifact status without modifying files."""
+    if agent_files not in AGENT_FILE_MODES:
+        raise ConfigError("Unsupported agent-files value. Use none, codex, claude, or both.")
+    if agent_files == "none":
+        return []
+    statuses: list[AgentArtifactStatus] = []
+    seen: set[Path] = set()
+    for path in _agent_file_status_targets(root, agent_files=agent_files, include_missing=include_missing):
+        status = _agent_file_status(root, path, agent_skill=agent_skill, include_missing=include_missing)
+        if status is None or (status.status == "unmanaged" and not include_unmanaged):
+            continue
+        resolved = _status_identity(root, status.path)
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        statuses.append(status)
+    for path, skill_name, expected in _agent_skill_status_targets(
+        root,
+        agent_files=agent_files,
+        include_missing=include_missing,
+    ):
+        status = _agent_skill_status(
+            root, path, skill_name=skill_name, expected=expected, include_missing=include_missing
+        )
+        if status is not None:
+            statuses.append(status)
+    return statuses
+
+
+def agent_artifact_refresh_warning(root: Path) -> str | None:
+    outdated = [status for status in agent_artifact_statuses(root) if status.status == "outdated"]
+    if not outdated:
+        return None
+    paths = ", ".join(str(status.path.relative_to(root)) for status in outdated[:5])
+    suffix = "" if len(outdated) <= 5 else f", and {len(outdated) - 5} more"
+    return (
+        f"Apex Ray agent artifacts are outdated: {paths}{suffix}. "
+        "Run `apex-ray init --refresh-agent-artifacts` to update managed AGENTS/CLAUDE blocks and skills."
+    )
 
 
 def _validate_init_options(*, hooks: str, agent_files: str) -> None:
@@ -451,6 +550,143 @@ def _write_if_missing_or_overwrite(path: Path, text: str, *, overwrite: bool) ->
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
     return True
+
+
+def _agent_file_status_targets(root: Path, *, agent_files: str, include_missing: bool) -> list[Path]:
+    targets: list[Path] = []
+    agents_path = root / "AGENTS.md"
+    if agent_files in {"codex", "both"} and (include_missing or agents_path.exists() or agents_path.is_symlink()):
+        targets.append(agents_path)
+    if agent_files in {"claude", "both"}:
+        root_claude_file = root / "CLAUDE.md"
+        claude_file = root / ".claude" / "CLAUDE.md"
+        root_claude_exists = root_claude_file.exists() or root_claude_file.is_symlink()
+        nested_claude_exists = claude_file.exists() or claude_file.is_symlink()
+        if root_claude_exists:
+            targets.append(root_claude_file)
+        if nested_claude_exists:
+            targets.append(claude_file)
+        if include_missing and not root_claude_exists and not nested_claude_exists:
+            targets.append(claude_file)
+    return targets
+
+
+def _agent_file_status(
+    root: Path,
+    path: Path,
+    *,
+    agent_skill: bool | None,
+    include_missing: bool,
+) -> AgentArtifactStatus | None:
+    if not path.exists() and not path.is_symlink():
+        return AgentArtifactStatus(path, "agent_file", "missing", "file does not exist") if include_missing else None
+    read_path = _safe_repo_symlink_target(root, path) if path.is_symlink() else path
+    text = read_path.read_text(encoding="utf-8")
+    block = _extract_agent_block(text)
+    if block is None:
+        return AgentArtifactStatus(path, "agent_file", "unmanaged", "Apex Ray managed block not found")
+    expected = _agent_block(agent_skill=_detect_agent_skill_from_block(block) if agent_skill is None else agent_skill)
+    if _normalize_artifact_text(block) == _normalize_artifact_text(expected):
+        return AgentArtifactStatus(path, "agent_file", "current")
+    return AgentArtifactStatus(path, "agent_file", "outdated", "managed block differs from current template")
+
+
+def _agent_skill_status_targets(
+    root: Path,
+    *,
+    agent_files: str,
+    include_missing: bool,
+) -> list[tuple[Path, str, str]]:
+    targets: list[tuple[Path, str, str]] = []
+    for skill_name, skill_text in (
+        ("apex-ray", APEX_RAY_SKILL_TEXT),
+        ("apex-ray-improve", APEX_RAY_IMPROVE_SKILL_TEXT),
+    ):
+        canonical = root / ".apex-ray" / "skills" / skill_name / "SKILL.md"
+        if include_missing or canonical.exists() or canonical.is_symlink():
+            targets.append((canonical, skill_name, skill_text))
+        codex = _codex_skill_alias_path(root, skill_name)
+        if agent_files in {"codex", "both"} and (include_missing or codex.exists() or codex.is_symlink()):
+            targets.append((codex, skill_name, skill_text))
+        claude = root / ".claude" / "skills" / skill_name / "SKILL.md"
+        if agent_files in {"claude", "both"} and (include_missing or claude.exists() or claude.is_symlink()):
+            targets.append((claude, skill_name, skill_text))
+    return targets
+
+
+def _agent_skill_status(
+    root: Path,
+    path: Path,
+    *,
+    skill_name: str,
+    expected: str,
+    include_missing: bool,
+) -> AgentArtifactStatus | None:
+    if not path.exists() and not path.is_symlink():
+        return AgentArtifactStatus(path, "agent_skill", "missing", "file does not exist") if include_missing else None
+    canonical = (root / ".apex-ray" / "skills" / skill_name / "SKILL.md").resolve(strict=False)
+    if path.is_symlink():
+        try:
+            target = _safe_repo_symlink_target(root, path)
+        except OSError:
+            return AgentArtifactStatus(path, "agent_skill", "outdated", "symlink target cannot be resolved")
+        if target.resolve(strict=False) == canonical:
+            canonical_status = _agent_skill_status(
+                root,
+                canonical,
+                skill_name=skill_name,
+                expected=expected,
+                include_missing=True,
+            )
+            if canonical_status is not None and canonical_status.status == "current":
+                return AgentArtifactStatus(path, "agent_skill", "current")
+            return AgentArtifactStatus(path, "agent_skill", "outdated", "canonical skill is not current")
+        return AgentArtifactStatus(path, "agent_skill", "outdated", "symlink does not point to canonical skill")
+    text = path.read_text(encoding="utf-8")
+    if _normalize_artifact_text(text) == _normalize_artifact_text(expected):
+        return AgentArtifactStatus(path, "agent_skill", "current")
+    return AgentArtifactStatus(path, "agent_skill", "outdated", "skill file differs from current template")
+
+
+def _extract_agent_block(text: str) -> str | None:
+    start = APEX_RAY_AGENT_BLOCK_START
+    end = APEX_RAY_AGENT_BLOCK_END
+    if start not in text or end not in text:
+        return None
+    before, remainder = text.split(start, 1)
+    if end not in remainder:
+        return None
+    block_body, _after = remainder.split(end, 1)
+    return f"{start}{block_body}{end}\n" if before or text.endswith("\n") else f"{start}{block_body}{end}"
+
+
+def _detect_agent_skill_from_block(block: str) -> bool:
+    return APEX_RAY_SKILL_TOKEN_RE.search(block) is not None
+
+
+def _normalize_artifact_text(text: str) -> str:
+    return text.strip().replace("\r\n", "\n") + "\n"
+
+
+def _status_identity(root: Path, path: Path) -> Path:
+    if path.is_symlink():
+        try:
+            return _safe_repo_symlink_target(root, path).resolve(strict=False)
+        except OSError:
+            return path.resolve(strict=False)
+    return path.resolve(strict=False)
+
+
+def _dedupe_paths(paths: list[Path]) -> list[Path]:
+    seen: set[Path] = set()
+    deduped: list[Path] = []
+    for path in paths:
+        key = path.resolve(strict=False)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(path)
+    return deduped
 
 
 def _ensure_gitignore_lines(root: Path, path: Path, lines: tuple[str, ...], *, overwrite: bool) -> bool:

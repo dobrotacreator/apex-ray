@@ -5,7 +5,12 @@ from typing import Annotated
 import typer
 
 from apex_ray import git
-from apex_ray.cli.common import ensure_apex_ignore_for_outputs, ensure_distinct_outputs, resolve_output_path
+from apex_ray.cli.common import (
+    ensure_apex_ignore_for_outputs,
+    ensure_distinct_outputs,
+    resolve_output_path,
+    warn_outdated_agent_artifacts,
+)
 from apex_ray.config import ConfigError, load_config
 from apex_ray.gate_retry import (
     CarriedFinding,
@@ -94,6 +99,7 @@ def pre_push(
     if not gate_config.enabled:
         typer.echo("APEX RAY GATE: DISABLED")
         raise typer.Exit()
+    warn_outdated_agent_artifacts(root)
     progress = _progress_for_gate(gate_config)
 
     output = resolve_output_path(root, output)

@@ -49,6 +49,13 @@ Generated shared files are meant to be reviewed like normal project configuratio
 
 The generated config stores telemetry, LLM cache entries, and archived report runs under a shared local-data directory for the current git clone, so linked worktrees can be deleted without losing those accumulated metrics.
 
+When Apex Ray's generated agent instructions change in a newer package version, `apex-ray doctor`, `apex-ray review`, and `apex-ray gate pre-push` warn locally if the repository's managed `AGENTS.md` block or generated skills are outdated. Refresh only those managed artifacts with:
+
+```bash
+apex-ray init --refresh-agent-artifacts --dry-run
+apex-ray init --refresh-agent-artifacts
+```
+
 ## First Deterministic Review
 
 Run a no-LLM review first. This verifies diff parsing, project discovery, analyzer coverage, context pack construction, and report rendering without provider cost:
