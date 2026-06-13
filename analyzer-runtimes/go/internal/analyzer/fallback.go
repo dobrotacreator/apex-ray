@@ -51,16 +51,27 @@ func safeRepoPath(repo string, rel string) (string, bool) {
 	if rel == "" || filepath.IsAbs(rel) || strings.HasPrefix(rel, "../") {
 		return "", false
 	}
-	abs := filepath.Join(repo, filepath.FromSlash(rel))
-	resolved, err := filepath.Abs(abs)
+	repoAbs, err := filepath.Abs(repo)
 	if err != nil {
 		return "", false
 	}
-	relBack, err := filepath.Rel(repo, resolved)
+	candidateAbs, err := filepath.Abs(filepath.Join(repoAbs, filepath.FromSlash(rel)))
+	if err != nil {
+		return "", false
+	}
+	repoResolved, err := filepath.EvalSymlinks(repoAbs)
+	if err != nil {
+		return "", false
+	}
+	candidateResolved, err := filepath.EvalSymlinks(candidateAbs)
+	if err != nil {
+		return "", false
+	}
+	relBack, err := filepath.Rel(repoResolved, candidateResolved)
 	if err != nil || relBack == ".." || strings.HasPrefix(relBack, ".."+string(filepath.Separator)) {
 		return "", false
 	}
-	return resolved, true
+	return candidateResolved, true
 }
 
 func collectFallbackSymbols(ws *workspace, info *fileInfo) {

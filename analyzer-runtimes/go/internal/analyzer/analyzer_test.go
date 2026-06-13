@@ -128,6 +128,26 @@ func TestAnalyzeCollectsDeletedOnlyGoFileFromDiffLines(t *testing.T) {
 	}
 }
 
+func TestFallbackRejectsSymlinkedGoFileOutsideRepo(t *testing.T) {
+	repo := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "outside.go")
+	if err := os.WriteFile(outside, []byte("package outside\n\nfunc Leaked() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(repo, "linked.go")); err != nil {
+		t.Skipf("symlinks are unavailable: %v", err)
+	}
+
+	_, warning, failed := fallbackFileAnalysis(repo, "linked.go", nil, nil)
+
+	if !failed {
+		t.Fatalf("expected symlinked file outside repo to be rejected")
+	}
+	if warning != "Unsafe Go file path linked.go; using diff-only fallback context." {
+		t.Fatalf("unexpected warning: %q", warning)
+	}
+}
+
 func writeFile(t *testing.T, root string, rel string, content string) {
 	t.Helper()
 	path := filepath.Join(root, filepath.FromSlash(rel))
