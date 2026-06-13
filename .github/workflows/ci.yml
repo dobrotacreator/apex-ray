@@ -175,3 +175,100 @@ jobs:
               for metadata in pack.get("metadata", [])
           ), "expected Python boundary metadata in context pack"
           PY
+          go_reviewdir="$(mktemp -d)"
+          cd "$go_reviewdir"
+          git init
+          git config user.email "apex@example.test"
+          git config user.name "Apex Test"
+          mkdir -p internal/auth internal/api
+          cat > go.mod <<'GOMOD'
+          module example.com/review
+
+          go 1.24
+          GOMOD
+          cat > internal/auth/service.go <<'GOCODE'
+          package auth
+
+          import (
+              "context"
+              "fmt"
+          )
+
+          type Repository interface {
+              Save(context.Context, string) error
+          }
+
+          type Service struct {
+              repo Repository
+          }
+
+          func (s *Service) Authorize(ctx context.Context, id string) error {
+              if err := s.repo.Save(ctx, id); err != nil {
+                  return fmt.Errorf("save auth: %w", err)
+              }
+              return nil
+          }
+          GOCODE
+          cat > internal/api/handler.go <<'GOCODE'
+          package api
+
+          import (
+              "net/http"
+
+              "example.com/review/internal/auth"
+          )
+
+          func Register(mux *http.ServeMux, svc *auth.Service) {
+              mux.HandleFunc("/resource", func(w http.ResponseWriter, r *http.Request) {
+                  _ = svc.Authorize(r.Context(), "resource-id")
+              })
+          }
+          GOCODE
+          git add .
+          git commit -m "initial"
+          perl -0pi -e 's/return nil/return fmt.Errorf("unauthorized: %w", context.Canceled)/' internal/auth/service.go
+          "$GITHUB_WORKSPACE/.ci-smoke-venv/bin/python" - <<'PY'
+          from apex_ray.analyzers import go_analyzer_runtime_dir
+
+          runtime = go_analyzer_runtime_dir()
+          assert runtime.name == "go", runtime
+          assert runtime.parent.name == "_bundled", runtime
+          assert (runtime / "go.mod").exists(), runtime
+          assert (runtime / "cmd" / "apex-ray-go-analyzer" / "main.go").exists(), runtime
+          PY
+          "$GITHUB_WORKSPACE/.ci-smoke-venv/bin/apex-ray" review --worktree --no-llm --output go-review.md --json go-review.json
+          test -s go-review.md
+          test -s go-review.json
+          "$GITHUB_WORKSPACE/.ci-smoke-venv/bin/python" - <<'PY'
+          import json
+          from pathlib import Path
+
+          report = json.loads(Path("go-review.json").read_text(encoding="utf-8"))
+          go_results = [
+              analyzer_result
+              for analyzer_result in report["analyzer_results"]
+              if analyzer_result.get("language") == "go"
+          ]
+          assert go_results, "expected Go analyzer results from installed wheel"
+          warnings = "\n".join(
+              warning
+              for analyzer_result in go_results
+              for warning in analyzer_result.get("warnings", [])
+          )
+          assert "Go analyzer unavailable" not in warnings
+          assert any(
+              symbol.get("changedSymbols") or symbol.get("changed_symbols")
+              for analyzer_result in go_results
+              for symbol in analyzer_result.get("files", [])
+          ), "expected changed symbols from bundled Go analyzer"
+          assert any(
+              reference.get("file") == "internal/api/handler.go"
+              for pack in report["context_packs"]
+              for reference in pack.get("references", [])
+          ), "expected typed Go reference in context pack"
+          assert any(
+              "error wrapping" in metadata.get("text", "")
+              for pack in report["context_packs"]
+              for metadata in pack.get("metadata", [])
+          ), "expected Go boundary metadata in context pack"
+          PY

@@ -137,7 +137,7 @@ Use `.apex-ray/config.yml` for shared policy and `.apex-ray/config.local.yml` fo
 
 ## Language Selection
 
-By default Apex Ray reviews every reviewable diff file it can classify and builds analyzer-backed context where a backend exists. Today the enhanced analyzer backends cover TypeScript/JavaScript and Python.
+By default Apex Ray reviews every reviewable diff file it can classify and builds analyzer-backed context where a backend exists. Today the enhanced analyzer backends cover TypeScript/JavaScript, Python, and Go.
 
 Use `review.languages` only when a project wants to restrict review scope:
 
@@ -147,9 +147,10 @@ review:
     - typescript
     - javascript
     - python
+    - go
 ```
 
-Files in detected but disabled languages are reported as ignored. Go and Rust can be discovered as project languages today, but enhanced analyzer support for them is planned rather than available.
+Files in detected but disabled languages are reported as ignored. Rust can be discovered as a project language today, but enhanced analyzer support for it is planned rather than available.
 
 ## Rules
 

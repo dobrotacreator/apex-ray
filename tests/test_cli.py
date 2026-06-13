@@ -135,6 +135,9 @@ def test_doctor_reports_local_config(tmp_path: Path, monkeypatch) -> None:
     assert "- Python analyzer: built in" in result.stdout
     assert "- Python analyzer available: true" in result.stdout
     assert "- Agent artifacts: not found" in result.stdout
+    assert "- Go available:" in result.stdout
+    assert "- Go analyzer:" in result.stdout
+    assert "- Go analyzer available:" in result.stdout
 
 
 def test_doctor_reports_outdated_agent_artifacts(tmp_path: Path, monkeypatch) -> None:

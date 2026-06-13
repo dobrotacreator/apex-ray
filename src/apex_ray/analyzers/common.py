@@ -117,6 +117,13 @@ def _analyzer_backends() -> list[_AnalyzerBackend]:
             partial_fallback_reason="TypeScript analyzer shard failed; using diff-only fallback context.",
         ),
         _AnalyzerBackend(
+            name="go",
+            display_name="Go",
+            changed_files=analyzers.go_changed_files,
+            run=analyzers.run_go_analyzer,
+            partial_fallback_reason="Go analyzer failed; using diff-only fallback context.",
+        ),
+        _AnalyzerBackend(
             name="python",
             display_name="Python",
             changed_files=analyzers.python_changed_files,

@@ -19,6 +19,7 @@ keywords = [
     "typescript",
     "javascript",
     "python",
+    "go",
     "llm",
     "cli",
 ]
@@ -29,6 +30,7 @@ classifiers = [
     "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.14",
+    "Programming Language :: Go",
     "Topic :: Software Development :: Quality Assurance",
     "Topic :: Software Development :: Testing",
 ]
@@ -70,6 +72,8 @@ build-backend = "hatchling.build"
 "analyzer-runtimes/typescript/package.json" = "apex_ray/_bundled/typescript/package.json"
 "analyzer-runtimes/typescript/package-lock.json" = "apex_ray/_bundled/typescript/package-lock.json"
 "analyzer-runtimes/typescript/node_modules/typescript" = "apex_ray/_bundled/typescript/node_modules/typescript"
+# CI installed-wheel smoke imports go_analyzer_runtime_dir and runs apex-ray on a Go fixture.
+"analyzer-runtimes/go" = "apex_ray/_bundled/go"
 
 [tool.hatch.build.targets.sdist]
 include = [
@@ -82,6 +86,11 @@ include = [
     "/analyzer-runtimes/typescript/tsconfig.test.json",
     "/analyzer-runtimes/typescript/package.json",
     "/analyzer-runtimes/typescript/package-lock.json",
+    # Keep Go sdist coverage in sync with the installed-wheel Go analyzer smoke.
+    "/analyzer-runtimes/go/cmd",
+    "/analyzer-runtimes/go/internal",
+    "/analyzer-runtimes/go/go.mod",
+    "/analyzer-runtimes/go/go.sum",
     "/README.md",
     "/CHANGELOG.md",
     "/CONTRIBUTING.md",

@@ -23,15 +23,16 @@ apex-ray doctor
 
 ## Requirements
 
-Apex Ray can review git diffs through a language-neutral pipeline. Enhanced analyzers currently cover TypeScript/JavaScript and Python:
+Apex Ray can review git diffs through a language-neutral pipeline. Enhanced analyzers currently cover TypeScript/JavaScript, Python, and Go:
 
 - Python 3.14+
 - git
 - Node.js 24+ and npm only when reviewing TypeScript or JavaScript with the bundled analyzer
+- Go only when reviewing Go with the bundled analyzer
 - Codex CLI or Claude Code CLI only when using `--llm`
 - GitHub CLI only for historical PR replay commands
 
-Run `apex-ray doctor` from the repository you want to review. It checks git discovery, detected languages, the built-in Python analyzer, Node.js, and the bundled TypeScript analyzer.
+Run `apex-ray doctor` from the repository you want to review. It checks git discovery, detected languages, the built-in Python analyzer, Go, Node.js, and the bundled TypeScript analyzer.
 
 ## Initialize A Project
 
