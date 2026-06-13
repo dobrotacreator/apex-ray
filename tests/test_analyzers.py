@@ -339,6 +339,74 @@ def test_go_analyzer_passes_deleted_go_files_as_diff_only_context(
     assert symbol.end_line == 2
 
 
+def test_go_analyzer_omits_zero_ranges_for_deletion_only_modified_hunks(tmp_path: Path) -> None:
+    changed = ChangedFile(
+        old_path="internal/auth/service.go",
+        new_path="internal/auth/service.go",
+        language="go",
+        file_kind=FileKind.SOURCE,
+        hunks=[
+            {
+                "old_start": 1,
+                "old_lines": 1,
+                "new_start": 0,
+                "new_lines": 0,
+                "lines": [
+                    {"kind": "delete", "old_line": 1, "content": "func Removed() error {"},
+                ],
+            }
+        ],
+    )
+
+    args = go_analyzer_module._go_analyzer_args(tmp_path, [changed], AnalyzerConfig(timeout_seconds=10))
+
+    assert "internal/auth/service.go:0-0" not in args
+    assert "--range" not in args
+    assert [
+        "--deleted-line",
+        "internal/auth/service.go",
+        "1",
+        "func Removed() error {",
+    ] in [args[index : index + 4] for index, value in enumerate(args) if value == "--deleted-line"]
+
+
+def test_go_analyzer_anchors_modified_deleted_lines_to_new_file_coordinates(tmp_path: Path) -> None:
+    changed = ChangedFile(
+        old_path="internal/auth/service.go",
+        new_path="internal/auth/service.go",
+        language="go",
+        file_kind=FileKind.SOURCE,
+        hunks=[
+            {
+                "old_start": 30,
+                "old_lines": 1,
+                "new_start": 10,
+                "new_lines": 1,
+                "lines": [
+                    {"kind": "add", "new_line": 10, "content": "func Added() error {"},
+                    {"kind": "delete", "old_line": 30, "content": "func Removed() error {"},
+                ],
+            }
+        ],
+    )
+
+    args = go_analyzer_module._go_analyzer_args(tmp_path, [changed], AnalyzerConfig(timeout_seconds=10))
+
+    deleted_line_args = [args[index : index + 4] for index, value in enumerate(args) if value == "--deleted-line"]
+    assert [
+        "--deleted-line",
+        "internal/auth/service.go",
+        "11",
+        "func Removed() error {",
+    ] in deleted_line_args
+    assert [
+        "--deleted-line",
+        "internal/auth/service.go",
+        "30",
+        "func Removed() error {",
+    ] not in deleted_line_args
+
+
 def test_go_analyzer_collects_semantic_context(tmp_path: Path) -> None:
     if shutil.which("go") is None:
         pytest.skip("go is required for the Go analyzer integration test")

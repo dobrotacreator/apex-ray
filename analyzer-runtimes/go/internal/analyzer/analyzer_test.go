@@ -148,6 +148,18 @@ func TestFallbackRejectsSymlinkedGoFileOutsideRepo(t *testing.T) {
 	}
 }
 
+func TestValidGoPathRejectsBackslashTraversal(t *testing.T) {
+	invalid := []string{`..\outside.go`, `C:\outside.go`, "../outside.go", "/outside.go"}
+	for _, path := range invalid {
+		if validGoPath(path) {
+			t.Fatalf("expected unsafe Go path %q to be rejected", path)
+		}
+	}
+	if !validGoPath("internal/auth/service.go") {
+		t.Fatalf("expected repo-relative Go path to be accepted")
+	}
+}
+
 func writeFile(t *testing.T, root string, rel string, content string) {
 	t.Helper()
 	path := filepath.Join(root, filepath.FromSlash(rel))

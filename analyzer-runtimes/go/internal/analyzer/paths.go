@@ -1,7 +1,7 @@
 package analyzer
 
 import (
-	"path/filepath"
+	"path"
 	"sort"
 	"strings"
 )
@@ -53,8 +53,20 @@ func sortedDeletedPaths(deleted map[string][]DeletedLine) []string {
 }
 
 func validGoPath(normalized string) bool {
-	return normalized != "." &&
-		!strings.HasPrefix(normalized, "../") &&
-		!filepath.IsAbs(normalized) &&
-		filepath.Ext(normalized) == ".go"
+	slashPath := strings.ReplaceAll(normalized, "\\", "/")
+	cleaned := path.Clean(slashPath)
+	return cleaned != "." &&
+		cleaned != ".." &&
+		!strings.HasPrefix(cleaned, "../") &&
+		!strings.HasPrefix(cleaned, "/") &&
+		!hasWindowsDrivePrefix(cleaned) &&
+		path.Ext(cleaned) == ".go"
+}
+
+func hasWindowsDrivePrefix(value string) bool {
+	if len(value) < 2 || value[1] != ':' {
+		return false
+	}
+	letter := value[0]
+	return (letter >= 'A' && letter <= 'Z') || (letter >= 'a' && letter <= 'z')
 }

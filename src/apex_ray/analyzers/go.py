@@ -153,7 +153,7 @@ def _changed_new_line_ranges(file: ChangedFile) -> list[tuple[int, int]]:
         added_lines = sorted(line.new_line for line in hunk.lines if line.new_line is not None and line.kind == "add")
         if added_lines:
             ranges.extend(_collapse_ranges(added_lines))
-        else:
+        elif hunk.new_start > 0:
             ranges.append((hunk.new_start, hunk.new_start))
     return ranges
 
@@ -161,10 +161,13 @@ def _changed_new_line_ranges(file: ChangedFile) -> list[tuple[int, int]]:
 def _deleted_lines(file: ChangedFile) -> list[tuple[int, str]]:
     lines: list[tuple[int, str]] = []
     for hunk in file.hunks:
-        next_new_line = hunk.new_start
+        next_new_line = max(1, hunk.new_start)
         for line in hunk.lines:
             if line.new_line is not None:
                 next_new_line = line.new_line + 1
             if line.kind == "delete":
-                lines.append((line.old_line or next_new_line, line.content))
+                if file.new_path is not None:
+                    lines.append((next_new_line, line.content))
+                else:
+                    lines.append((line.old_line or next_new_line, line.content))
     return lines
