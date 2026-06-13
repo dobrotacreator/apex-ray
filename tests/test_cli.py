@@ -100,6 +100,28 @@ def test_init_can_skip_agent_skill(tmp_path: Path, monkeypatch) -> None:
     assert "$apex-ray" not in (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
 
 
+def test_init_refresh_agent_artifacts_dry_run_then_write(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    init_result = runner.invoke(app, ["init"], catch_exceptions=False)
+    agents_path = tmp_path / "AGENTS.md"
+    agents_path.write_text(
+        "<!-- APEX_RAY_START -->\n## Apex Ray\n\nOld instructions.\n<!-- APEX_RAY_END -->\n",
+        encoding="utf-8",
+    )
+
+    dry_run = runner.invoke(app, ["init", "--refresh-agent-artifacts", "--dry-run"], catch_exceptions=False)
+    refresh = runner.invoke(app, ["init", "--refresh-agent-artifacts"], catch_exceptions=False)
+
+    assert init_result.exit_code == 0
+    assert dry_run.exit_code == 0
+    assert "would refresh" in dry_run.stdout
+    assert str(agents_path) in dry_run.stdout
+    assert refresh.exit_code == 0
+    assert "refreshed" in refresh.stdout
+    assert "Old instructions" not in agents_path.read_text(encoding="utf-8")
+    assert "apex-ray-agent-artifacts: version=" in agents_path.read_text(encoding="utf-8")
+
+
 def test_doctor_reports_local_config(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
     (tmp_path / ".apex-ray").mkdir()
@@ -112,9 +134,25 @@ def test_doctor_reports_local_config(tmp_path: Path, monkeypatch) -> None:
     assert f"- Local config: {tmp_path / '.apex-ray' / 'config.local.yml'}" in result.stdout
     assert "- Python analyzer: built in" in result.stdout
     assert "- Python analyzer available: true" in result.stdout
+    assert "- Agent artifacts: not found" in result.stdout
     assert "- Go available:" in result.stdout
     assert "- Go analyzer:" in result.stdout
     assert "- Go analyzer available:" in result.stdout
+
+
+def test_doctor_reports_outdated_agent_artifacts(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    runner.invoke(app, ["init"], catch_exceptions=False)
+    (tmp_path / "AGENTS.md").write_text(
+        "<!-- APEX_RAY_START -->\n## Apex Ray\n\nOld instructions.\n<!-- APEX_RAY_END -->\n",
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(app, ["doctor"], catch_exceptions=False)
+
+    assert result.exit_code == 0
+    assert "- Agent artifacts: outdated" in result.stdout
+    assert "Run: apex-ray init --refresh-agent-artifacts" in result.stdout
 
 
 def test_telemetry_summary_uses_configured_local_data_path(tmp_path: Path, monkeypatch) -> None:
@@ -276,6 +314,24 @@ def test_review_patch_writes_markdown_and_json(tmp_path: Path, monkeypatch) -> N
     assert '"files_changed": 3' in json_output.read_text(encoding="utf-8")
     assert "<h1>Apex Ray Review</h1>" in html_output.read_text(encoding="utf-8")
     assert not (tmp_path / ".apex-ray").exists()
+
+
+def test_review_warns_for_outdated_agent_artifacts(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    agents_path = tmp_path / "AGENTS.md"
+    agents_path.write_text(
+        "<!-- APEX_RAY_START -->\n## Apex Ray\n\nOld instructions.\n<!-- APEX_RAY_END -->\n",
+        encoding="utf-8",
+    )
+    patch = tmp_path / "sample.diff"
+    patch.write_text((FIXTURE_DIR / "sample.diff").read_text(encoding="utf-8"), encoding="utf-8")
+
+    result = runner.invoke(app, ["review", "--diff", str(patch)], catch_exceptions=False)
+
+    assert result.exit_code == 0
+    assert "Wrote" in result.stdout
+    assert "Warning: Apex Ray agent artifacts are outdated" in result.stderr
+    assert "apex-ray init --refresh-agent-artifacts" in result.stderr
 
 
 def test_review_patch_defaults_to_apex_reports_dir(tmp_path: Path, monkeypatch) -> None:
@@ -708,6 +764,37 @@ def test_gate_pre_push_emits_progress_to_stderr(tmp_path: Path, monkeypatch) -> 
     assert "pipeline progress" not in result.stdout
     assert "apex-ray: reading diff main...HEAD" in result.stderr
     assert "apex-ray: pipeline progress" in result.stderr
+
+
+def test_gate_pre_push_warns_for_outdated_agent_artifacts(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "AGENTS.md").write_text(
+        "<!-- APEX_RAY_START -->\n## Apex Ray\n\nOld instructions.\n<!-- APEX_RAY_END -->\n",
+        encoding="utf-8",
+    )
+
+    def fake_run_review_pipeline(*args, **kwargs):
+        config = args[3]
+        return build_report(
+            ProjectProfile(root=str(tmp_path), is_git_repo=True),
+            config,
+            DiffSummary(target_mode=TargetMode.BASE, base="main", stats=DiffStats(files_changed=1)),
+        )
+
+    monkeypatch.setattr("apex_ray.cli.gate.git.repo_root", lambda _cwd: tmp_path)
+    monkeypatch.setattr("apex_ray.cli.gate.git.is_git_repo", lambda _root: True)
+    monkeypatch.setattr(
+        "apex_ray.cli.gate.git.diff_base", lambda _root, _base: "diff --git a/src/orders.ts b/src/orders.ts\n"
+    )
+    monkeypatch.setattr("apex_ray.cli.gate.run_review_pipeline", fake_run_review_pipeline)
+    monkeypatch.setattr("apex_ray.cli.gate.continue_review_from_report", lambda report, **_kwargs: (report, []))
+
+    result = runner.invoke(app, ["gate", "pre-push"], catch_exceptions=False)
+
+    assert result.exit_code == 0
+    assert "APEX RAY GATE: PASSED" in result.stdout
+    assert "Warning: Apex Ray agent artifacts are outdated" in result.stderr
+    assert "apex-ray init --refresh-agent-artifacts" in result.stderr
 
 
 def test_gate_pre_push_does_not_block_unverified_finding_by_default(tmp_path: Path, monkeypatch) -> None:

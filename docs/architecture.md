@@ -202,6 +202,8 @@ It creates or updates:
 
 The init command is intentionally conservative: shared config is commit-friendly, local provider/model/cost settings go into `.apex-ray/config.local.yml`, generated Apex Ray outputs stay ignored by `.apex-ray/.gitignore`, and the root `.gitignore` is left untouched.
 
+Managed agent blocks and generated skills carry an Apex Ray template version. Review and gate commands only warn when those local artifacts are outdated; they do not rewrite files. `apex-ray init --refresh-agent-artifacts` is the scoped update path for refreshing managed agent guidance without touching config or hooks.
+
 ## Pre-Push Gate Flow
 
 `apex-ray gate pre-push` is the hook-friendly wrapper around the review pipeline. It reviews the configured base branch diff, writes the same Markdown/JSON report artifacts as normal review, evaluates `review.gates.pre_push`, prints live progress to stderr, prints a short blocking summary to stdout, and exits `1` when the gate blocks.

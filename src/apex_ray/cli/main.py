@@ -9,12 +9,26 @@ import typer
 from apex_ray import __version__, git
 from apex_ray.analyzers import go_analyzer_runtime_dir, typescript_analyzer_script
 from apex_ray.cli.benchmark import register_benchmark_commands
-from apex_ray.cli.common import ensure_apex_ignore_for_outputs, ensure_distinct_outputs, resolve_output_path
+from apex_ray.cli.common import (
+    ensure_apex_ignore_for_outputs,
+    ensure_distinct_outputs,
+    resolve_output_path,
+    warn_outdated_agent_artifacts,
+)
 from apex_ray.cli.eval import eval_app
 from apex_ray.cli.findings import findings_app
 from apex_ray.cli.gate import gate_app
 from apex_ray.cli.memory import memory_app
-from apex_ray.config import ConfigError, find_local_config, init_project, load_config
+from apex_ray.config import (
+    ConfigError,
+    agent_artifact_statuses,
+    find_local_config,
+    init_project,
+    load_config,
+)
+from apex_ray.config import (
+    refresh_agent_artifacts as refresh_project_agent_artifacts,
+)
 from apex_ray.discovery import discover_project
 from apex_ray.invocation import ReviewOverrides, apply_review_overrides
 from apex_ray.llm import LLMProviderError
@@ -89,6 +103,17 @@ def init(
         bool,
         typer.Option("--agent-skill/--no-agent-skill", help="Add Apex Ray project skill files for selected agents."),
     ] = True,
+    refresh_agent_artifacts: Annotated[
+        bool,
+        typer.Option(
+            "--refresh-agent-artifacts",
+            help="Refresh only Apex Ray-managed AGENTS/CLAUDE blocks and generated skills.",
+        ),
+    ] = False,
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="Show agent artifacts that would be refreshed without writing files."),
+    ] = False,
     update_gitignore: Annotated[
         bool,
         typer.Option(
@@ -99,17 +124,35 @@ def init(
 ) -> None:
     """Create project Apex Ray config, ignores, hooks, and agent instructions."""
     root = git.repo_root(Path.cwd()) or Path.cwd()
+    if dry_run and not refresh_agent_artifacts:
+        raise typer.BadParameter("Use --dry-run with --refresh-agent-artifacts.")
     try:
-        paths = init_project(
-            root,
-            overwrite=overwrite,
-            update_gitignore=update_gitignore,
-            hooks=hooks.value,
-            agent_files=agent_files.value,
-            agent_skill=agent_skill,
-        )
+        if refresh_agent_artifacts:
+            paths = refresh_project_agent_artifacts(
+                root,
+                agent_files=agent_files.value,
+                agent_skill=agent_skill,
+                dry_run=dry_run,
+            )
+        else:
+            paths = init_project(
+                root,
+                overwrite=overwrite,
+                update_gitignore=update_gitignore,
+                hooks=hooks.value,
+                agent_files=agent_files.value,
+                agent_skill=agent_skill,
+            )
     except ConfigError as exc:
         raise typer.BadParameter(str(exc)) from exc
+    if refresh_agent_artifacts:
+        action = "would refresh" if dry_run else "refreshed"
+        typer.echo(f"Apex Ray agent artifacts {action}: {root}")
+        if not paths:
+            typer.echo("- already current")
+        for path in paths:
+            typer.echo(f"- {path}")
+        return
     typer.echo(f"Apex Ray ready: {root}")
     for path in paths:
         typer.echo(f"- {path}")
@@ -164,6 +207,22 @@ def doctor(
     typer.echo(f"- Node available: {str(shutil.which('node') is not None).lower()}")
     typer.echo(f"- TypeScript analyzer: {analyzer_script}")
     typer.echo(f"- TypeScript analyzer built: {str(analyzer_script.exists()).lower()}")
+    try:
+        artifact_statuses = agent_artifact_statuses(root)
+    except ConfigError as exc:
+        typer.echo(f"- Agent artifacts: unable to inspect ({exc})")
+    else:
+        managed_statuses = [status for status in artifact_statuses if status.status != "unmanaged"]
+        outdated_statuses = [status for status in managed_statuses if status.status == "outdated"]
+        if not managed_statuses:
+            typer.echo("- Agent artifacts: not found")
+        elif outdated_statuses:
+            typer.echo(f"- Agent artifacts: outdated ({len(outdated_statuses)})")
+            for status in outdated_statuses[:5]:
+                typer.echo(f"  - {status.path}: {status.reason}")
+            typer.echo("  Run: apex-ray init --refresh-agent-artifacts")
+        else:
+            typer.echo("- Agent artifacts: current")
 
 
 def _python_analyzer_available() -> bool:
@@ -327,6 +386,7 @@ def review(
             raise typer.BadParameter(str(exc)) from exc
         root = Path(prior_report.project.root)
         review_config = prior_report.config
+    warn_outdated_agent_artifacts(root)
 
     output = resolve_output_path(root, output)
     json_output = resolve_output_path(root, json_output)

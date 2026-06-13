@@ -74,6 +74,19 @@ review:
 
 Latest report outputs still stay at their configured `--output`, `--json`, and `--html` paths, usually under the current worktree's `.apex-ray/reports/`, so parallel worktrees do not overwrite each other's latest snapshots.
 
+## Agent Artifact Refresh
+
+`apex-ray init` writes managed agent guidance to `AGENTS.md`, Claude instruction files, and generated Apex Ray skills. These artifacts are version-marked. When a newer Apex Ray package has updated templates, `apex-ray doctor`, `apex-ray review`, and `apex-ray gate pre-push` emit a non-blocking local warning if existing managed artifacts are outdated.
+
+Refresh only the managed agent artifacts without touching config or hooks:
+
+```bash
+apex-ray init --refresh-agent-artifacts --dry-run
+apex-ray init --refresh-agent-artifacts
+```
+
+The refresh preserves user-authored text outside the `<!-- APEX_RAY_START -->` / `<!-- APEX_RAY_END -->` block and rewrites generated skill files. It does not run automatically during review or pre-push, so Apex Ray never changes the working tree while evaluating a diff.
+
 ## Local Override Example
 
 ```yaml
