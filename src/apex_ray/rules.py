@@ -73,6 +73,7 @@ def rule_match_for_prompt(rule: ReviewRule) -> RuleMatch:
         title=rule.title or rule.id,
         severity=rule.severity,
         mode=rule.mode,
+        resolution_surfaces=rule.resolution_surfaces,
         model=rule.model,
         verify=rule.verify,
         source_path=rule.source_path,

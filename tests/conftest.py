@@ -62,3 +62,5 @@ def _needs_ts_analyzer_build() -> bool:
 @pytest.fixture(autouse=True)
 def isolated_apex_ray_cache_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("APEX_RAY_CACHE_HOME", str(tmp_path / "apex-ray-cache"))
+    for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_PREFIX"):
+        monkeypatch.delenv(name, raising=False)

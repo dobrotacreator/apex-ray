@@ -120,6 +120,7 @@ class ReviewRule(StrictApexModel):
     mode: RuleMode = RuleMode.ADVISORY
     paths: list[str] = Field(default_factory=list)
     context_paths: list[str] = Field(default_factory=list)
+    resolution_surfaces: list[str] = Field(default_factory=list)
     exclude_paths: list[str] = Field(default_factory=list)
     triggers: RuleTriggers = Field(default_factory=RuleTriggers)
     model: str | None = None
@@ -133,6 +134,7 @@ class RuleMatch(ApexModel):
     title: str
     severity: FindingSeverity
     mode: RuleMode
+    resolution_surfaces: list[str] = Field(default_factory=list)
     model: str | None = None
     verify: str | None = None
     source_path: str | None = None

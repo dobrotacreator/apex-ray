@@ -15,6 +15,7 @@ from apex_ray.config import ConfigError, load_config
 from apex_ray.gate_retry import (
     CarriedFinding,
     CoverageDebt,
+    any_relevant_path_changed,
     build_pre_push_state,
     changed_paths,
     check_incremental_eligibility,
@@ -475,7 +476,7 @@ def _resolve_incremental_carried_findings(
     stale_resolved_count = 0
     for carried in carried_findings:
         relevant = set(carried.relevant_files or [carried.finding.file])
-        if changed and relevant & changed:
+        if changed and any_relevant_path_changed(relevant, changed):
             needs_resolution.append(carried)
         else:
             stale_reason = stale_carried_finding_reason(carried, repo_root)
