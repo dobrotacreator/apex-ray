@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.1.9](https://github.com/dobrotacreator/apex-ray/compare/v0.1.8...v0.1.9) (2026-06-13)
+
+
+### Features
+
+* add local finding triage ([#53](https://github.com/dobrotacreator/apex-ray/issues/53)) ([f55c5f9](https://github.com/dobrotacreator/apex-ray/commit/f55c5f93b2bd430bf4d0608f299be0257ba82d75))
+* add semantic go analyzer ([#55](https://github.com/dobrotacreator/apex-ray/issues/55)) ([fc6d5af](https://github.com/dobrotacreator/apex-ray/commit/fc6d5af8cb079ad36813bc6212b4eb8cba15adc1))
+* **gate:** support rule resolution surfaces ([#58](https://github.com/dobrotacreator/apex-ray/issues/58)) ([2b330f8](https://github.com/dobrotacreator/apex-ray/commit/2b330f8658d05f94dce551c72346255c39c0df27))
+* refresh generated agent artifacts ([#54](https://github.com/dobrotacreator/apex-ray/issues/54)) ([a974efc](https://github.com/dobrotacreator/apex-ray/commit/a974efc64265771a595f28a3c161af785683a2b5))
+
+
+### Documentation
+
+* clarify apex-ray pre-push ownership ([#51](https://github.com/dobrotacreator/apex-ray/issues/51)) ([82983b3](https://github.com/dobrotacreator/apex-ray/commit/82983b3638b9b889424de7713eae95250971194b))
+* update Go analyzer coverage ([#59](https://github.com/dobrotacreator/apex-ray/issues/59)) ([df0a951](https://github.com/dobrotacreator/apex-ray/commit/df0a951e7884e2d38bf9092e5d0c75a68e5b3a57))
+
 ## [0.1.8](https://github.com/dobrotacreator/apex-ray/compare/v0.1.7...v0.1.8) (2026-06-07)
 
 
