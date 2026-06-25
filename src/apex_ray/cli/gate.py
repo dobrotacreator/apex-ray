@@ -12,6 +12,7 @@ from apex_ray.cli.common import (
     warn_outdated_agent_artifacts,
 )
 from apex_ray.config import ConfigError, load_config
+from apex_ray.findings import finding_fingerprint
 from apex_ray.gate_retry import (
     CarriedFinding,
     CoverageDebt,
@@ -32,7 +33,7 @@ from apex_ray.gates import PrePushGateDecision, PrePushRetrySummary, evaluate_pr
 from apex_ray.llm import LLMProviderError
 from apex_ray.llm.providers import provider_from_config
 from apex_ray.local_data import LocalDataPathError, resolve_config_path, resolve_runtime_config_paths
-from apex_ray.models import ReviewReport, TargetMode
+from apex_ray.models import Finding, ReviewReport, TargetMode
 from apex_ray.pipeline import continue_review_from_report, run_review_pipeline
 from apex_ray.progress import NoopProgress, ProgressSink, StreamProgress, progress_enabled
 from apex_ray.report import (
@@ -224,6 +225,7 @@ def pre_push(
             repo_root=root,
             config=review_config,
             progress=progress,
+            current_blocking_findings=current_decision.blocking_findings,
         )
         if retry_state.coverage_debt.quality_gate_failed or retry_state.coverage_debt.partial_blocked:
             carried_coverage_debt = retry_state.coverage_debt
@@ -469,12 +471,20 @@ def _resolve_incremental_carried_findings(
     repo_root: Path,
     config,
     progress: ProgressSink,
+    current_blocking_findings: list[Finding] | None = None,
 ) -> tuple[list[CarriedFinding], int]:
     changed = changed_paths(report)
+    fingerprint_source = current_blocking_findings if current_blocking_findings is not None else report.findings
+    current_blocking_fingerprints = {finding_fingerprint(finding) for finding in fingerprint_source}
     unchanged_active: list[CarriedFinding] = []
     needs_resolution: list[CarriedFinding] = []
+    reviewed_resolved_count = 0
     stale_resolved_count = 0
     for carried in carried_findings:
+        if _reviewed_pack_resolves_carried_finding(carried, report, current_blocking_fingerprints):
+            reviewed_resolved_count += 1
+            progress.event("dropping carried finding resolved by current reviewed context pack", force=True)
+            continue
         relevant = set(carried.relevant_files or [carried.finding.file])
         if changed and any_relevant_path_changed(relevant, changed):
             needs_resolution.append(carried)
@@ -501,8 +511,28 @@ def _resolve_incremental_carried_findings(
     )
     return (
         dedupe_carried_findings([*unchanged_active, *unresolved]),
-        len(needs_resolution) - len(unresolved) + stale_resolved_count,
+        len(needs_resolution) - len(unresolved) + stale_resolved_count + reviewed_resolved_count,
     )
+
+
+def _reviewed_pack_resolves_carried_finding(
+    carried: CarriedFinding,
+    report: ReviewReport,
+    current_blocking_fingerprints: set[str],
+) -> bool:
+    pack_ids = {
+        pack_id
+        for pack_id in [
+            carried.finding.context_pack_id,
+            carried.context_pack.id if carried.context_pack else "",
+        ]
+        if pack_id
+    }
+    if not pack_ids:
+        return False
+    if not pack_ids.intersection(report.llm_coverage.reviewed_context_pack_ids):
+        return False
+    return finding_fingerprint(carried.finding) not in current_blocking_fingerprints
 
 
 def resolve_carried_findings(
