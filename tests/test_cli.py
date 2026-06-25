@@ -25,6 +25,7 @@ from apex_ray.models import (
     FindingResolutionStatus,
     FindingSeverity,
     FindingVerification,
+    LLMRun,
     ProjectProfile,
     ReviewConfig,
     TargetMode,
@@ -1047,6 +1048,72 @@ def test_gate_pre_push_incremental_retry_resolved_carried_blocker_passes(tmp_pat
     assert "Resolved carried findings: 1" in second.stdout
 
 
+def test_gate_pre_push_incremental_retry_drops_carried_blocker_after_pack_reviewed_clean(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _write_incremental_gate_config(tmp_path, llm_enabled=True)
+    finding = _blocking_finding()
+    pack = ContextPack(
+        id=finding.context_pack_id,
+        file=finding.file,
+        diff_snippet=["@@ -84,1 +84,1 @@", "-  query({ id, tenantId })", "+  query({ id })"],
+    )
+    heads = iter(["head-1", "head-2"])
+    run_count = 0
+    resolver = FakeLLMProvider(resolution_statuses=[FindingResolutionStatus.RESOLVED])
+
+    def fake_run_review_pipeline(root, diff_text, target_mode, config, **kwargs):
+        nonlocal run_count
+        run_count += 1
+        report_finding = finding if run_count == 1 else None
+        return _gate_report(
+            root,
+            config,
+            diff_text,
+            target_mode,
+            kwargs.get("base"),
+            report_finding,
+            [pack],
+            llm_runs=[
+                LLMRun(
+                    provider="fake",
+                    context_pack_id=finding.context_pack_id,
+                    status="ok",
+                    duration_ms=1,
+                    findings_count=1 if report_finding is not None else 0,
+                )
+            ],
+        )
+
+    monkeypatch.setattr("apex_ray.cli.gate.git.repo_root", lambda _cwd: tmp_path)
+    monkeypatch.setattr("apex_ray.cli.gate.git.is_git_repo", lambda _root: True)
+    monkeypatch.setattr("apex_ray.cli.gate.git.rev_parse", lambda _root, _ref: next(heads))
+    monkeypatch.setattr("apex_ray.cli.gate.git.merge_base", lambda _root, _base, _head: "base-1")
+    monkeypatch.setattr("apex_ray.cli.gate.git.object_exists", lambda _root, _ref: True)
+    monkeypatch.setattr(
+        "apex_ray.cli.gate.git.diff_base", lambda _root, _base: _diff_for("src/orders.ts", "old", "full")
+    )
+    monkeypatch.setattr(
+        "apex_ray.cli.gate.git.diff_range",
+        lambda _root, _old, _new: _diff_for("src/orders.ts", "before", "after"),
+    )
+    monkeypatch.setattr("apex_ray.cli.gate.run_review_pipeline", fake_run_review_pipeline)
+    monkeypatch.setattr("apex_ray.cli.gate.continue_review_from_report", lambda report, **_kwargs: (report, []))
+    monkeypatch.setattr("apex_ray.cli.gate.provider_from_config", lambda _config: resolver)
+
+    first = runner.invoke(app, ["gate", "pre-push"])
+    second = runner.invoke(app, ["gate", "pre-push"], catch_exceptions=False)
+    state = json.loads((tmp_path / ".apex-ray" / "reports" / "pre-push-state.json").read_text(encoding="utf-8"))
+
+    assert first.exit_code == 1
+    assert second.exit_code == 0
+    assert "Resolved carried findings: 1" in second.stdout
+    assert state["active_findings"] == []
+    assert resolver.resolved_finding_titles == ["Missing tenant predicate"]
+
+
 def test_gate_pre_push_incremental_retry_suppresses_carried_finding(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
     _write_incremental_gate_config(tmp_path)
@@ -1215,6 +1282,7 @@ def _gate_report(
     base: str | None,
     finding: Finding | None,
     context_packs: list[ContextPack] | None = None,
+    llm_runs: list[LLMRun] | None = None,
 ):
     findings = [finding] if finding is not None else []
     verifications = (
@@ -1236,6 +1304,7 @@ def _gate_report(
         context_packs=context_packs,
         findings=findings,
         verifications=verifications,
+        llm_runs=llm_runs,
     )
 
 
