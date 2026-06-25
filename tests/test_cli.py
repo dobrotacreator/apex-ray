@@ -1062,7 +1062,7 @@ def test_gate_pre_push_incremental_retry_drops_carried_blocker_after_pack_review
     )
     heads = iter(["head-1", "head-2"])
     run_count = 0
-    resolver = FakeLLMProvider()
+    resolver = FakeLLMProvider(resolution_statuses=[FindingResolutionStatus.RESOLVED])
 
     def fake_run_review_pipeline(root, diff_text, target_mode, config, **kwargs):
         nonlocal run_count
@@ -1111,7 +1111,7 @@ def test_gate_pre_push_incremental_retry_drops_carried_blocker_after_pack_review
     assert second.exit_code == 0
     assert "Resolved carried findings: 1" in second.stdout
     assert state["active_findings"] == []
-    assert resolver.resolved_finding_titles == []
+    assert resolver.resolved_finding_titles == ["Missing tenant predicate"]
 
 
 def test_gate_pre_push_incremental_retry_suppresses_carried_finding(tmp_path: Path, monkeypatch) -> None:

@@ -478,12 +478,10 @@ def _resolve_incremental_carried_findings(
     current_blocking_fingerprints = {finding_fingerprint(finding) for finding in fingerprint_source}
     unchanged_active: list[CarriedFinding] = []
     needs_resolution: list[CarriedFinding] = []
-    reviewed_resolved_count = 0
     stale_resolved_count = 0
     for carried in carried_findings:
-        if _reviewed_pack_resolves_carried_finding(carried, report, current_blocking_fingerprints):
-            reviewed_resolved_count += 1
-            progress.event("dropping carried finding resolved by current reviewed context pack", force=True)
+        if _reviewed_pack_omits_carried_finding(carried, report, current_blocking_fingerprints):
+            needs_resolution.append(carried)
             continue
         relevant = set(carried.relevant_files or [carried.finding.file])
         if changed and any_relevant_path_changed(relevant, changed):
@@ -511,11 +509,11 @@ def _resolve_incremental_carried_findings(
     )
     return (
         dedupe_carried_findings([*unchanged_active, *unresolved]),
-        len(needs_resolution) - len(unresolved) + stale_resolved_count + reviewed_resolved_count,
+        len(needs_resolution) - len(unresolved) + stale_resolved_count,
     )
 
 
-def _reviewed_pack_resolves_carried_finding(
+def _reviewed_pack_omits_carried_finding(
     carried: CarriedFinding,
     report: ReviewReport,
     current_blocking_fingerprints: set[str],

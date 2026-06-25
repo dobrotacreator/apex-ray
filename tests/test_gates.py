@@ -156,3 +156,53 @@ def test_incremental_retry_uses_resolution_surface_globs(tmp_path: Path) -> None
     assert len(active) == 1
     assert active[0].status == "uncertain"
     assert active[0].resolution_reason == "Relevant files changed, but LLM resolution is disabled."
+
+
+def test_incremental_retry_keeps_reviewed_clean_carried_finding_without_resolution(tmp_path: Path) -> None:
+    config = ReviewConfig()
+    config.llm.enabled = False
+    finding = Finding(
+        title="Missing tenant predicate",
+        severity=FindingSeverity.HIGH,
+        confidence=FindingConfidence.HIGH,
+        file="src/orders.ts",
+        line=84,
+        failure_mode="The changed query can return another tenant's order.",
+        evidence="The diff removes tenantId from the lookup predicate.",
+        suggested_fix="Restore the tenantId predicate.",
+        suggested_test="Add a cross-tenant lookup regression test.",
+        context_pack_id="src/orders.ts#getOrder:1",
+    )
+    pack = ContextPack(
+        id=finding.context_pack_id,
+        file=finding.file,
+        diff_snippet=["@@ -84,1 +84,1 @@", "-  query({ id, tenantId })", "+  query({ id })"],
+    )
+    carried = CarriedFinding(finding=finding, context_pack=pack)
+    report = build_report(
+        ProjectProfile(root=str(tmp_path), is_git_repo=True),
+        config,
+        DiffSummary(target_mode=TargetMode.PATCH, stats=DiffStats(files_changed=1)),
+        context_packs=[pack],
+        llm_runs=[
+            LLMRun(
+                provider="fake",
+                context_pack_id=pack.id,
+                status="ok",
+                duration_ms=1,
+                findings_count=0,
+            )
+        ],
+    )
+
+    active, resolved_count = _resolve_incremental_carried_findings(
+        [carried],
+        report,
+        repo_root=tmp_path,
+        config=config,
+        progress=NoopProgress(),
+    )
+
+    assert resolved_count == 0
+    assert len(active) == 1
+    assert active[0].status == "uncertain"
