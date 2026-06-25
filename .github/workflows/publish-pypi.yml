@@ -27,7 +27,7 @@ jobs:
       name: pypi
       url: https://pypi.org/p/apex-ray
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.release.tag_name || inputs.tag_name }}
 
