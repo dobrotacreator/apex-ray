@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.10](https://github.com/dobrotacreator/apex-ray/compare/v0.1.9...v0.1.10) (2026-06-25)
+
+
+### Bug Fixes
+
+* **gate:** require resolution for reviewed carried findings ([#68](https://github.com/dobrotacreator/apex-ray/issues/68)) ([54b5f37](https://github.com/dobrotacreator/apex-ray/commit/54b5f372063de5102ec69ed9d00c9725169c912c))
+
 ## [0.1.9](https://github.com/dobrotacreator/apex-ray/compare/v0.1.8...v0.1.9) (2026-06-13)
 
 
