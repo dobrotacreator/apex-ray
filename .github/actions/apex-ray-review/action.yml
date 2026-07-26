@@ -23,11 +23,11 @@ inputs:
     required: false
     default: ""
   trust-pr-config:
-    description: Allow a same-repository pull request to use its head config. Forks always use a restricted base config.
+    description: Allow a same-repository pull request to use a restricted declarative copy of its head config.
     required: false
     default: "false"
   checkout:
-    description: Checkout the exact pull-request head with full history.
+    description: Checkout the exact pull-request head with full history into an isolated analysis directory.
     required: false
     default: "true"
   markdown-output:
@@ -64,20 +64,32 @@ inputs:
     default: apex-ray-review
 
 outputs:
+  repository-path:
+    description: Absolute path to the isolated repository-under-review checkout.
+    value: ${{ steps.prepare.outputs.repository-path }}
   markdown-output:
-    description: Workspace-relative Markdown report path.
+    description: Repository-under-review-relative Markdown report path.
     value: ${{ steps.prepare.outputs.markdown-output }}
+  markdown-path:
+    description: Absolute Markdown report path.
+    value: ${{ steps.prepare.outputs.markdown-path }}
   json-output:
-    description: Workspace-relative JSON report path.
+    description: Repository-under-review-relative JSON report path.
     value: ${{ steps.prepare.outputs.json-output }}
+  json-path:
+    description: Absolute JSON report path.
+    value: ${{ steps.prepare.outputs.json-path }}
   sarif-output:
-    description: Workspace-relative SARIF report path.
+    description: Repository-under-review-relative SARIF report path.
     value: ${{ steps.prepare.outputs.sarif-output }}
+  sarif-path:
+    description: Absolute SARIF report path.
+    value: ${{ steps.prepare.outputs.sarif-path }}
   llm-mode:
     description: Effective LLM mode, including fork safety overrides.
     value: ${{ steps.prepare.outputs.llm-mode }}
   config-source:
-    description: Whether the run used head, restricted-base, restricted-defaults, or defaults config.
+    description: Whether the run used head, restricted-head, restricted-base, restricted-defaults, or defaults config.
     value: ${{ steps.prepare.outputs.config-source }}
   quality-gate-status:
     description: Coverage quality gate status from the JSON report.
@@ -89,12 +101,24 @@ outputs:
 runs:
   using: composite
   steps:
+    - name: Verify immutable action source
+      id: verify-source
+      shell: bash
+      env:
+        APEX_RAY_ACTION_REF: ${{ github.action_ref }}
+      run: |
+        if [[ ! "$APEX_RAY_ACTION_REF" =~ ^[0-9a-f]{40}$ ]]; then
+          echo "::error title=Untrusted Apex Ray action source::Use the remote Apex Ray action pinned to a full 40-character commit SHA; local paths and mutable tags are not supported."
+          exit 1
+        fi
+
     - name: Checkout exact review head
       id: checkout
       if: ${{ inputs.checkout == 'true' }}
       uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
       with:
         ref: ${{ github.event.pull_request.head.sha || github.sha }}
+        path: .apex-ray/repository
         fetch-depth: 0
         persist-credentials: false
         show-progress: false
@@ -151,6 +175,7 @@ runs:
         INPUT_SARIF_OUTPUT: ${{ inputs.sarif-output }}
         INPUT_ARTIFACT_NAME: ${{ inputs.artifact-name }}
         INPUT_SARIF_CATEGORY: ${{ inputs.sarif-category }}
+        APEX_RAY_REPOSITORY_PATH: ${{ inputs.checkout == 'true' && format('{0}/.apex-ray/repository', github.workspace) || github.workspace }}
       run: uv run --locked --no-dev --no-sync --project "$GITHUB_ACTION_PATH/../../.." python -P -s "$GITHUB_ACTION_PATH/prepare.py" plan
 
     - name: Run Apex Ray review
@@ -183,9 +208,9 @@ runs:
       with:
         name: ${{ steps.prepare.outputs.artifact-name }}
         path: |
-          ${{ steps.prepare.outputs.markdown-output }}
-          ${{ steps.prepare.outputs.json-output }}
-          ${{ steps.prepare.outputs.sarif-output }}
+          ${{ steps.prepare.outputs.markdown-path }}
+          ${{ steps.prepare.outputs.json-path }}
+          ${{ steps.prepare.outputs.sarif-path }}
         if-no-files-found: warn
         include-hidden-files: true
         retention-days: ${{ inputs.artifact-retention-days }}
@@ -196,7 +221,7 @@ runs:
       continue-on-error: true
       uses: github/codeql-action/upload-sarif@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81
       with:
-        sarif_file: ${{ steps.prepare.outputs.sarif-output }}
+        sarif_file: ${{ steps.prepare.outputs.sarif-path }}
         category: ${{ steps.prepare.outputs.sarif-category }}
         wait-for-processing: true
 

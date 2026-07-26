@@ -92,6 +92,148 @@ test("module resolution expands relative imports and tsconfig path aliases", () 
   }
 });
 
+test("path alias resolution follows transitive workspace package configs", () => {
+  const repo = fs.mkdtempSync(
+    path.join(os.tmpdir(), "apex-ray-ts-module-transitive-config-"),
+  );
+  try {
+    writeFile(
+      repo,
+      "packages/base/package.json",
+      JSON.stringify({ name: "@workspace/base" }),
+    );
+    writeFile(
+      repo,
+      "packages/base/base.json",
+      JSON.stringify({
+        compilerOptions: {
+          baseUrl: "../..",
+          paths: {
+            "@shared/value": ["packages/shared/value.ts"],
+          },
+        },
+      }),
+    );
+    writeFile(
+      repo,
+      "packages/mid/package.json",
+      JSON.stringify({ name: "@workspace/mid" }),
+    );
+    writeFile(
+      repo,
+      "packages/mid/mid.json",
+      `{
+        // Nested package-style extends must be normalized as JSONC.
+        "extends": "@workspace/base/base.json",
+      }`,
+    );
+    writeFile(repo, "packages/shared/value.ts", "export const value = 1;\n");
+    writeFile(
+      repo,
+      "apps/web/tsconfig.json",
+      JSON.stringify({ extends: "@workspace/mid/mid.json" }),
+    );
+    writeFile(repo, "apps/web/src/changed.ts", "export const changed = 1;\n");
+    const importerPath = path.join(repo, "apps/web/src/changed.ts");
+
+    assertIncludesPath(
+      moduleSpecifierCandidatePaths(
+        "@shared/value",
+        importerPath,
+        repo,
+        null,
+      ),
+      path.join(repo, "packages/shared/value.ts"),
+    );
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("path alias resolution ignores external and symlinked extended configs", () => {
+  const repo = fs.mkdtempSync(
+    path.join(os.tmpdir(), "apex-ray-ts-module-config-boundary-"),
+  );
+  const outside = fs.mkdtempSync(
+    path.join(os.tmpdir(), "apex-ray-ts-module-config-outside-"),
+  );
+  const originalOpenSync = fs.openSync;
+  const forbiddenOpenPaths = new Set<string>();
+  let forbiddenOpenCount = 0;
+  try {
+    const externalConfigPath = path.join(outside, "external.json");
+    fs.writeFileSync(
+      externalConfigPath,
+      JSON.stringify({
+        compilerOptions: {
+          baseUrl: ".",
+          paths: {
+            "@external/*": ["private/*"],
+            "@symlink/*": ["symlink-private/*"],
+          },
+        },
+      }),
+      "utf8",
+    );
+    forbiddenOpenPaths.add(externalConfigPath);
+    fs.openSync = ((candidate: fs.PathLike, ...rest: unknown[]) => {
+      if (forbiddenOpenPaths.has(path.resolve(String(candidate)))) {
+        forbiddenOpenCount += 1;
+      }
+      return (originalOpenSync as (...args: unknown[]) => number)(
+        candidate,
+        ...rest,
+      );
+    }) as typeof fs.openSync;
+    writeFile(repo, "src/use.ts", "export const use = 1;\n");
+    const importerPath = path.join(repo, "src/use.ts");
+
+    writeFile(
+      repo,
+      "tsconfig.json",
+      JSON.stringify({
+        extends: path.relative(repo, externalConfigPath),
+      }),
+    );
+    assert.equal(
+      moduleSpecifierCandidatePaths(
+        "@external/secret",
+        importerPath,
+        repo,
+        null,
+      ).length,
+      0,
+    );
+
+    const symlinkPath = path.join(repo, "config", "base.json");
+    fs.mkdirSync(path.dirname(symlinkPath), { recursive: true });
+    fs.symlinkSync(externalConfigPath, symlinkPath);
+    forbiddenOpenPaths.add(symlinkPath);
+    writeFile(
+      repo,
+      "nested/tsconfig.json",
+      JSON.stringify({
+        extends: "../config/base.json",
+      }),
+    );
+    writeFile(repo, "nested/use.ts", "export const nested = 1;\n");
+    assert.equal(
+      moduleSpecifierCandidatePaths(
+        "@symlink/secret",
+        path.join(repo, "nested/use.ts"),
+        repo,
+        null,
+      ).length,
+      0,
+    );
+    assert.equal(forbiddenOpenCount, 0);
+  } finally {
+    fs.openSync = originalOpenSync;
+    fs.rmSync(repo, { recursive: true, force: true });
+    fs.rmSync(outside, { recursive: true, force: true });
+  }
+});
+
 test("module resolution expands workspace package root, subpath, and wildcard exports", () => {
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), "apex-ray-ts-package-resolution-"));
   try {
@@ -131,6 +273,7 @@ test("module resolution expands workspace package root, subpath, and wildcard ex
       },
       main: null,
       module: null,
+      tsconfig: null,
       types: null,
       typings: null,
     };
@@ -139,6 +282,21 @@ test("module resolution expands workspace package root, subpath, and wildcard ex
     assertIncludesPath(
       moduleSpecifierCandidatePaths("@acme/lib", importerPath, repo, packageInfo),
       path.join(packageRoot, "src/index.ts"),
+    );
+    assertIncludesPath(
+      moduleSpecifierCandidatePaths(
+        "@acme/lib",
+        importerPath,
+        repo,
+        {
+          ...packageInfo,
+          exports: {
+            types: "./configs/root.ts",
+            default: "./dist/index.js",
+          },
+        },
+      ),
+      path.join(packageRoot, "configs/root.ts"),
     );
     assertIncludesPath(
       moduleSpecifierCandidatePaths("@acme/lib/feature", importerPath, repo, packageInfo),

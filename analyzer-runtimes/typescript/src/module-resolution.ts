@@ -3,10 +3,24 @@ import path from "node:path";
 
 import ts from "typescript";
 
-import { readPackageInfo } from "./package-info.js";
-import { findNearestConfig, normalizeTsConfigExtends } from "./program.js";
+import {
+  packageExportTargetsForKey,
+  readPackageInfo,
+} from "./package-info.js";
+import {
+  findNearestConfig,
+  normalizeTsConfigExtends,
+  normalizeTsConfigFileText,
+} from "./program.js";
 import type { PackageInfo, RepoIndex, TsConfigPathAliases } from "./types.js";
-import { isRecord, isSameOrInsideRepo, normalizeRelPath, uniquePaths } from "./utils.js";
+import {
+  canonicalPathKey,
+  isInsideRepo,
+  isSameOrInsideRepo,
+  normalizeRelPath,
+  readStableUtf8File,
+  uniquePaths,
+} from "./utils.js";
 
 const pathAliasCache = new Map<string, TsConfigPathAliases | null>();
 // TypeScript substitutes extensions within these families during module
@@ -124,12 +138,14 @@ function readTsConfigPathAliases(repo: string, configPath: string): TsConfigPath
 }
 
 function readTsConfigPathAliasesUncached(repo: string, configPath: string): TsConfigPathAliases | null {
-  const readResult = ts.readConfigFile(configPath, ts.sys.readFile);
+  const configReader = createRepoConfigReader(repo);
+  if (!configReader) return null;
+  const readResult = ts.readConfigFile(configPath, configReader.readFile);
   if (readResult.error) return null;
 
   const parsed = ts.parseJsonConfigFileContent(
     normalizeTsConfigExtends(repo, configPath, readResult.config),
-    ts.sys,
+    configReader.host,
     path.dirname(configPath),
   );
   const paths = parsed.options.paths;
@@ -141,6 +157,58 @@ function readTsConfigPathAliasesUncached(repo: string, configPath: string): TsCo
     mappings: Object.entries(paths)
       .filter((entry): entry is [string, string[]] => Array.isArray(entry[1]))
       .map(([pattern, targets]) => ({ pattern, targets })),
+  };
+}
+
+function createRepoConfigReader(
+  repo: string,
+): {
+  readFile: (fileName: string) => string | undefined;
+  host: ts.ParseConfigHost;
+} | null {
+  const repoRoot = path.resolve(repo);
+  let realRepoRoot: string;
+  try {
+    realRepoRoot = fs.realpathSync(repoRoot);
+  } catch {
+    return null;
+  }
+  const readCache = new Map<string, string | undefined>();
+  const readFile = (fileName: string): string | undefined => {
+    const resolvedPath = path.resolve(fileName);
+    const key = canonicalPathKey(resolvedPath);
+    if (!readCache.has(key)) {
+      if (!isInsideRepo(repoRoot, resolvedPath)) {
+        readCache.set(key, undefined);
+        return undefined;
+      }
+      const text = readStableUtf8File(
+        resolvedPath,
+        (candidatePath, realPath) =>
+          isInsideRepo(repoRoot, candidatePath) &&
+          isInsideRepo(realRepoRoot, realPath),
+      )?.text;
+      readCache.set(
+        key,
+        text === undefined || text === null
+          ? undefined
+          : normalizeTsConfigFileText(
+              repo,
+              resolvedPath,
+              text,
+            ),
+      );
+    }
+    return readCache.get(key);
+  };
+  return {
+    readFile,
+    host: {
+      useCaseSensitiveFileNames: ts.sys.useCaseSensitiveFileNames,
+      fileExists: (fileName) => readFile(fileName) !== undefined,
+      readFile,
+      readDirectory: () => [],
+    },
   };
 }
 
@@ -183,58 +251,8 @@ function packageEntrypointCandidatePaths(packageInfo: PackageInfo): string[] {
 }
 
 function packageExportCandidatePaths(packageInfo: PackageInfo, key: string): string[] {
-  const targets = exportTargetsForKey(packageInfo.exports, key);
+  const targets = packageExportTargetsForKey(packageInfo.exports, key);
   return targets.flatMap((target) => sourceCandidatePaths(path.resolve(packageInfo.root, target)));
-}
-
-function exportTargetsForKey(exportsValue: unknown, key: string): string[] {
-  if (exportsValue === undefined || exportsValue === null) return [];
-  if (typeof exportsValue === "string" || Array.isArray(exportsValue)) {
-    return key === "." ? flattenExportTargets(exportsValue, null) : [];
-  }
-  if (!isRecord(exportsValue)) return [];
-
-  const exactTarget = exportsValue[key];
-  if (exactTarget !== undefined) return flattenExportTargets(exactTarget, null);
-
-  const matched: string[] = [];
-  for (const [pattern, target] of Object.entries(exportsValue)) {
-    const wildcardValue = matchExportPattern(pattern, key);
-    if (wildcardValue === null) continue;
-    matched.push(...flattenExportTargets(target, wildcardValue));
-  }
-  return matched;
-}
-
-function flattenExportTargets(value: unknown, wildcardValue: string | null): string[] {
-  if (typeof value === "string") {
-    return [applyExportWildcard(value, wildcardValue)];
-  }
-  if (Array.isArray(value)) {
-    return value.flatMap((item) => flattenExportTargets(item, wildcardValue));
-  }
-  if (!isRecord(value)) return [];
-
-  const preferredKeys = ["types", "typings", "import", "default", "require", "node"];
-  const keys = [
-    ...preferredKeys.filter((key) => Object.prototype.hasOwnProperty.call(value, key)),
-    ...Object.keys(value).filter((key) => !preferredKeys.includes(key)),
-  ];
-  return keys.flatMap((key) => flattenExportTargets(value[key], wildcardValue));
-}
-
-function matchExportPattern(pattern: string, key: string): string | null {
-  const wildcardIndex = pattern.indexOf("*");
-  if (wildcardIndex === -1) return null;
-
-  const prefix = pattern.slice(0, wildcardIndex);
-  const suffix = pattern.slice(wildcardIndex + 1);
-  if (!key.startsWith(prefix) || !key.endsWith(suffix)) return null;
-  return key.slice(prefix.length, key.length - suffix.length);
-}
-
-function applyExportWildcard(value: string, wildcardValue: string | null): string {
-  return wildcardValue === null ? value : value.replaceAll("*", wildcardValue);
 }
 
 function sourceCandidatePaths(basePath: string): string[] {

@@ -57,6 +57,16 @@ _WINDOWS_ABSOLUTE_PATH = re.compile(
     r"(?<![A-Za-z0-9_])(?:[A-Za-z]:[\\/])"
     r"(?:[^ \t\r\n`\"'<>|]+)"
 )
+_WINDOWS_ROOT_RELATIVE_PATH = re.compile(
+    r"(?<![\\A-Za-z0-9_])\\(?!\\)"
+    r"(?:[^ \t\r\n`\"'<>|\\/:]+[\\/])+"
+    r"[^ \t\r\n`\"'<>|\\/:]+"
+)
+_WINDOWS_DRIVE_RELATIVE_PATH = re.compile(
+    r"(?<![A-Za-z0-9_])[A-Za-z]:(?![\\/])"
+    r"(?:[^ \t\r\n`\"'<>|\\/:]+[\\/])+"
+    r"[^ \t\r\n`\"'<>|\\/:]+"
+)
 _POSIX_ABSOLUTE_PATH = re.compile(r"(?<![/A-Za-z0-9_])/(?:[^ \t\r\n`\"'<>]+)")
 
 
@@ -233,7 +243,17 @@ def _repo_relative_path(value: str, root: str) -> str | None:
     if not candidate or candidate == "<unknown>" or "\x00" in candidate:
         return None
 
-    if _looks_windows_path(candidate) or _looks_windows_path(root):
+    if PurePosixPath(candidate).is_absolute():
+        posix_candidate = PurePosixPath(candidate.replace("\\", "/"))
+        posix_root = PurePosixPath(root.replace("\\", "/"))
+        if not posix_root.is_absolute():
+            return None
+        try:
+            relative = posix_candidate.relative_to(posix_root)
+        except ValueError:
+            return None
+        parts = relative.parts
+    elif _looks_windows_path(candidate) or _looks_windows_path(root):
         windows_candidate = PureWindowsPath(candidate)
         if windows_candidate.is_absolute():
             windows_root = PureWindowsPath(root)
@@ -244,21 +264,13 @@ def _repo_relative_path(value: str, root: str) -> str | None:
             except ValueError:
                 return None
             parts = relative.parts
+        elif windows_candidate.drive or windows_candidate.root:
+            return None
         else:
             parts = windows_candidate.parts
     else:
         posix_candidate = PurePosixPath(candidate)
-        if posix_candidate.is_absolute():
-            posix_root = PurePosixPath(root)
-            if not posix_root.is_absolute():
-                return None
-            try:
-                relative = posix_candidate.relative_to(posix_root)
-            except ValueError:
-                return None
-            parts = relative.parts
-        else:
-            parts = posix_candidate.parts
+        parts = posix_candidate.parts
 
     safe_parts = [part for part in parts if part not in ("", ".")]
     if not safe_parts or any(part == ".." for part in safe_parts):
@@ -298,19 +310,47 @@ def _url_exposes_local_path(value: str, root: str) -> bool:
         return True
 
     try:
-        query = urlsplit(decoded).query
+        parsed = urlsplit(decoded)
     except ValueError:
         return True
-    for key, query_value in parse_qsl(query, keep_blank_values=True):
-        if key.casefold() not in _LOCAL_PATH_QUERY_KEYS:
-            continue
-        if _is_absolute_path(query_value):
+    if any(_contains_windows_local_path(component) for component in (parsed.netloc, parsed.path, parsed.fragment)):
+        return True
+    for key, query_value in parse_qsl(parsed.query, keep_blank_values=True):
+        if _contains_windows_local_path(query_value) or (
+            key.casefold() in _LOCAL_PATH_QUERY_KEYS and _is_absolute_path(query_value)
+        ):
             return True
     return False
 
 
+def _contains_windows_local_path(value: str) -> bool:
+    return any(
+        pattern.search(value) is not None
+        for pattern in (
+            _UNC_ABSOLUTE_PATH,
+            _WINDOWS_ABSOLUTE_PATH,
+            _WINDOWS_ROOT_RELATIVE_PATH,
+            _WINDOWS_DRIVE_RELATIVE_PATH,
+        )
+    )
+
+
 def _is_absolute_path(value: str) -> bool:
-    return PurePosixPath(value).is_absolute() or PureWindowsPath(value).is_absolute() or value.startswith("\\\\")
+    windows_path = PureWindowsPath(value)
+    return (
+        PurePosixPath(value).is_absolute()
+        or windows_path.is_absolute()
+        or value.startswith("\\\\")
+        or _is_anchored_windows_local_path(windows_path)
+    )
+
+
+def _is_anchored_windows_local_path(path: PureWindowsPath) -> bool:
+    if not path.drive and not path.root:
+        return False
+    # A second path component distinguishes local path syntax such as
+    # ``C:Users\alice`` from an ordinary prose label such as ``C:Users``.
+    return len(path.parts) >= 3
 
 
 def _redact_paths(value: str, root: str) -> str:
@@ -323,6 +363,8 @@ def _redact_paths(value: str, root: str) -> str:
         redacted = redacted.replace(variant, "<repo>")
     redacted = _UNC_ABSOLUTE_PATH.sub("<absolute-path>", redacted)
     redacted = _WINDOWS_ABSOLUTE_PATH.sub("<absolute-path>", redacted)
+    redacted = _WINDOWS_ROOT_RELATIVE_PATH.sub("<absolute-path>", redacted)
+    redacted = _WINDOWS_DRIVE_RELATIVE_PATH.sub("<absolute-path>", redacted)
     return _POSIX_ABSOLUTE_PATH.sub("<absolute-path>", redacted)
 
 

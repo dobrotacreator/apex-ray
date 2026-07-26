@@ -1,5 +1,7 @@
 import ts from "typescript";
 
+import type { StableFileIdentity } from "./utils.js";
+
 export type SymbolKind =
   | "function"
   | "class"
@@ -120,6 +122,7 @@ export interface PackageInfo {
   exports: unknown;
   main: string | null;
   module: string | null;
+  tsconfig: string | null;
   types: string | null;
   typings: string | null;
 }
@@ -127,15 +130,20 @@ export interface PackageInfo {
 export interface RepoIndex {
   files: RepoFileIndexEntry[];
   packageByFile: Map<string, PackageInfo | null>;
+  fileIdentities?: Map<string, StableFileIdentity>;
   cacheStats: RepoIndexCacheStats | null;
+  partial?: boolean;
 }
 
 export interface RepoFileIndexEntry {
   absPath: string;
   relPath: string;
   relLower: string;
+  dev: number;
+  ino: number;
   size: number;
   mtimeMs: number;
+  ctimeMs: number;
   imports: ImportIndexEntry[];
   exports: ExportIndexEntry[];
   identifiers: IdentifierIndexEntry[];
@@ -278,8 +286,11 @@ export interface RepoIndexCacheWriteResult {
 
 export interface RepoIndexCacheFileEntry {
   relPath: string;
+  dev: number;
+  ino: number;
   size: number;
   mtimeMs: number;
+  ctimeMs: number;
   imports: ImportIndexEntry[];
   exports: ExportIndexEntry[];
   identifiers: IdentifierIndexEntry[];

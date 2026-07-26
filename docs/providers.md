@@ -94,9 +94,15 @@ Model catalogs change faster than Apex Ray releases. Treat these as examples,
 confirm the model ID in the provider's current documentation, and set it
 explicitly. A provider preset never silently substitutes a model.
 See the official [DeepSeek](https://api-docs.deepseek.com/quick_start/pricing),
-[Qwen](https://help.aliyun.com/en/model-studio/text-generation-model/),
+[Qwen](https://help.aliyun.com/en/model-studio/text-generation),
 [Kimi](https://platform.kimi.ai/docs/api/chat), and
 [Z.ai](https://docs.z.ai/guides/overview/overview) catalogs.
+
+The Qwen preset defaults to the shared Beijing DashScope endpoint. For another
+region or Alibaba's recommended workspace-dedicated production endpoint, set
+`review.llm.api.base_url_env` to an environment variable containing the
+official `dashscope-*.aliyuncs.com` or `*.maas.aliyuncs.com` base URL. The
+preset still enforces that the resolved host belongs to Alibaba Cloud.
 
 `effort` is translated conservatively to each Chat Completions dialect:
 DeepSeek uses its documented `high`/`max` levels, Qwen uses the thinking

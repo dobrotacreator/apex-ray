@@ -87,9 +87,17 @@ def create_plan(options: PlanOptions) -> dict[str, Any]:
     base_ref = options.base.strip() or _event_base_ref(options.event)
     base_sha = _resolve_commit(workspace, base_ref) if base_ref else ""
 
-    restrict_pr_config = pr_data is not None and (untrusted_pr or not options.trust_pr_config)
-    if restrict_pr_config:
-        raw_config = _read_git_file(workspace, base_sha, requested_config) if base_sha else None
+    if pr_data is not None:
+        use_head_config = options.trust_pr_config and not untrusted_pr
+        if use_head_config:
+            head_config = safe_workspace_path(
+                workspace,
+                requested_config,
+                label="Config path",
+            )
+            raw_config = head_config.read_text(encoding="utf-8") if head_config.is_file() else None
+        else:
+            raw_config = _read_git_file(workspace, base_sha, requested_config) if base_sha else None
         config_document = _load_config_document(raw_config)
         safe_config = _sanitize_config(config_document, runner_temp)
         if not untrusted_pr and llm != "false":
@@ -108,7 +116,10 @@ def create_plan(options: PlanOptions) -> dict[str, Any]:
             encoding="utf-8",
         )
         config_path.chmod(0o600)
-        config_source = "restricted-base" if raw_config is not None else "restricted-defaults"
+        if raw_config is None:
+            config_source = "restricted-defaults"
+        else:
+            config_source = "restricted-head" if use_head_config else "restricted-base"
     else:
         head_config = safe_workspace_path(
             workspace,
@@ -189,7 +200,7 @@ def parse_reviewers(value: str) -> list[str]:
 
 
 def safe_workspace_path(workspace: Path, value: str, *, label: str) -> Path:
-    """Resolve a workspace-relative path without permitting escapes."""
+    """Resolve a workspace-relative path without permitting escapes or links."""
 
     if (
         not value
@@ -203,9 +214,14 @@ def safe_workspace_path(workspace: Path, value: str, *, label: str) -> Path:
     relative = PurePosixPath(value)
     if relative.is_absolute() or not relative.parts or ".." in relative.parts:
         raise ValueError(f"{label} must be a workspace-relative path.")
-    candidate = workspace.joinpath(*relative.parts).resolve()
     resolved_workspace = workspace.resolve()
-    if not candidate.is_relative_to(resolved_workspace):
+    candidate = resolved_workspace.joinpath(*relative.parts)
+    current = resolved_workspace
+    for component in relative.parts:
+        current /= component
+        if current.is_symlink():
+            raise ValueError(f"{label} must not contain symbolic links.")
+    if not candidate.resolve().is_relative_to(resolved_workspace):
         raise ValueError(f"{label} must be a workspace-relative path.")
     return candidate
 
@@ -465,13 +481,17 @@ def _write_step_summary(lines: list[str]) -> None:
 def _write_plan_outputs(plan: dict[str, Any], plan_path: Path) -> None:
     outputs = {
         "plan": str(plan_path),
+        "repository-path": str(plan["workspace"]),
         "config-source": str(plan["config_source"]),
         "untrusted-pr": str(plan["untrusted_pr"]).lower(),
         "llm-mode": str(plan["llm_mode"]),
         "reviewers": ",".join(plan["reviewers"]),
         "markdown-output": str(plan["markdown_output"]),
+        "markdown-path": str(plan["markdown_path"]),
         "json-output": str(plan["json_output"]),
+        "json-path": str(plan["json_path"]),
         "sarif-output": str(plan["sarif_output"]),
+        "sarif-path": str(plan["sarif_path"]),
         "artifact-name": str(plan["artifact_name"]),
         "sarif-category": str(plan["sarif_category"]),
         "fail-on-quality-gate": str(plan["fail_on_quality_gate"]).lower(),
@@ -488,7 +508,7 @@ def _read_plan(path: Path) -> dict[str, Any]:
 
 
 def _plan_from_environment() -> int:
-    workspace = Path(os.environ["GITHUB_WORKSPACE"])
+    workspace = Path(os.environ["APEX_RAY_REPOSITORY_PATH"])
     runner_temp = Path(os.environ["RUNNER_TEMP"])
     options = PlanOptions(
         workspace=workspace,

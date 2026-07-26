@@ -63,8 +63,11 @@ function isRepoIndexCacheFileEntry(value: unknown): value is RepoIndexCacheFileE
   if (!isRecord(value)) return false;
   return (
     typeof value.relPath === "string" &&
+    typeof value.dev === "number" &&
+    typeof value.ino === "number" &&
     typeof value.size === "number" &&
     typeof value.mtimeMs === "number" &&
+    typeof value.ctimeMs === "number" &&
     Array.isArray(value.imports) &&
     value.imports.every(isImportIndexEntry) &&
     Array.isArray(value.exports) &&
@@ -204,8 +207,11 @@ export function writeRepoIndexCache(
       inventoryFingerprint,
       files: files.map((file) => ({
         relPath: file.relPath,
+        dev: file.dev,
+        ino: file.ino,
         size: file.size,
         mtimeMs: file.mtimeMs,
+        ctimeMs: file.ctimeMs,
         imports: file.imports,
         exports: file.exports,
         identifiers: file.identifiers,

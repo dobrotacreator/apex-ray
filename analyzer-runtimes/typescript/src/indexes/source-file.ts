@@ -11,20 +11,28 @@ import {
   collectTypeAliasIndex,
 } from "./semantic-file.js";
 import type { RepoFileIndexEntry } from "../types.js";
-import { isDeclarationFileName, normalizeRelPath, scriptKindForPath } from "../utils.js";
+import {
+  isDeclarationFileName,
+  isTypeScriptOrJavaScriptFileName,
+  normalizeRelPath,
+  scriptKindForPath,
+} from "../utils.js";
 
 interface SourceFileIndexInput {
   repo: string;
   absPath: string;
   relPath: string;
+  dev: number;
+  ino: number;
   size: number;
   mtimeMs: number;
+  ctimeMs: number;
   text: string;
 }
 
 export function isAnalyzableSourceFile(filePath: string): boolean {
   const normalized = normalizeRelPath(filePath);
-  return /\.(?:[cm]?[jt]s|[jt]sx)$/i.test(normalized) && !isDeclarationFileName(normalized);
+  return isTypeScriptOrJavaScriptFileName(normalized) && !isDeclarationFileName(normalized);
 }
 
 export function indexSourceFile(input: SourceFileIndexInput): RepoFileIndexEntry {
@@ -33,8 +41,11 @@ export function indexSourceFile(input: SourceFileIndexInput): RepoFileIndexEntry
     absPath: path.resolve(input.absPath),
     relPath: input.relPath,
     relLower: input.relPath.toLowerCase(),
+    dev: input.dev,
+    ino: input.ino,
     size: input.size,
     mtimeMs: input.mtimeMs,
+    ctimeMs: input.ctimeMs,
     imports: collectImportIndex(input.repo, source),
     exports: collectExportIndex(input.repo, source),
     identifiers: collectIdentifierIndex(input.repo, source),

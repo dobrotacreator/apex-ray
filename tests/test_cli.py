@@ -1123,9 +1123,22 @@ review:
         report.llm_coverage.partial_reasons = (
             [f"{len(remaining)} required reviewer assignment(s) remain"] if remaining else []
         )
+        report.llm_coverage.quality_gate_status = "fail" if remaining else "pass"
+        report.llm_coverage.quality_gate_reasons = (
+            [f"{len(remaining)} required reviewer assignment(s) remain"] if remaining else []
+        )
         report.llm_coverage.residual_risk_p0_context_pack_ids = [pack.id for pack in remaining]
         report.llm_coverage.reviewed_context_pack_ids = [pack.id for pack in reviewed]
         report.llm_coverage.unreviewed_context_pack_ids = [pack.id for pack in remaining]
+        reviewer_coverage = report.llm_coverage.reviewers[0]
+        reviewer_coverage.status = "fail" if remaining else "pass"
+        reviewer_coverage.reasons = [f"{len(remaining)} required reviewer assignment(s) remain"] if remaining else []
+        reviewer_coverage.matching_context_pack_ids = [pack.id for pack in packs]
+        reviewer_coverage.selected_context_pack_ids = [pack.id for pack in packs]
+        reviewer_coverage.reviewed_context_pack_ids = [pack.id for pack in reviewed]
+        reviewer_coverage.matching_context_packs = len(packs)
+        reviewer_coverage.selected_context_packs = len(packs)
+        reviewer_coverage.reviewed_context_packs = len(reviewed)
         report.llm_coverage.coverage_todos = [
             LLMCoverageTodo(
                 context_pack_id=pack.id,

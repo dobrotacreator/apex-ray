@@ -182,6 +182,77 @@ def test_render_sarif_relativizes_windows_paths_and_omits_invalid_lines() -> Non
     assert "locations" not in results["Escaping location"]
 
 
+def test_render_sarif_checks_containment_for_mixed_separator_absolute_posix_paths() -> None:
+    report = build_report(
+        ProjectProfile(root="/workspace/repo", is_git_repo=True),
+        ReviewConfig(),
+        DiffSummary(target_mode=TargetMode.PATCH, stats=DiffStats(files_changed=2)),
+        findings=[
+            _finding(
+                title="Inside mixed path",
+                severity=FindingSeverity.HIGH,
+                file=r"/workspace/repo\src\service.ts",
+                line=4,
+            ),
+            _finding(
+                title="Outside mixed path",
+                severity=FindingSeverity.HIGH,
+                file=r"/private/company\secret.ts",
+                line=8,
+            ),
+        ],
+    )
+
+    rendered = render_sarif(report)
+    results = {
+        result["message"]["text"].splitlines()[0]: result for result in json.loads(rendered)["runs"][0]["results"]
+    }
+
+    assert results["Inside mixed path"]["locations"] == [
+        {
+            "physicalLocation": {
+                "artifactLocation": {"uri": "src/service.ts"},
+                "region": {"startColumn": 1, "startLine": 4},
+            }
+        }
+    ]
+    assert "locations" not in results["Outside mixed path"]
+    assert "/private/company" not in rendered
+    assert r"\private\company" not in rendered
+
+
+def test_render_sarif_omits_uncontained_windows_rooted_and_drive_relative_paths() -> None:
+    report = build_report(
+        ProjectProfile(root="/workspace/repo", is_git_repo=True),
+        ReviewConfig(),
+        DiffSummary(target_mode=TargetMode.PATCH, stats=DiffStats(files_changed=2)),
+        findings=[
+            _finding(
+                title="Root-relative Windows path",
+                severity=FindingSeverity.HIGH,
+                file=r"\private\company\secret.ts",
+                line=4,
+            ),
+            _finding(
+                title="Drive-relative Windows path",
+                severity=FindingSeverity.HIGH,
+                file=r"C:private\company\secret.ts",
+                line=8,
+            ),
+        ],
+    )
+
+    rendered = render_sarif(report)
+    results = {
+        result["message"]["text"].splitlines()[0]: result for result in json.loads(rendered)["runs"][0]["results"]
+    }
+
+    assert "locations" not in results["Root-relative Windows path"]
+    assert "locations" not in results["Drive-relative Windows path"]
+    assert r"\private\company" not in rendered
+    assert "C:private" not in rendered
+
+
 def test_render_sarif_fingerprint_is_independent_of_checkout_root() -> None:
     config = ReviewConfig()
     diff = DiffSummary(
@@ -255,6 +326,39 @@ def test_render_sarif_redacts_posix_windows_and_unc_paths_without_corrupting_url
     assert "https://example.com/review/path." in message
 
 
+def test_render_sarif_redacts_windows_root_and_drive_relative_paths_from_finding_text() -> None:
+    finding = _finding(
+        title="Anchored Windows path evidence",
+        severity=FindingSeverity.MEDIUM,
+        file="src/service.ts",
+        line=5,
+    ).model_copy(
+        update={
+            "failure_mode": r"Reads private data from \Users\alice\corp\secret.ts.",
+            "evidence": (
+                r"Drive-relative trace C:Users\alice\corp\secret.ts. "
+                "The prose label C:Users remains useful."
+            ),
+        }
+    )
+    report = build_report(
+        ProjectProfile(root=r"C:\workspace\repo", is_git_repo=True),
+        ReviewConfig(),
+        DiffSummary(
+            target_mode=TargetMode.PATCH,
+            stats=DiffStats(files_changed=1),
+        ),
+        findings=[finding],
+    )
+
+    message = json.loads(render_sarif(report))["runs"][0]["results"][0]["message"]["text"]
+
+    assert r"\Users\alice" not in message
+    assert r"C:Users\alice" not in message
+    assert message.count("<absolute-path>") == 2
+    assert "The prose label C:Users remains useful." in message
+
+
 def test_render_sarif_redacts_local_paths_embedded_in_urls() -> None:
     finding = _finding(
         title="URL path evidence",
@@ -292,6 +396,114 @@ def test_render_sarif_redacts_local_paths_embedded_in_urls() -> None:
     assert message.count("<remote-url-with-local-path>") == 3
     assert "<local-url>" in message
     assert "https://example.com/review/path?tab=security." in message
+
+
+def test_render_sarif_redacts_encoded_windows_root_and_drive_relative_url_queries() -> None:
+    finding = _finding(
+        title="Encoded Windows query evidence",
+        severity=FindingSeverity.MEDIUM,
+        file="src/service.ts",
+        line=5,
+    ).model_copy(
+        update={
+            "evidence": (
+                "Root relative "
+                "https://example.com/open?path=%5CUsers%5Calice%5Ccorp%5Csecret.ts. "
+                "Drive relative "
+                "https://example.com/open?file=C%3AUsers%5Calice%5Ccorp%5Csecret.ts. "
+                "Safe label https://example.com/open?path=C%3AUsers."
+            )
+        }
+    )
+    report = build_report(
+        ProjectProfile(root=r"C:\workspace\repo", is_git_repo=True),
+        ReviewConfig(),
+        DiffSummary(
+            target_mode=TargetMode.PATCH,
+            stats=DiffStats(files_changed=1),
+        ),
+        findings=[finding],
+    )
+
+    message = json.loads(render_sarif(report))["runs"][0]["results"][0]["message"]["text"]
+
+    assert message.count("<remote-url-with-local-path>") == 2
+    assert r"\Users\alice" not in message
+    assert r"C:Users\alice" not in message
+    assert "%5CUsers%5Calice" not in message
+    assert "C%3AUsers%5Calice" not in message
+    assert "https://example.com/open?path=C%3AUsers." in message
+
+
+def test_render_sarif_redacts_encoded_windows_paths_from_url_paths_and_arbitrary_queries() -> None:
+    finding = _finding(
+        title="Encoded Windows URL path evidence",
+        severity=FindingSeverity.MEDIUM,
+        file="src/service.ts",
+        line=5,
+    ).model_copy(
+        update={
+            "evidence": (
+                "Root-relative URL path "
+                "https://example.com/open/%5CUsers%5Calice%5Ccorp%5Csecret.ts. "
+                "Drive-relative URL path "
+                "https://example.com/open/C%3AUsers%5Calice%5Ccorp%5Csecret.ts. "
+                "Arbitrary query key "
+                "https://example.com/open?redirect=%5CUsers%5Calice%5Ccorp%5Csecret.ts. "
+                "Safe URL https://example.com/docs/C%3AUsers."
+            )
+        }
+    )
+    report = build_report(
+        ProjectProfile(root=r"C:\workspace\repo", is_git_repo=True),
+        ReviewConfig(),
+        DiffSummary(
+            target_mode=TargetMode.PATCH,
+            stats=DiffStats(files_changed=1),
+        ),
+        findings=[finding],
+    )
+
+    message = json.loads(render_sarif(report))["runs"][0]["results"][0]["message"]["text"]
+
+    assert message.count("<remote-url-with-local-path>") == 3
+    assert "%5CUsers%5Calice" not in message
+    assert "C%3AUsers%5Calice" not in message
+    assert "https://example.com/docs/C%3AUsers." in message
+
+
+def test_render_sarif_redacts_encoded_windows_paths_from_url_authority_and_fragment() -> None:
+    finding = _finding(
+        title="Encoded Windows URL metadata",
+        severity=FindingSeverity.MEDIUM,
+        file="src/service.ts",
+        line=5,
+    ).model_copy(
+        update={
+            "evidence": (
+                "Authority "
+                "https://C%3AUsers%5Calice%5Ccorp%5Csecret.ts@example.com/open. "
+                "Fragment "
+                "https://example.com/open#file=C%3AUsers%5Calice%5Ccorp%5Csecret.ts. "
+                "Safe fragment https://example.com/docs#label=C%3AUsers."
+            )
+        }
+    )
+    report = build_report(
+        ProjectProfile(root=r"C:\workspace\repo", is_git_repo=True),
+        ReviewConfig(),
+        DiffSummary(
+            target_mode=TargetMode.PATCH,
+            stats=DiffStats(files_changed=1),
+        ),
+        findings=[finding],
+    )
+
+    message = json.loads(render_sarif(report))["runs"][0]["results"][0]["message"]["text"]
+
+    assert message.count("<remote-url-with-local-path>") == 2
+    assert "C%3AUsers%5Calice" not in message
+    assert "https://example.com/docs#label=C%3AUsers." in message
 
 
 def test_render_sarif_uses_total_result_order_for_duplicate_fingerprints() -> None:

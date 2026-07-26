@@ -13,7 +13,13 @@ from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
 from apex_ray.llm.errors import LLMProviderError, LLMProviderErrorCategory
-from apex_ray.llm.http import JSONHTTPResponse, JSONTransport, JSONTransportError, UrllibJSONTransport
+from apex_ray.llm.http import (
+    JSONHTTPResponse,
+    JSONTransport,
+    JSONTransportError,
+    UrllibJSONTransport,
+    validate_api_endpoint_url,
+)
 from apex_ray.llm.prompts import (
     build_resolution_prompt,
     build_review_prompt,
@@ -88,7 +94,10 @@ _PRESETS = {
             "dashscope-intl.aliyuncs.com",
             "dashscope-us.aliyuncs.com",
         ),
-        allowed_host_suffixes=(".dashscope.aliyuncs.com",),
+        allowed_host_suffixes=(
+            ".dashscope.aliyuncs.com",
+            ".maas.aliyuncs.com",
+        ),
     ),
     LLMProviderName.KIMI_API: _ProviderPreset(
         protocol=LLMAPIProtocol.OPENAI_CHAT,
@@ -338,7 +347,7 @@ class APILLMProvider:
 
     def _transport_error(self, error: JSONTransportError) -> LLMProviderError:
         if error.kind == "malformed":
-            return LLMProviderError("API returned malformed JSON.", category="malformed")
+            return LLMProviderError(str(error), category="malformed")
         if error.kind == "timeout":
             return LLMProviderError("API request timed out.", category="timeout", retryable=True)
         return LLMProviderError("API network request failed.", category="provider", retryable=True)
@@ -515,7 +524,7 @@ class APILLMProvider:
 
     def _openai_responses_reasoning(self) -> dict[str, object]:
         effort = self.config.effort
-        if effort is None or effort == LLMReasoningEffort.NONE:
+        if effort is None:
             return {}
         return {"reasoning": {"effort": str(effort)}}
 
@@ -692,24 +701,10 @@ def _append_endpoint(base_url: str, endpoint: str) -> str:
 
 
 def _validated_endpoint_host(url: str) -> str:
-    if any(ord(character) < 32 or ord(character) == 127 for character in url):
-        raise LLMProviderError("API endpoint must not contain control characters.")
-    parsed = urlsplit(url)
     try:
-        _port = parsed.port
+        return validate_api_endpoint_url(url)
     except ValueError as exc:
-        raise LLMProviderError("API endpoint contains an invalid port.") from exc
-    host = (parsed.hostname or "").lower().rstrip(".")
-    loopback = host in {"127.0.0.1", "::1", "localhost"}
-    if parsed.scheme != "https" and not (parsed.scheme == "http" and loopback):
-        raise LLMProviderError("API endpoint must use HTTPS (HTTP is allowed only for loopback tests).")
-    if not host:
-        raise LLMProviderError("API endpoint must include a host.")
-    if parsed.username or parsed.password:
-        raise LLMProviderError("API endpoint must not contain credentials.")
-    if parsed.query or parsed.fragment:
-        raise LLMProviderError("API endpoint must not contain a query or fragment.")
-    return host
+        raise LLMProviderError(str(exc), category="malformed") from exc
 
 
 def _is_ci(environment: Mapping[str, str]) -> bool:

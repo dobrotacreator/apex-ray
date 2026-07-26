@@ -1,27 +1,38 @@
 # GitHub Actions
 
 Apex Ray ships a composite action at `.github/actions/apex-ray-review`. It checks
-out the exact pull-request head, reviews the immutable base-SHA diff, writes
-Markdown/JSON/SARIF, adds a compact job summary, uploads the reports as an
-artifact, and attempts a non-blocking code-scanning upload.
+out the exact pull-request head into the isolated
+`$GITHUB_WORKSPACE/.apex-ray/repository` analysis directory, reviews the
+immutable base-SHA diff, writes Markdown/JSON/SARIF, adds a compact job summary,
+uploads the reports as an artifact, and attempts a non-blocking code-scanning
+upload.
 
-The action runs Apex Ray from the pinned action checkout instead of resolving a
-separate package from PyPI. It installs Python dependencies from that commit's
-`uv.lock` with `uv sync --locked --no-install-project`, imports the pinned
-source directly, installs TypeScript analyzer dependencies from
-`package-lock.json` with `npm ci`, and builds the analyzer before review. This
-avoids both an unrelated PyPI artifact and an unlocked Python build-isolation
-environment. The Python, Node.js, and uv tool versions are also exact. As a
-result, the code being reviewed as an action and the code being executed are
-the same pinned source tree, including for commits that have not been released
-to PyPI.
+The action runs Apex Ray from the immutable action source under
+`GITHUB_ACTION_PATH`, never from the repository-under-review checkout. It
+installs Python dependencies from the pinned action commit's `uv.lock` with
+`uv sync --locked --no-install-project`, imports only that pinned Python source,
+installs TypeScript analyzer dependencies from that action commit's
+`package-lock.json` with `npm ci`, and builds only the pinned analyzer. It does
+not run package-manager hooks, build scripts, tests, analyzer scripts, or Python
+imports from the pull-request head. The reviewed checkout is parser input, not
+executable action code. This separation avoids both pull-request runtime
+replacement and an unrelated PyPI artifact or unlocked Python build-isolation
+environment. The Python, Node.js, and uv tool versions are also exact.
 
 ## Recommended pull-request workflow
 
 Replace `<full-release-commit-sha>` with the 40-character commit for the Apex
 Ray release you have reviewed. Pinning the action itself and its transitive
 actions prevents a mutable tag from changing the code that receives API
-credentials.
+credentials. The action verifies that `github.action_ref` is a full
+40-character commit SHA before checkout and rejects mutable tags and local
+action paths.
+
+Do not replace the pinned remote `uses:` line with
+`uses: ./.github/actions/apex-ray-review` in a pull-request workflow that can
+receive API credentials. A local action is loaded from the caller's checkout;
+for `pull_request`, that can be the pull request merge commit, so the action
+implementation itself is not an immutable trust boundary.
 
 ```yaml
 name: Apex Ray
@@ -46,7 +57,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        reviewer: [security, finance, ux]
+        reviewer: [correctness, security, ux]
     env:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
     steps:
@@ -193,6 +204,14 @@ fork and Dependabot pull requests. Those runs still perform deterministic
 classification and analyzer-backed review, produce artifacts, and skip the
 code-scanning upload that requires a write token.
 
+Do not switch this workflow to `pull_request_target`. That event runs with the
+base repository's privileged token and secrets, and combining it with a
+pull-request head checkout is unsafe if any later step starts executing code
+from that checkout. Apex Ray keeps its own runtime separate and treats the head
+as analysis input, but the ordinary `pull_request` event is still the intended
+and least-privileged integration. Use a separate privileged workflow that
+consumes validated report artifacts if a later operation needs write access.
+
 For every pull request, the default `trust-pr-config: false` loads
 `.apex-ray/config.yml` from the base commit and writes a restricted temporary
 copy. The restricted copy disables custom analyzer scripts, external
@@ -209,19 +228,28 @@ are never executed there. Configure `openai_api`, `anthropic_api`, another
 preset API, or `openai_compatible` for CI.
 
 Set `trust-pr-config: true` only for same-repository pull requests whose authors
-are allowed to choose the API endpoint and executable analyzer configuration.
-The option is ignored for forks. Review changes to shared config, reviewer
-prompts, API environment-variable names, and endpoint allowlists as security
-changes before merging them to the base branch.
+are allowed to choose the declarative API endpoint, reviewer, and risk
+configuration. The option is ignored for forks. Head configuration still goes
+through the restricted-copy sanitizer: custom analyzer scripts, external
+rule/memory files, CLI LLM providers, caches, telemetry, report archives, and
+triage writes cannot execute from the pull-request checkout. Review changes to
+shared config, reviewer prompts, API environment-variable names, and endpoint
+allowlists as security changes before merging them to the base branch.
 
 If another step performs checkout, use `checkout: "false"` only after checking
-out the exact head commit with full history and without persisted credentials.
-The action validates all output paths as workspace-relative and omits local
-absolute paths from SARIF locations and messages.
+out the exact head commit at `GITHUB_WORKSPACE` with full history and without
+persisted credentials. Keep the action itself remotely pinned and do not run
+dependency hooks, builds, tests, or repository-provided scripts before review
+when the job has secrets. The action validates all report paths relative to the
+repository under review and exposes both repository-relative outputs
+(`markdown-output`, `json-output`, `sarif-output`) and absolute outputs
+(`repository-path`, `markdown-path`, `json-path`, `sarif-path`). Local absolute
+paths remain omitted from SARIF locations and messages.
 
 GitHub references:
 
 - [Secure use reference](https://docs.github.com/en/actions/reference/security/secure-use)
+- [Contexts reference](https://docs.github.com/en/actions/reference/workflows-and-actions/contexts)
 - [Events that trigger workflows](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows)
 - [Assigning permissions to jobs](https://docs.github.com/en/actions/how-tos/security-for-github-actions/security-guides/automatic-token-authentication)
 - [Uploading SARIF to GitHub](https://docs.github.com/en/code-security/code-scanning/integrating-with-code-scanning/uploading-a-sarif-file-to-github)

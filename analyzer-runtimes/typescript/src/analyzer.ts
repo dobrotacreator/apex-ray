@@ -28,7 +28,7 @@ import type {
   FileAnalysis,
   Reference,
 } from "./types.js";
-import { normalizeRelPath, rangesOverlap } from "./utils.js";
+import { canonicalPathKey, rangesOverlap } from "./utils.js";
 import {
   collectProviderTokenInjectionReferences,
   collectWorkspaceDiReferences,
@@ -52,17 +52,48 @@ export type {
 export function analyze(args: Args): AnalyzerResult {
   const warnings: string[] = [];
   const budgetExhausted = analysisBudget(args.analysisTimeBudgetMs);
-  const inventory = loadRepoFileInventory(args);
-  const contextsByFile = createProgramContexts(args, warnings, inventory);
-  const repoIndex = buildRepoIndex(args, warnings, inventory);
+  const inventory = loadRepoFileInventory(args, { shouldStop: budgetExhausted });
+  if (inventory.partialReason) warnings.push(inventory.partialReason);
+  if (budgetExhausted()) {
+    const reason = `TypeScript analyzer internal budget exhausted after ${args.analysisTimeBudgetMs ?? 0}ms`;
+    warnings.push(
+      `${reason}; skipped ${args.changed.length} changed file${args.changed.length === 1 ? "" : "s"}.`,
+    );
+    return {
+      language: "typescript",
+      projectRoot: args.repo,
+      tsconfigPath: null,
+      files: [],
+      warnings,
+      indexCache: null,
+      partial: true,
+      failedFiles: [...args.changed],
+      shardFailures: [
+        {
+          index: 1,
+          total: 1,
+          files: [...args.changed],
+          reason,
+          status: "timeout",
+        },
+      ],
+    };
+  }
+  const contextsByFile = createProgramContexts(
+    args,
+    warnings,
+    inventory,
+    budgetExhausted,
+  );
+  const repoIndex = buildRepoIndex(args, warnings, inventory, budgetExhausted);
   const changedPathKeys = new Set(
-    args.changed.map((fileName) => normalizeRelPath(path.resolve(args.repo, fileName))),
+    args.changed.map((fileName) => canonicalPathKey(path.resolve(args.repo, fileName))),
   );
   const sourcePermissionCache = new WeakMap<import("typescript").SourceFile, boolean>();
   const sourceAllowed = (source: import("typescript").SourceFile): boolean => {
     const cached = sourcePermissionCache.get(source);
     if (cached !== undefined) return cached;
-    const pathKey = normalizeRelPath(path.resolve(source.fileName));
+    const pathKey = canonicalPathKey(source.fileName);
     const allowed = inventory.pathKeys.has(pathKey) || changedPathKeys.has(pathKey);
     sourcePermissionCache.set(source, allowed);
     return allowed;
@@ -71,6 +102,20 @@ export function analyze(args: Args): AnalyzerResult {
   const failedFileSet = new Set<string>();
   const failedFiles: string[] = [];
   const shardFailures: AnalyzerShardFailure[] = [];
+
+  const markFileFailed = (file: string, reason: string): void => {
+    if (failedFileSet.has(file)) return;
+    failedFileSet.add(file);
+    failedFiles.push(file);
+    warnings.push(reason);
+    shardFailures.push({
+      index: 1,
+      total: 1,
+      files: [file],
+      reason,
+      status: "failed",
+    });
+  };
 
   const markBudgetExhausted = (filesToSkip: string[]): void => {
     const skippedFiles = filesToSkip.filter((file) => !failedFileSet.has(file));
@@ -100,7 +145,10 @@ export function analyze(args: Args): AnalyzerResult {
 
     const context = contextsByFile.get(changedFile);
     if (!context) {
-      warnings.push(`No TypeScript program could be created for changed file: ${changedFile}`);
+      markFileFailed(
+        changedFile,
+        `No TypeScript program could be created for changed file: ${changedFile}`,
+      );
       continue;
     }
 
@@ -108,7 +156,10 @@ export function analyze(args: Args): AnalyzerResult {
     const absPath = path.resolve(args.repo, changedFile);
     const source = program.getSourceFile(absPath);
     if (!source) {
-      warnings.push(`Changed file is not part of the TypeScript program: ${changedFile}`);
+      markFileFailed(
+        changedFile,
+        `Changed file is not part of the TypeScript program: ${changedFile}`,
+      );
       continue;
     }
 
@@ -291,6 +342,12 @@ export function analyze(args: Args): AnalyzerResult {
     });
   }
 
+  if (
+    inventory.partialReason &&
+    !warnings.includes(inventory.partialReason)
+  ) {
+    warnings.push(inventory.partialReason);
+  }
   const tsconfigPaths = new Set(files.map((file) => file.tsconfigPath).filter((value): value is string => Boolean(value)));
   return {
     language: "typescript",
@@ -299,7 +356,11 @@ export function analyze(args: Args): AnalyzerResult {
     files,
     warnings,
     indexCache: repoIndex.cacheStats,
-    partial: failedFiles.length > 0,
+    partial:
+      inventory.partial ||
+      inventory.configurationPartial ||
+      repoIndex.partial === true ||
+      failedFiles.length > 0,
     failedFiles,
     shardFailures,
   };
@@ -321,7 +382,7 @@ function filterReferencesByInventory(
   changedPathKeys: Set<string>,
 ): Reference[] {
   return references.filter((reference) => {
-    const pathKey = normalizeRelPath(path.resolve(repo, reference.file));
+    const pathKey = canonicalPathKey(path.resolve(repo, reference.file));
     return inventory.pathKeys.has(pathKey) || changedPathKeys.has(pathKey);
   });
 }

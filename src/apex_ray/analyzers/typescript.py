@@ -1,11 +1,14 @@
 import json
 import os
+import posixpath
 import shutil
 import signal
+import stat
 import subprocess
 import tempfile
 import time
-from pathlib import Path
+from dataclasses import dataclass
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Literal
 
 from pydantic import ValidationError
@@ -26,6 +29,16 @@ from .common import AnalyzerError, _collapse_ranges
 
 TS_JS_LANGUAGES = {"typescript", "javascript"}
 TS_JS_INDEX_SUFFIXES = {".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts"}
+TS_CONFIG_ROOT_NAMES = {"jsconfig.json", "tsconfig.json"}
+TS_CONFIG_METADATA_SUFFIXES = {".json", ".jsonc"}
+TS_CONFIG_MAX_BYTES = 4 * 1024 * 1024
+
+
+@dataclass(frozen=True)
+class _TypescriptPackageConfig:
+    directory: str
+    tsconfig: str | None
+    exports: object
 
 
 def has_ts_js_changes(files: list[ChangedFile]) -> bool:
@@ -224,6 +237,8 @@ def _write_typescript_file_manifest(
     project_files: list[Path] | None = None,
 ) -> None:
     inventory = project_files if project_files is not None else list_project_files(repo_root, ignored_patterns)
+    ordered_inventory = _ordered_typescript_inventory(inventory)
+    reachable_config_paths = _reachable_typescript_config_paths(repo_root, ordered_inventory)
     temporary_path: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(
@@ -235,10 +250,29 @@ def _write_typescript_file_manifest(
             delete=False,
         ) as temporary_file:
             temporary_path = Path(temporary_file.name)
-            temporary_file.write('{"version":1,"files":[')
+            temporary_file.write('{"version":2,"files":[')
             first_path = True
-            for path in _ordered_typescript_inventory(inventory):
+            for path in ordered_inventory:
                 if path.suffix.lower() not in TS_JS_INDEX_SUFFIXES:
+                    continue
+                if not first_path:
+                    temporary_file.write(",")
+                temporary_file.write(json.dumps(path.as_posix()))
+                first_path = False
+            temporary_file.write('],"package_files":[')
+            first_path = True
+            for path in ordered_inventory:
+                if path.name != "package.json":
+                    continue
+                if not first_path:
+                    temporary_file.write(",")
+                temporary_file.write(json.dumps(path.as_posix()))
+                first_path = False
+            temporary_file.write('],"config_files":[')
+            first_path = True
+            for path in ordered_inventory:
+                path_key = _inventory_path_key(path)
+                if path.suffix.lower() not in TS_CONFIG_METADATA_SUFFIXES and path_key not in reachable_config_paths:
                     continue
                 if not first_path:
                     temporary_file.write(",")
@@ -260,6 +294,429 @@ def _ordered_typescript_inventory(inventory: list[Path]) -> list[Path]:
             return sorted(inventory, key=lambda candidate: candidate.as_posix())
         previous_path = normalized
     return inventory
+
+
+def _reachable_typescript_config_paths(
+    repo_root: Path,
+    inventory: list[Path],
+) -> set[str]:
+    config_roots = [
+        path_key
+        for path in inventory
+        if path.name in TS_CONFIG_ROOT_NAMES and (path_key := _inventory_path_key(path)) is not None
+    ]
+    if not config_roots:
+        return set()
+
+    inventory_by_path = {path_key: path for path in inventory if (path_key := _inventory_path_key(path)) is not None}
+    reachable = set(config_roots)
+    pending = list(config_roots)
+    package_index: dict[str, tuple[_TypescriptPackageConfig, ...]] | None = None
+    while pending:
+        config_path = pending.pop()
+        config_text = _read_inventory_config(repo_root, inventory_by_path[config_path])
+        if config_text is None:
+            continue
+        for extends_value in _parse_typescript_config_extends(config_text):
+            if _is_relative_config_extends(extends_value):
+                extended_path = _resolve_inventory_config_extends(
+                    config_path,
+                    extends_value,
+                    inventory_by_path,
+                )
+                extended_paths = () if extended_path is None else (extended_path,)
+            else:
+                package_specifier = _parse_package_config_specifier(extends_value)
+                if package_specifier is None:
+                    continue
+                if package_index is None:
+                    package_index = _build_typescript_package_index(repo_root, inventory_by_path)
+                extended_paths = _resolve_inventory_package_extends(
+                    package_specifier,
+                    package_index,
+                    inventory_by_path,
+                )
+            for extended_path in extended_paths:
+                if extended_path in reachable:
+                    continue
+                reachable.add(extended_path)
+                pending.append(extended_path)
+    return reachable
+
+
+def _inventory_path_key(path: Path) -> str | None:
+    raw_path = path.as_posix()
+    posix_path = PurePosixPath(raw_path)
+    if (
+        path.is_absolute()
+        or posix_path.is_absolute()
+        or PureWindowsPath(raw_path).is_absolute()
+        or ".." in posix_path.parts
+    ):
+        return None
+    normalized = posix_path.as_posix()
+    return normalized if normalized not in {"", "."} else None
+
+
+def _read_inventory_config(repo_root: Path, relative_path: Path) -> str | None:
+    path_key = _inventory_path_key(relative_path)
+    if path_key is None:
+        return None
+    try:
+        root = repo_root.resolve(strict=True)
+    except OSError:
+        return None
+    candidate = root.joinpath(*PurePosixPath(path_key).parts)
+    current = root
+    descriptor: int | None = None
+    try:
+        for component in PurePosixPath(path_key).parts:
+            current /= component
+            if current.is_symlink():
+                return None
+        flags = os.O_RDONLY
+        flags |= getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_BINARY", 0)
+        flags |= getattr(os, "O_NONBLOCK", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(candidate, flags)
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode) or before.st_size > TS_CONFIG_MAX_BYTES:
+            return None
+        raw = _read_bounded_config_descriptor(descriptor)
+        after = os.fstat(descriptor)
+        if (
+            len(raw) > TS_CONFIG_MAX_BYTES
+            or not stat.S_ISREG(after.st_mode)
+            or _stable_file_identity(before) != _stable_file_identity(after)
+        ):
+            return None
+
+        path_stat = candidate.stat(follow_symlinks=False)
+        resolved_candidate = candidate.resolve(strict=True)
+        if (
+            stat.S_ISLNK(path_stat.st_mode)
+            or _stable_file_identity(after) != _stable_file_identity(path_stat)
+            or not resolved_candidate.is_relative_to(root)
+        ):
+            return None
+    except OSError:
+        return None
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+    try:
+        if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
+            return raw.decode("utf-16")
+        return raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return None
+
+
+def _read_bounded_config_descriptor(descriptor: int) -> bytes:
+    chunks: list[bytes] = []
+    remaining = TS_CONFIG_MAX_BYTES + 1
+    while remaining > 0:
+        chunk = os.read(descriptor, min(64 * 1024, remaining))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
+def _stable_file_identity(file_stat: os.stat_result) -> tuple[int, int, int, int, int, int]:
+    return (
+        file_stat.st_dev,
+        file_stat.st_ino,
+        stat.S_IFMT(file_stat.st_mode),
+        file_stat.st_size,
+        file_stat.st_mtime_ns,
+        file_stat.st_ctime_ns,
+    )
+
+
+def _parse_typescript_config_extends(config_text: str) -> tuple[str, ...]:
+    try:
+        config = json.loads(_jsonc_to_json(config_text))
+    except json.JSONDecodeError, RecursionError:
+        return ()
+    if not isinstance(config, dict):
+        return ()
+    extends_value = config.get("extends")
+    if isinstance(extends_value, str):
+        return (extends_value,)
+    if isinstance(extends_value, list):
+        return tuple(value for value in extends_value if isinstance(value, str))
+    return ()
+
+
+def _jsonc_to_json(value: str) -> str:
+    without_comments = list(value)
+    in_string = False
+    escaped = False
+    index = 0
+    while index < len(without_comments):
+        character = without_comments[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                in_string = False
+            index += 1
+            continue
+        if character == '"':
+            in_string = True
+            index += 1
+            continue
+        next_character = without_comments[index + 1] if index + 1 < len(without_comments) else ""
+        if character == "/" and next_character == "/":
+            without_comments[index] = " "
+            without_comments[index + 1] = " "
+            index += 2
+            while index < len(without_comments) and without_comments[index] not in "\r\n":
+                without_comments[index] = " "
+                index += 1
+            continue
+        if character == "/" and next_character == "*":
+            without_comments[index] = " "
+            without_comments[index + 1] = " "
+            index += 2
+            while index < len(without_comments):
+                if (
+                    without_comments[index] == "*"
+                    and index + 1 < len(without_comments)
+                    and without_comments[index + 1] == "/"
+                ):
+                    without_comments[index] = " "
+                    without_comments[index + 1] = " "
+                    index += 2
+                    break
+                if without_comments[index] not in "\r\n":
+                    without_comments[index] = " "
+                index += 1
+            continue
+        index += 1
+
+    in_string = False
+    escaped = False
+    for index, character in enumerate(without_comments):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                in_string = False
+            continue
+        if character == '"':
+            in_string = True
+            continue
+        if character != ",":
+            continue
+        lookahead = index + 1
+        while lookahead < len(without_comments) and without_comments[lookahead].isspace():
+            lookahead += 1
+        if lookahead < len(without_comments) and without_comments[lookahead] in "]}":
+            without_comments[index] = " "
+    return "".join(without_comments)
+
+
+def _is_relative_config_extends(extends_value: str) -> bool:
+    return extends_value.replace("\\", "/").startswith(("./", "../"))
+
+
+def _resolve_inventory_config_extends(
+    config_path: str,
+    extends_value: str,
+    inventory_by_path: dict[str, Path],
+) -> str | None:
+    normalized_extends = extends_value.replace("\\", "/")
+    if not normalized_extends.startswith(("./", "../")):
+        return None
+    candidate = posixpath.normpath(
+        posixpath.join(
+            posixpath.dirname(config_path),
+            normalized_extends,
+        )
+    )
+    if candidate == ".." or candidate.startswith("../") or candidate.startswith("/"):
+        return None
+    if candidate in inventory_by_path:
+        return candidate
+    json_candidate = f"{candidate}.json"
+    if not candidate.endswith(".json") and json_candidate in inventory_by_path:
+        return json_candidate
+    return None
+
+
+def _parse_package_config_specifier(extends_value: str) -> tuple[str, str] | None:
+    normalized = extends_value.replace("\\", "/")
+    if not normalized or normalized.startswith(("./", "../", "/", "#")) or PureWindowsPath(normalized).is_absolute():
+        return None
+    parts = normalized.split("/")
+    if any(part in {"", ".", ".."} for part in parts):
+        return None
+    if normalized.startswith("@"):
+        if len(parts) < 2:
+            return None
+        package_name = "/".join(parts[:2])
+        subpath_parts = parts[2:]
+    else:
+        package_name = parts[0]
+        subpath_parts = parts[1:]
+    return package_name, "/".join(subpath_parts)
+
+
+def _build_typescript_package_index(
+    repo_root: Path,
+    inventory_by_path: dict[str, Path],
+) -> dict[str, tuple[_TypescriptPackageConfig, ...]]:
+    mutable_index: dict[str, list[_TypescriptPackageConfig]] = {}
+    for package_path, relative_path in inventory_by_path.items():
+        if PurePosixPath(package_path).name != "package.json":
+            continue
+        package_text = _read_inventory_config(repo_root, relative_path)
+        if package_text is None:
+            continue
+        try:
+            package_json = json.loads(package_text)
+        except json.JSONDecodeError, RecursionError:
+            continue
+        if not isinstance(package_json, dict):
+            continue
+        package_name = package_json.get("name")
+        if not isinstance(package_name, str) or not package_name:
+            continue
+        tsconfig_value = package_json.get("tsconfig")
+        package_config = _TypescriptPackageConfig(
+            directory=posixpath.dirname(package_path),
+            tsconfig=tsconfig_value if isinstance(tsconfig_value, str) else None,
+            exports=package_json.get("exports"),
+        )
+        mutable_index.setdefault(package_name, []).append(package_config)
+    return {
+        package_name: tuple(sorted(configs, key=lambda config: config.directory))
+        for package_name, configs in mutable_index.items()
+    }
+
+
+def _resolve_inventory_package_extends(
+    package_specifier: tuple[str, str],
+    package_index: dict[str, tuple[_TypescriptPackageConfig, ...]],
+    inventory_by_path: dict[str, Path],
+) -> tuple[str, ...]:
+    package_name, package_subpath = package_specifier
+    resolved: set[str] = set()
+    for package in package_index.get(package_name, ()):
+        if not package_subpath and package.tsconfig:
+            tsconfig_path = _resolve_inventory_package_target(
+                package.directory,
+                package.tsconfig,
+                inventory_by_path,
+            )
+            if tsconfig_path is not None:
+                resolved.add(tsconfig_path)
+            continue
+
+        if package.exports is not None:
+            for target in _package_export_targets(package.exports, package_subpath):
+                resolved_path = _resolve_inventory_package_target(
+                    package.directory,
+                    target,
+                    inventory_by_path,
+                    require_dot_relative=True,
+                )
+                if resolved_path is not None:
+                    resolved.add(resolved_path)
+            continue
+
+        conventional_target = f"./{package_subpath}" if package_subpath else "./tsconfig"
+        conventional_path = _resolve_inventory_package_target(
+            package.directory,
+            conventional_target,
+            inventory_by_path,
+        )
+        if conventional_path is not None:
+            resolved.add(conventional_path)
+    return tuple(sorted(resolved))
+
+
+def _package_export_targets(exports: object, package_subpath: str) -> tuple[str, ...]:
+    export_key = f"./{package_subpath}" if package_subpath else "."
+    if isinstance(exports, (str, list)):
+        return tuple(_iter_package_export_strings(exports)) if not package_subpath else ()
+    if not isinstance(exports, dict):
+        return ()
+
+    subpath_exports = any(isinstance(key, str) and key.startswith(".") for key in exports)
+    if not subpath_exports:
+        return tuple(_iter_package_export_strings(exports)) if not package_subpath else ()
+    if export_key in exports:
+        return tuple(_iter_package_export_strings(exports[export_key]))
+
+    matched: list[str] = []
+    for pattern, target in exports.items():
+        if not isinstance(pattern, str):
+            continue
+        wildcard_value = _match_package_export_pattern(pattern, export_key)
+        if wildcard_value is None:
+            continue
+        matched.extend(_iter_package_export_strings(target, wildcard_value))
+    return tuple(matched)
+
+
+def _iter_package_export_strings(value: object, wildcard_value: str | None = None) -> list[str]:
+    if isinstance(value, str):
+        return [value if wildcard_value is None else value.replace("*", wildcard_value)]
+    if isinstance(value, list):
+        return [target for item in value for target in _iter_package_export_strings(item, wildcard_value)]
+    if isinstance(value, dict):
+        return [target for item in value.values() for target in _iter_package_export_strings(item, wildcard_value)]
+    return []
+
+
+def _match_package_export_pattern(pattern: str, export_key: str) -> str | None:
+    wildcard_index = pattern.find("*")
+    if wildcard_index < 0:
+        return None
+    prefix = pattern[:wildcard_index]
+    suffix = pattern[wildcard_index + 1 :]
+    if not export_key.startswith(prefix) or not export_key.endswith(suffix):
+        return None
+    end_index = len(export_key) - len(suffix) if suffix else len(export_key)
+    return export_key[len(prefix) : max(len(prefix), end_index)]
+
+
+def _resolve_inventory_package_target(
+    package_directory: str,
+    target: str,
+    inventory_by_path: dict[str, Path],
+    *,
+    require_dot_relative: bool = False,
+) -> str | None:
+    normalized_target = target.replace("\\", "/")
+    if (
+        not normalized_target
+        or normalized_target.startswith(("../", "/"))
+        or PureWindowsPath(normalized_target).is_absolute()
+        or (require_dot_relative and not normalized_target.startswith("./"))
+    ):
+        return None
+    candidate = posixpath.normpath(posixpath.join(package_directory, normalized_target))
+    if candidate in {"", ".", ".."} or candidate.startswith(("../", "/")):
+        return None
+    if package_directory and not candidate.startswith(f"{package_directory}/"):
+        return None
+    if candidate in inventory_by_path:
+        return candidate
+    json_candidate = f"{candidate}.json"
+    if not candidate.endswith(".json") and json_candidate in inventory_by_path:
+        return json_candidate
+    return None
 
 
 def _run_analyzer_process(

@@ -6,10 +6,14 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
+import ts from "typescript";
+
 import { analyze } from "../dist/analyzer.js";
 import { parseArgs } from "../dist/cli.js";
 import { repoIndexCachePath } from "../dist/indexes/repo-cache.js";
+import { createProgramContexts } from "../dist/program.js";
 import type { AnalyzerResult } from "../dist/types.js";
+import { loadRepoFileInventory } from "../dist/workspace/inventory.js";
 import { writeFile } from "./helpers.js";
 
 const testDir = path.dirname(fileURLToPath(import.meta.url));
@@ -198,6 +202,67 @@ test("configured programs analyze changed JavaScript roots when allowJs is disab
   }
 });
 
+test("stable compiler and config reads preserve TypeScript BOM decoding", () => {
+  const repo = fs.mkdtempSync(
+    path.join(os.tmpdir(), "apex-ray-ts-analyzer-utf16-"),
+  );
+  try {
+    const configText = JSON.stringify({
+      compilerOptions: {
+        module: "NodeNext",
+        moduleResolution: "NodeNext",
+        target: "ES2022",
+      },
+      files: ["src/changed.ts"],
+    });
+    const sourceText =
+      'export function visible(): "UTF16_VISIBLE" { return "UTF16_VISIBLE"; }\n';
+    writeFile(repo, "tsconfig.json", "");
+    writeFile(repo, "src/changed.ts", "");
+    fs.writeFileSync(
+      path.join(repo, "tsconfig.json"),
+      Buffer.concat([
+        Buffer.from([0xff, 0xfe]),
+        Buffer.from(configText, "utf16le"),
+      ]),
+    );
+    fs.writeFileSync(
+      path.join(repo, "src", "changed.ts"),
+      Buffer.concat([
+        Buffer.from([0xff, 0xfe]),
+        Buffer.from(sourceText, "utf16le"),
+      ]),
+    );
+    const manifestPath = path.join(repo, "files.json");
+    fs.writeFileSync(
+      manifestPath,
+      JSON.stringify({
+        version: 2,
+        files: ["src/changed.ts"],
+        config_files: ["tsconfig.json"],
+      }),
+      "utf8",
+    );
+
+    const result = runAnalyzerInProcess(repo, [
+      "src/changed.ts",
+      "--range",
+      "src/changed.ts:1-1",
+      "--file-manifest",
+      manifestPath,
+      "--no-index-cache",
+    ]);
+
+    const visible = result.files[0].symbols.find(
+      (symbol) => symbol.name === "visible",
+    );
+    assert.equal(visible?.signature, '(): "UTF16_VISIBLE"');
+    assert.equal(result.partial, false);
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
+});
+
 test("analyzer loads permitted ambient declarations from the manifest without a tsconfig", () => {
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), "apex-ray-ts-analyzer-ambient-manifest-"));
   try {
@@ -219,7 +284,7 @@ test("analyzer loads permitted ambient declarations from the manifest without a 
     const manifestPath = path.join(repo, "files.json");
     fs.writeFileSync(
       manifestPath,
-      JSON.stringify({ version: 1, files: ["src/consumer.ts", "src/globals.d.mts"] }),
+      JSON.stringify({ version: 2, files: ["src/consumer.ts", "src/globals.d.mts"] }),
       "utf8",
     );
 
@@ -234,6 +299,55 @@ test("analyzer loads permitted ambient declarations from the manifest without a 
 
     assert.equal(result.files[0].symbols[0].signature, "(): PaymentReceipt");
     assert.ok(result.warnings.some((warning) => warning.includes("1 permitted declaration root")));
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("analyzer reports missing manifest declaration roots as partial", () => {
+  const repo = fs.mkdtempSync(
+    path.join(os.tmpdir(), "apex-ray-ts-analyzer-ambient-missing-"),
+  );
+  try {
+    writeFile(
+      repo,
+      "src/consumer.ts",
+      "export function settle() { return missingAmbientValue(); }\n",
+    );
+    const manifestPath = path.join(repo, "files.json");
+    fs.writeFileSync(
+      manifestPath,
+      JSON.stringify({
+        version: 2,
+        files: ["src/consumer.ts", "types/missing-global.d.ts"],
+      }),
+      "utf8",
+    );
+
+    const result = runAnalyzerInProcess(repo, [
+      "src/consumer.ts",
+      "--range",
+      "src/consumer.ts:1-1",
+      "--file-manifest",
+      manifestPath,
+      "--no-index-cache",
+    ]);
+
+    assert.equal(result.files[0].symbols[0].signature, "(): any");
+    assert.equal(result.partial, true);
+    assert.ok(
+      result.warnings.some(
+        (warning) =>
+          warning.includes("types/missing-global.d.ts") &&
+          warning.includes("unavailable"),
+      ),
+    );
+    assert.equal(
+      result.warnings.some((warning) =>
+        warning.includes("1 permitted declaration root")
+      ),
+      false,
+    );
   } finally {
     fs.rmSync(repo, { recursive: true, force: true });
   }
@@ -277,7 +391,7 @@ test("no-tsconfig programs isolate ambient declarations by package boundary", ()
     fs.writeFileSync(
       manifestPath,
       JSON.stringify({
-        version: 1,
+        version: 2,
         files: [
           "packages/a/globals.d.ts",
           "packages/b/consumer.ts",
@@ -366,7 +480,7 @@ test("no-tsconfig packages inherit manifest-permitted workspace ambient declarat
     fs.writeFileSync(
       manifestPath,
       JSON.stringify({
-        version: 1,
+        version: 2,
         files: ["packages/a/consumer.ts", "types/globals.d.ts"],
       }),
       "utf8",
@@ -401,7 +515,7 @@ test("invalid shared tsconfig falls back independently for each package", () => 
     fs.writeFileSync(
       manifestPath,
       JSON.stringify({
-        version: 1,
+        version: 2,
         files: [
           "packages/a/consumer.ts",
           "packages/a/globals.d.ts",
@@ -486,7 +600,7 @@ test("configured programs retain only ambient declarations permitted by the mani
     const manifestPath = path.join(repo, "files.json");
     fs.writeFileSync(
       manifestPath,
-      JSON.stringify({ version: 1, files: ["src/consumer.ts", "src/globals.d.cts"] }),
+      JSON.stringify({ version: 2, files: ["src/consumer.ts", "src/globals.d.cts"] }),
       "utf8",
     );
 
@@ -510,6 +624,967 @@ test("configured programs retain only ambient declarations permitted by the mani
       assert.equal(signatures.get("settle"), "(): PaymentReceipt");
       assert.equal(signatures.get("ignoredSettle"), "(): any");
     }
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("configured programs exclude tsconfig roots outside the repository", () => {
+  const repo = fs.mkdtempSync(
+    path.join(os.tmpdir(), "apex-ray-ts-analyzer-external-root-"),
+  );
+  const outside = fs.mkdtempSync(
+    path.join(os.tmpdir(), "apex-ray-ts-analyzer-external-source-"),
+  );
+  try {
+    const outsideSource = path.join(outside, "private.d.ts");
+    fs.writeFileSync(
+      outsideSource,
+      'declare function externalValue(): "PRIVATE_LITERAL";\n',
+      "utf8",
+    );
+    writeFile(
+      repo,
+      "tsconfig.json",
+      JSON.stringify({
+        compilerOptions: {
+          moduleResolution: "Bundler",
+          preserveSymlinks: true,
+          target: "ES2022",
+        },
+        files: [
+          "src/changed.ts",
+          path.relative(repo, outsideSource).replaceAll("\\", "/"),
+        ],
+      }),
+    );
+    writeFile(
+      repo,
+      "src/changed.ts",
+      "export function visible() { return externalValue(); }\n",
+    );
+    const manifestPath = path.join(repo, "files.json");
+    fs.writeFileSync(
+      manifestPath,
+      JSON.stringify({ version: 2, files: ["src/changed.ts"] }),
+      "utf8",
+    );
+
+    const result = runAnalyzerInProcess(repo, [
+      "src/changed.ts",
+      "--range",
+      "src/changed.ts:1-1",
+      "--file-manifest",
+      manifestPath,
+      "--no-index-cache",
+    ]);
+
+    const visible = result.files[0].symbols.find(
+      (symbol) => symbol.name === "visible",
+    );
+    assert.equal(visible?.signature, "(): any");
+    assert.equal(JSON.stringify(result).includes("PRIVATE_LITERAL"), false);
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
+    fs.rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+test("configured programs do not read extended configs outside the repository", () => {
+  const repo = fs.mkdtempSync(
+    path.join(os.tmpdir(), "apex-ray-ts-analyzer-external-config-"),
+  );
+  const outside = fs.mkdtempSync(
+    path.join(os.tmpdir(), "apex-ray-ts-analyzer-private-config-"),
+  );
+  try {
+    const privateConfig = path.join(outside, "private.json");
+    fs.writeFileSync(
+      privateConfig,
+      JSON.stringify({
+        compilerOptions: {
+          PRIVATE_CONFIG_LITERAL: true,
+        },
+      }),
+      "utf8",
+    );
+    writeFile(
+      repo,
+      "tsconfig.json",
+      JSON.stringify({
+        extends: path.relative(repo, privateConfig).replaceAll("\\", "/"),
+        include: ["src/**/*"],
+      }),
+    );
+    writeFile(
+      repo,
+      "src/changed.ts",
+      "export function visible() { return 1; }\n",
+    );
+    const manifestPath = path.join(repo, "files.json");
+    fs.writeFileSync(
+      manifestPath,
+      JSON.stringify({ version: 2, files: ["src/changed.ts"] }),
+      "utf8",
+    );
+
+    const result = runAnalyzerInProcess(repo, [
+      "src/changed.ts",
+      "--range",
+      "src/changed.ts:1-1",
+      "--file-manifest",
+      manifestPath,
+      "--no-index-cache",
+    ]);
+
+    assert.equal(
+      JSON.stringify(result).includes("PRIVATE_CONFIG_LITERAL"),
+      false,
+    );
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
+    fs.rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+test("manifest-backed programs do not read config files omitted from the inventory", () => {
+  const repo = fs.mkdtempSync(
+    path.join(os.tmpdir(), "apex-ray-ts-analyzer-omitted-config-"),
+  );
+  const cacheDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "apex-ray-ts-analyzer-omitted-config-cache-"),
+  );
+  try {
+    writeFile(
+      repo,
+      "private.json",
+      JSON.stringify({
+        compilerOptions: {
+          PRIVATE_IGNORED_CONFIG_LITERAL: true,
+        },
+      }),
+    );
+    writeFile(
+      repo,
+      "tsconfig.json",
+      JSON.stringify({
+        extends: "./private.json",
+        include: ["src/**/*"],
+      }),
+    );
+    writeFile(
+      repo,
+      "src/changed.ts",
+      "export function visible() { return 1; }\n",
+    );
+    const manifestPath = path.join(repo, "files.json");
+    fs.writeFileSync(
+      manifestPath,
+      JSON.stringify({ version: 2, files: ["src/changed.ts"] }),
+      "utf8",
+    );
+
+    const analyzerArgs = [
+      "src/changed.ts",
+      "--range",
+      "src/changed.ts:1-1",
+      "--file-manifest",
+      manifestPath,
+      "--index-cache-dir",
+      cacheDir,
+    ];
+    const result = runAnalyzerInProcess(repo, analyzerArgs);
+    const cachedResult = runAnalyzerInProcess(repo, analyzerArgs);
+
+    assert.equal(result.files.length, 1);
+    assert.equal(result.partial, true);
+    assert.equal(result.indexCache?.written, true);
+    assert.equal(cachedResult.indexCache?.hits, 1);
+    assert.equal(cachedResult.indexCache?.misses, 0);
+    assert.equal(
+      JSON.stringify(result).includes("PRIVATE_IGNORED_CONFIG_LITERAL"),
+      false,
+    );
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
+    fs.rmSync(cacheDir, { recursive: true, force: true });
+  }
+});
+
+test("analyzer ignores repository config symlinks that resolve outside", () => {
+  const repo = fs.mkdtempSync(
+    path.join(os.tmpdir(), "apex-ray-ts-analyzer-config-symlink-"),
+  );
+  const outside = fs.mkdtempSync(
+    path.join(os.tmpdir(), "apex-ray-ts-analyzer-config-symlink-target-"),
+  );
+  try {
+    const privateConfig = path.join(outside, "tsconfig.json");
+    fs.writeFileSync(
+      privateConfig,
+      JSON.stringify({
+        compilerOptions: {
+          PRIVATE_SYMLINKED_CONFIG_LITERAL: true,
+        },
+      }),
+      "utf8",
+    );
+    fs.symlinkSync(privateConfig, path.join(repo, "tsconfig.json"));
+    writeFile(
+      repo,
+      "src/changed.ts",
+      "export function visible() { return 1; }\n",
+    );
+    const manifestPath = path.join(repo, "files.json");
+    fs.writeFileSync(
+      manifestPath,
+      JSON.stringify({ version: 2, files: ["src/changed.ts"] }),
+      "utf8",
+    );
+
+    const result = runAnalyzerInProcess(repo, [
+      "src/changed.ts",
+      "--range",
+      "src/changed.ts:1-1",
+      "--file-manifest",
+      manifestPath,
+      "--no-index-cache",
+    ]);
+
+    assert.equal(result.tsconfigPath, null);
+    assert.equal(
+      JSON.stringify(result).includes("PRIVATE_SYMLINKED_CONFIG_LITERAL"),
+      false,
+    );
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
+    fs.rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+test("config reads reject a path swapped to an external symlink after validation", () => {
+  const repo = fs.mkdtempSync(
+    path.join(os.tmpdir(), "apex-ray-ts-analyzer-config-race-"),
+  );
+  const outside = fs.mkdtempSync(
+    path.join(os.tmpdir(), "apex-ray-ts-analyzer-config-race-target-"),
+  );
+  const originalRealpathSync = fs.realpathSync;
+  try {
+    const configPath = path.join(repo, "tsconfig.json");
+    writeFile(
+      repo,
+      "tsconfig.json",
+      JSON.stringify({ include: ["src/**/*"] }),
+    );
+    const outsideConfigPath = path.join(outside, "private.json");
+    fs.writeFileSync(
+      outsideConfigPath,
+      JSON.stringify({
+        compilerOptions: {
+          PRIVATE_CONFIG_RACE_LITERAL: true,
+        },
+      }),
+      "utf8",
+    );
+    writeFile(
+      repo,
+      "src/changed.ts",
+      "export function visible() { return 1; }\n",
+    );
+    const manifestPath = path.join(repo, "files.json");
+    fs.writeFileSync(
+      manifestPath,
+      JSON.stringify({ version: 2, files: ["src/changed.ts"] }),
+      "utf8",
+    );
+    const args = parseArgs([
+      "--repo",
+      repo,
+      "--changed",
+      "src/changed.ts",
+      "--file-manifest",
+      manifestPath,
+      "--no-index-cache",
+    ]);
+    const inventory = loadRepoFileInventory(args);
+    const warnings: string[] = [];
+    let swapped = false;
+
+    fs.realpathSync = ((candidate: fs.PathLike, ...rest: unknown[]) => {
+      const result = (originalRealpathSync as (...args: unknown[]) => unknown)(
+        candidate,
+        ...rest,
+      );
+      if (
+        !swapped &&
+        path.resolve(String(candidate)) === path.resolve(configPath)
+      ) {
+        swapped = true;
+        fs.rmSync(configPath);
+        fs.symlinkSync(outsideConfigPath, configPath);
+      }
+      return result;
+    }) as typeof fs.realpathSync;
+
+    createProgramContexts(args, warnings, inventory);
+
+    assert.equal(swapped, true);
+    assert.equal(inventory.configurationPartial, true);
+    assert.equal(
+      JSON.stringify(warnings).includes("PRIVATE_CONFIG_RACE_LITERAL"),
+      false,
+    );
+  } finally {
+    fs.realpathSync = originalRealpathSync;
+    fs.rmSync(repo, { recursive: true, force: true });
+    fs.rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+test("manifest-backed config parsing does not scan the repository filesystem", () => {
+  const repo = fs.mkdtempSync(
+    path.join(os.tmpdir(), "apex-ray-ts-analyzer-config-inventory-"),
+  );
+  const originalReadDirectory = ts.sys.readDirectory;
+  try {
+    writeFile(
+      repo,
+      "tsconfig.json",
+      JSON.stringify({
+        compilerOptions: { target: "ES2022" },
+        include: ["src/**/*.ts"],
+      }),
+    );
+    writeFile(
+      repo,
+      "src/changed.ts",
+      "export function visible() { return 1; }\n",
+    );
+    const manifestPath = path.join(repo, "files.json");
+    fs.writeFileSync(
+      manifestPath,
+      JSON.stringify({ version: 2, files: ["src/changed.ts"] }),
+      "utf8",
+    );
+    ts.sys.readDirectory = () => {
+      throw new Error("unexpected unbounded directory scan");
+    };
+
+    const result = runAnalyzerInProcess(repo, [
+      "src/changed.ts",
+      "--range",
+      "src/changed.ts:1-1",
+      "--file-manifest",
+      manifestPath,
+      "--no-index-cache",
+    ]);
+
+    assert.equal(result.files.length, 1);
+  } finally {
+    ts.sys.readDirectory = originalReadDirectory;
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("manifest metadata resolves config-only workspace package extends", () => {
+  const repo = fs.mkdtempSync(
+    path.join(os.tmpdir(), "apex-ray-ts-analyzer-workspace-config-"),
+  );
+  try {
+    writeFile(
+      repo,
+      "packages/tsconfig/package.json",
+      JSON.stringify({ name: "@workspace/tsconfig" }),
+    );
+    writeFile(
+      repo,
+      "packages/tsconfig/base.json",
+      JSON.stringify({
+        compilerOptions: {
+          baseUrl: "../..",
+          moduleResolution: "Bundler",
+          paths: {
+            "@shared/value": ["packages/shared/value.ts"],
+          },
+          target: "ES2022",
+        },
+      }),
+    );
+    writeFile(
+      repo,
+      "packages/shared/value.ts",
+      'export function sharedValue(): "WORKSPACE_CONFIG_LITERAL" { return "WORKSPACE_CONFIG_LITERAL"; }\n',
+    );
+    writeFile(
+      repo,
+      "apps/web/tsconfig.json",
+      JSON.stringify({
+        extends: "@workspace/tsconfig/base.json",
+        include: ["src/**/*"],
+      }),
+    );
+    writeFile(
+      repo,
+      "apps/web/src/changed.ts",
+      [
+        "import { sharedValue } from '@shared/value';",
+        "export function visible() { return sharedValue(); }",
+      ].join("\n"),
+    );
+    const manifestPath = path.join(repo, "files.json");
+    fs.writeFileSync(
+      manifestPath,
+      JSON.stringify({
+        version: 2,
+        files: [
+          "apps/web/src/changed.ts",
+          "packages/shared/value.ts",
+        ],
+        package_files: ["packages/tsconfig/package.json"],
+        config_files: [
+          "apps/web/tsconfig.json",
+          "packages/tsconfig/base.json",
+          "packages/tsconfig/package.json",
+        ],
+      }),
+      "utf8",
+    );
+
+    const result = runAnalyzerInProcess(repo, [
+      "apps/web/src/changed.ts",
+      "--range",
+      "apps/web/src/changed.ts:1-2",
+      "--file-manifest",
+      manifestPath,
+      "--no-index-cache",
+    ]);
+
+    const visible = result.files[0].symbols.find(
+      (symbol) => symbol.name === "visible",
+    );
+    assert.equal(visible?.signature, '(): "WORKSPACE_CONFIG_LITERAL"');
+    assert.equal(
+      result.warnings.some((warning) =>
+        warning.includes("@workspace/tsconfig/base.json"),
+      ),
+      false,
+    );
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("configured programs exclude imported source files outside the repository", () => {
+  const repo = fs.mkdtempSync(
+    path.join(os.tmpdir(), "apex-ray-ts-analyzer-external-import-"),
+  );
+  const outside = fs.mkdtempSync(
+    path.join(os.tmpdir(), "apex-ray-ts-analyzer-external-module-"),
+  );
+  try {
+    const outsideSource = path.join(outside, "private.ts");
+    fs.writeFileSync(
+      outsideSource,
+      'export function externalValue(): "PRIVATE_IMPORT_LITERAL" { return "PRIVATE_IMPORT_LITERAL"; }\n',
+      "utf8",
+    );
+    const moduleSpecifier = path
+      .relative(path.join(repo, "src"), outsideSource)
+      .replaceAll("\\", "/")
+      .replace(/\.ts$/, ".js");
+    writeFile(
+      repo,
+      "tsconfig.json",
+      JSON.stringify({
+        compilerOptions: {
+          moduleResolution: "Bundler",
+          preserveSymlinks: true,
+          target: "ES2022",
+        },
+        include: ["src/**/*"],
+      }),
+    );
+    writeFile(
+      repo,
+      "src/changed.ts",
+      [
+        `import { externalValue } from ${JSON.stringify(moduleSpecifier)};`,
+        "export function visible() { return externalValue(); }",
+      ].join("\n"),
+    );
+    const manifestPath = path.join(repo, "files.json");
+    fs.writeFileSync(
+      manifestPath,
+      JSON.stringify({ version: 2, files: ["src/changed.ts"] }),
+      "utf8",
+    );
+
+    const result = runAnalyzerInProcess(repo, [
+      "src/changed.ts",
+      "--range",
+      "src/changed.ts:1-2",
+      "--file-manifest",
+      manifestPath,
+      "--no-index-cache",
+    ]);
+
+    const visible = result.files[0].symbols.find(
+      (symbol) => symbol.name === "visible",
+    );
+    assert.equal(visible?.signature, "(): any");
+    assert.equal(
+      JSON.stringify(result).includes("PRIVATE_IMPORT_LITERAL"),
+      false,
+    );
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
+    fs.rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+test("compiler source reads reject a path swapped after validation", () => {
+  const repo = fs.mkdtempSync(
+    path.join(os.tmpdir(), "apex-ray-ts-analyzer-source-race-"),
+  );
+  const outside = fs.mkdtempSync(
+    path.join(os.tmpdir(), "apex-ray-ts-analyzer-source-race-target-"),
+  );
+  const originalRealpathSync = fs.realpathSync;
+  try {
+    const dependencyPath = path.join(repo, "src", "dependency.ts");
+    writeFile(
+      repo,
+      "src/dependency.ts",
+      "export function dependencyValue(): number { return 1; }\n",
+    );
+    writeFile(
+      repo,
+      "src/changed.ts",
+      [
+        "import { dependencyValue } from './dependency.js';",
+        "export function visible() { return dependencyValue(); }",
+      ].join("\n"),
+    );
+    const outsideSourcePath = path.join(outside, "private.ts");
+    fs.writeFileSync(
+      outsideSourcePath,
+      'export function dependencyValue(): "PRIVATE_SOURCE_RACE" { return "PRIVATE_SOURCE_RACE"; }\n',
+      "utf8",
+    );
+    const manifestPath = path.join(repo, "files.json");
+    fs.writeFileSync(
+      manifestPath,
+      JSON.stringify({
+        version: 2,
+        files: ["src/changed.ts", "src/dependency.ts"],
+      }),
+      "utf8",
+    );
+    const args = parseArgs([
+      "--repo",
+      repo,
+      "--changed",
+      "src/changed.ts",
+      "--file-manifest",
+      manifestPath,
+      "--no-index-cache",
+    ]);
+    const inventory = loadRepoFileInventory(args);
+    const warnings: string[] = [];
+    let swapped = false;
+
+    fs.realpathSync = ((candidate: fs.PathLike, ...rest: unknown[]) => {
+      const result = (originalRealpathSync as (...args: unknown[]) => unknown)(
+        candidate,
+        ...rest,
+      );
+      if (
+        !swapped &&
+        path.resolve(String(candidate)) === dependencyPath
+      ) {
+        swapped = true;
+        fs.rmSync(dependencyPath);
+        fs.symlinkSync(outsideSourcePath, dependencyPath);
+      }
+      return result;
+    }) as typeof fs.realpathSync;
+
+    const context = createProgramContexts(
+      args,
+      warnings,
+      inventory,
+    ).get("src/changed.ts");
+    assert.ok(context);
+    const source = context.program.getSourceFile(
+      path.join(repo, "src", "changed.ts"),
+    );
+    assert.ok(source);
+    const declaration = source.statements.find(
+      (statement): statement is ts.FunctionDeclaration =>
+        ts.isFunctionDeclaration(statement) &&
+        statement.name?.text === "visible",
+    );
+    assert.ok(declaration);
+    const signature = context.checker.getSignatureFromDeclaration(declaration);
+    assert.ok(signature);
+    const renderedSignature = context.checker.signatureToString(signature);
+
+    assert.equal(swapped, true);
+    assert.equal(renderedSignature.includes("PRIVATE_SOURCE_RACE"), false);
+  } finally {
+    fs.realpathSync = originalRealpathSync;
+    fs.rmSync(repo, { recursive: true, force: true });
+    fs.rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+test("configured programs exclude imported project sources omitted from the manifest", () => {
+  const repo = fs.mkdtempSync(
+    path.join(os.tmpdir(), "apex-ray-ts-analyzer-excluded-import-"),
+  );
+  try {
+    writeFile(
+      repo,
+      "tsconfig.json",
+      JSON.stringify({
+        compilerOptions: {
+          moduleResolution: "Bundler",
+          target: "ES2022",
+        },
+        include: ["src/**/*"],
+      }),
+    );
+    writeFile(
+      repo,
+      "src/private.ts",
+      'export function privateValue(): "PRIVATE_PROJECT_LITERAL" { return "PRIVATE_PROJECT_LITERAL"; }\n',
+    );
+    writeFile(
+      repo,
+      "src/changed.ts",
+      [
+        "import { privateValue } from './private.js';",
+        "export function visible() { return privateValue(); }",
+      ].join("\n"),
+    );
+    const manifestPath = path.join(repo, "files.json");
+    fs.writeFileSync(
+      manifestPath,
+      JSON.stringify({ version: 2, files: ["src/changed.ts"] }),
+      "utf8",
+    );
+
+    const result = runAnalyzerInProcess(repo, [
+      "src/changed.ts",
+      "--range",
+      "src/changed.ts:1-2",
+      "--file-manifest",
+      manifestPath,
+      "--no-index-cache",
+    ]);
+
+    const visible = result.files[0].symbols.find(
+      (symbol) => symbol.name === "visible",
+    );
+    assert.equal(visible?.signature, "(): any");
+    assert.equal(
+      JSON.stringify(result).includes("PRIVATE_PROJECT_LITERAL"),
+      false,
+    );
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("manifest-bounded programs retain installed dependency declarations", () => {
+  const repo = fs.mkdtempSync(
+    path.join(os.tmpdir(), "apex-ray-ts-analyzer-dependency-types-"),
+  );
+  try {
+    writeFile(
+      repo,
+      "tsconfig.json",
+      JSON.stringify({
+        compilerOptions: {
+          moduleResolution: "Bundler",
+          target: "ES2022",
+        },
+        include: ["src/**/*"],
+      }),
+    );
+    writeFile(
+      repo,
+      "node_modules/review-dependency/package.json",
+      JSON.stringify({
+        name: "review-dependency",
+        types: "index.d.ts",
+      }),
+    );
+    writeFile(
+      repo,
+      "node_modules/review-dependency/index.d.ts",
+      'export declare function dependencyValue(): "DEPENDENCY_LITERAL";\n',
+    );
+    writeFile(
+      repo,
+      "src/changed.ts",
+      [
+        "import { dependencyValue } from 'review-dependency';",
+        "export function visible() { return dependencyValue(); }",
+      ].join("\n"),
+    );
+    const manifestPath = path.join(repo, "files.json");
+    fs.writeFileSync(
+      manifestPath,
+      JSON.stringify({ version: 2, files: ["src/changed.ts"] }),
+      "utf8",
+    );
+
+    const result = runAnalyzerInProcess(repo, [
+      "src/changed.ts",
+      "--range",
+      "src/changed.ts:1-2",
+      "--file-manifest",
+      manifestPath,
+      "--no-index-cache",
+    ]);
+
+    const visible = result.files[0].symbols.find(
+      (symbol) => symbol.name === "visible",
+    );
+    assert.equal(visible?.signature, '(): "DEPENDENCY_LITERAL"');
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("manifest-bounded programs reject dependency symlinks outside the repository", () => {
+  const repo = fs.mkdtempSync(
+    path.join(os.tmpdir(), "apex-ray-ts-analyzer-dependency-symlink-"),
+  );
+  const outside = fs.mkdtempSync(
+    path.join(os.tmpdir(), "apex-ray-ts-analyzer-private-dependency-"),
+  );
+  try {
+    writeFile(
+      outside,
+      "package.json",
+      JSON.stringify({
+        name: "private-dependency",
+        types: "index.d.ts",
+      }),
+    );
+    writeFile(
+      outside,
+      "index.d.ts",
+      'export declare function dependencyValue(): "PRIVATE_DEPENDENCY_LITERAL";\n',
+    );
+    fs.mkdirSync(path.join(repo, "node_modules"), { recursive: true });
+    fs.symlinkSync(
+      outside,
+      path.join(repo, "node_modules", "private-dependency"),
+      "dir",
+    );
+    writeFile(
+      repo,
+      "tsconfig.json",
+      JSON.stringify({
+        compilerOptions: {
+          moduleResolution: "Bundler",
+          preserveSymlinks: true,
+          target: "ES2022",
+        },
+        include: ["src/**/*"],
+      }),
+    );
+    writeFile(
+      repo,
+      "src/changed.ts",
+      [
+        "import { dependencyValue } from 'private-dependency';",
+        "export function visible() { return dependencyValue(); }",
+      ].join("\n"),
+    );
+    const manifestPath = path.join(repo, "files.json");
+    fs.writeFileSync(
+      manifestPath,
+      JSON.stringify({ version: 2, files: ["src/changed.ts"] }),
+      "utf8",
+    );
+
+    const result = runAnalyzerInProcess(repo, [
+      "src/changed.ts",
+      "--range",
+      "src/changed.ts:1-2",
+      "--file-manifest",
+      manifestPath,
+      "--no-index-cache",
+    ]);
+
+    const visible = result.files[0].symbols.find(
+      (symbol) => symbol.name === "visible",
+    );
+    assert.equal(visible?.signature, "(): any");
+    assert.equal(
+      JSON.stringify(result).includes("PRIVATE_DEPENDENCY_LITERAL"),
+      false,
+    );
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
+    fs.rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+test("manifest-bounded programs allow included workspace dependencies through node_modules symlinks", () => {
+  const repo = fs.mkdtempSync(
+    path.join(os.tmpdir(), "apex-ray-ts-analyzer-included-workspace-symlink-"),
+  );
+  try {
+    writeFile(
+      repo,
+      "packages/included-dependency/package.json",
+      JSON.stringify({
+        name: "included-dependency",
+        types: "index.d.ts",
+      }),
+    );
+    writeFile(
+      repo,
+      "packages/included-dependency/index.d.ts",
+      'export declare function dependencyValue(): "INCLUDED_WORKSPACE_LITERAL";\n',
+    );
+    fs.mkdirSync(path.join(repo, "node_modules"), { recursive: true });
+    fs.symlinkSync(
+      path.join(repo, "packages", "included-dependency"),
+      path.join(repo, "node_modules", "included-dependency"),
+      "dir",
+    );
+    writeFile(
+      repo,
+      "tsconfig.json",
+      JSON.stringify({
+        compilerOptions: {
+          moduleResolution: "Bundler",
+          preserveSymlinks: true,
+          target: "ES2022",
+        },
+        include: ["src/**/*"],
+      }),
+    );
+    writeFile(
+      repo,
+      "src/changed.ts",
+      [
+        "import { dependencyValue } from 'included-dependency';",
+        "export function visible() { return dependencyValue(); }",
+      ].join("\n"),
+    );
+    const manifestPath = path.join(repo, "files.json");
+    fs.writeFileSync(
+      manifestPath,
+      JSON.stringify({
+        version: 2,
+        files: [
+          "src/changed.ts",
+          "packages/included-dependency/index.d.ts",
+        ],
+        package_files: [
+          "packages/included-dependency/package.json",
+        ],
+      }),
+      "utf8",
+    );
+
+    const result = runAnalyzerInProcess(repo, [
+      "src/changed.ts",
+      "--range",
+      "src/changed.ts:1-2",
+      "--file-manifest",
+      manifestPath,
+      "--no-index-cache",
+    ]);
+
+    const visible = result.files[0].symbols.find(
+      (symbol) => symbol.name === "visible",
+    );
+    assert.equal(visible?.signature, '(): "INCLUDED_WORKSPACE_LITERAL"');
+    assert.equal(result.partial, false);
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("manifest-bounded programs reject node_modules symlinks to omitted workspace sources", () => {
+  const repo = fs.mkdtempSync(
+    path.join(os.tmpdir(), "apex-ray-ts-analyzer-workspace-dependency-symlink-"),
+  );
+  try {
+    writeFile(
+      repo,
+      "packages/private-dependency/package.json",
+      JSON.stringify({
+        name: "private-dependency",
+        types: "index.d.ts",
+      }),
+    );
+    writeFile(
+      repo,
+      "packages/private-dependency/index.d.ts",
+      'export declare function dependencyValue(): "PRIVATE_WORKSPACE_DEPENDENCY_LITERAL";\n',
+    );
+    fs.mkdirSync(path.join(repo, "node_modules"), { recursive: true });
+    fs.symlinkSync(
+      path.join(repo, "packages", "private-dependency"),
+      path.join(repo, "node_modules", "private-dependency"),
+      "dir",
+    );
+    writeFile(
+      repo,
+      "tsconfig.json",
+      JSON.stringify({
+        compilerOptions: {
+          moduleResolution: "Bundler",
+          preserveSymlinks: true,
+          target: "ES2022",
+        },
+        include: ["src/**/*"],
+      }),
+    );
+    writeFile(
+      repo,
+      "src/changed.ts",
+      [
+        "import { dependencyValue } from 'private-dependency';",
+        "export function visible() { return dependencyValue(); }",
+      ].join("\n"),
+    );
+    const manifestPath = path.join(repo, "files.json");
+    fs.writeFileSync(
+      manifestPath,
+      JSON.stringify({ version: 2, files: ["src/changed.ts"] }),
+      "utf8",
+    );
+
+    const result = runAnalyzerInProcess(repo, [
+      "src/changed.ts",
+      "--range",
+      "src/changed.ts:1-2",
+      "--file-manifest",
+      manifestPath,
+      "--no-index-cache",
+    ]);
+
+    const visible = result.files[0].symbols.find(
+      (symbol) => symbol.name === "visible",
+    );
+    assert.equal(visible?.signature, "(): any");
+    assert.equal(
+      JSON.stringify(result).includes(
+        "PRIVATE_WORKSPACE_DEPENDENCY_LITERAL",
+      ),
+      false,
+    );
   } finally {
     fs.rmSync(repo, { recursive: true, force: true });
   }
@@ -563,7 +1638,7 @@ test("configured programs do not emit references from files excluded by the mani
     fs.writeFileSync(
       manifestPath,
       JSON.stringify({
-        version: 1,
+        version: 2,
         files: ["src/consumer.ts", "src/service.ts"],
       }),
       "utf8",
@@ -595,6 +1670,80 @@ test("configured programs do not emit references from files excluded by the mani
     fs.rmSync(repo, { recursive: true, force: true });
   }
 });
+
+test(
+  "manifest filtering preserves references with filesystem-equivalent casing",
+  { skip: ts.sys.useCaseSensitiveFileNames },
+  () => {
+    const repo = fs.mkdtempSync(
+      path.join(os.tmpdir(), "apex-ray-ts-analyzer-reference-manifest-case-"),
+    );
+    try {
+      writeFile(
+        repo,
+        "tsconfig.json",
+        JSON.stringify({
+          compilerOptions: {
+            forceConsistentCasingInFileNames: false,
+            moduleResolution: "Bundler",
+            target: "ES2022",
+          },
+          include: ["src/**/*"],
+        }),
+      );
+      writeFile(
+        repo,
+        "src/ZConsumer.ts",
+        [
+          "import { calculateRisk } from './service.js';",
+          "export const observedRisk = calculateRisk();",
+        ].join("\n"),
+      );
+      writeFile(
+        repo,
+        "src/bootstrap.ts",
+        "import './zconsumer.js';\n",
+      );
+      writeFile(
+        repo,
+        "src/service.ts",
+        "export function calculateRisk() { return 1; }\n",
+      );
+      const manifestPath = path.join(repo, "files.json");
+      fs.writeFileSync(
+        manifestPath,
+        JSON.stringify({
+          version: 2,
+          files: ["src/ZConsumer.ts", "src/bootstrap.ts", "src/service.ts"],
+        }),
+        "utf8",
+      );
+
+      const result = runAnalyzerInProcess(repo, [
+        "src/service.ts",
+        "--range",
+        "src/service.ts:1-1",
+        "--file-manifest",
+        manifestPath,
+        "--no-index-cache",
+      ]);
+
+      const calculateRisk = result.files[0].changedSymbols.find(
+        (symbol) => symbol.name === "calculateRisk",
+      );
+      assert.ok(calculateRisk);
+      assert.ok(
+        calculateRisk.references.some(
+          (reference) =>
+            reference.file.toLowerCase() === "src/zconsumer.ts" &&
+            reference.text.includes("observedRisk = calculateRisk()"),
+        ),
+      );
+    } finally {
+      fs.rmSync(repo, { recursive: true, force: true });
+    }
+  },
+);
 
 test("manifest-excluded contracts do not consume the collection limit", () => {
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), "apex-ray-ts-analyzer-contract-manifest-"));
@@ -637,7 +1786,7 @@ test("manifest-excluded contracts do not consume the collection limit", () => {
     const manifestPath = path.join(repo, "files.json");
     fs.writeFileSync(
       manifestPath,
-      JSON.stringify({ version: 1, files: ["src/service.ts", "src/permitted.ts"] }),
+      JSON.stringify({ version: 2, files: ["src/service.ts", "src/permitted.ts"] }),
       "utf8",
     );
 
@@ -690,7 +1839,7 @@ test("focused programs cap supplemental ambient declaration roots deterministica
     const manifestPath = path.join(repo, "files.json");
     fs.writeFileSync(
       manifestPath,
-      JSON.stringify({ version: 1, files: ["src/consumer.ts", ...declarationPaths] }),
+      JSON.stringify({ version: 2, files: ["src/consumer.ts", ...declarationPaths] }),
       "utf8",
     );
 
@@ -788,7 +1937,271 @@ test("analyzer returns partial JSON when the internal budget is exhausted", () =
     assert.equal(result.shardFailures.length, 1);
     assert.equal(result.shardFailures[0].status, "timeout");
     assert.deepEqual(result.shardFailures[0].files, ["src/first.ts", "src/second.ts"]);
+    assert.ok(
+      result.warnings.some((warning) =>
+        warning.includes("fallback inventory scan stopped because the analysis time budget was exhausted"),
+      ),
+    );
     assert.ok(result.warnings.some((warning) => warning.includes("internal budget exhausted")));
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("analyzer marks missing changed source files as failed and partial", () => {
+  const repo = fs.mkdtempSync(
+    path.join(os.tmpdir(), "apex-ray-ts-analyzer-missing-changed-"),
+  );
+  try {
+    const manifestPath = path.join(repo, "files.json");
+    fs.writeFileSync(
+      manifestPath,
+      JSON.stringify({ version: 2, files: [] }),
+      "utf8",
+    );
+
+    const result = runAnalyzerInProcess(repo, [
+      "src/missing.ts",
+      "--file-manifest",
+      manifestPath,
+      "--no-index-cache",
+    ]);
+
+    assert.equal(result.partial, true);
+    assert.deepEqual(result.failedFiles, ["src/missing.ts"]);
+    assert.ok(
+      result.shardFailures.some(
+        (failure) =>
+          failure.status === "failed" &&
+          failure.files.includes("src/missing.ts"),
+      ),
+    );
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("compiler source loading stops immediately when the analysis budget expires", () => {
+  const repo = fs.mkdtempSync(
+    path.join(os.tmpdir(), "apex-ray-ts-analyzer-compiler-budget-"),
+  );
+  const originalNow = Date.now;
+  const originalOpenSync = fs.openSync;
+  try {
+    const changedPath = path.join(repo, "src", "changed.ts");
+    const dependencyPath = path.join(repo, "src", "dependency.ts");
+    writeFile(
+      repo,
+      "tsconfig.json",
+      JSON.stringify({ files: ["src/changed.ts"] }),
+    );
+    writeFile(
+      repo,
+      "src/changed.ts",
+      [
+        "import { dependencyValue } from './dependency.js';",
+        "export const visible = dependencyValue;",
+      ].join("\n"),
+    );
+    writeFile(
+      repo,
+      "src/dependency.ts",
+      "export const dependencyValue = 1;\n",
+    );
+    const manifestPath = path.join(repo, "files.json");
+    fs.writeFileSync(
+      manifestPath,
+      JSON.stringify({
+        version: 2,
+        files: ["src/changed.ts", "src/dependency.ts"],
+        config_files: ["tsconfig.json"],
+      }),
+      "utf8",
+    );
+    let fakeNow = 0;
+    const openedPaths: string[] = [];
+    Date.now = () => fakeNow;
+    fs.openSync = ((candidate: fs.PathLike, ...rest: unknown[]) => {
+      const descriptor = (originalOpenSync as (...args: unknown[]) => number)(
+        candidate,
+        ...rest,
+      );
+      const resolved = path.resolve(String(candidate));
+      openedPaths.push(resolved);
+      if (resolved === changedPath) fakeNow = 1;
+      return descriptor;
+    }) as typeof fs.openSync;
+
+    const result = runAnalyzerInProcess(repo, [
+      "src/changed.ts",
+      "--range",
+      "src/changed.ts:1-2",
+      "--file-manifest",
+      manifestPath,
+      "--analysis-time-budget-ms",
+      "1",
+      "--no-index-cache",
+    ]);
+
+    assert.equal(result.partial, true);
+    assert.deepEqual(result.files, []);
+    assert.deepEqual(result.failedFiles, ["src/changed.ts"]);
+    assert.ok(
+      result.shardFailures.some(
+        (failure) => failure.status === "timeout",
+      ),
+    );
+    assert.ok(
+      result.warnings.some((warning) =>
+        warning.includes("internal budget exhausted"),
+      ),
+    );
+    assert.ok(openedPaths.includes(changedPath));
+    assert.equal(openedPaths.includes(dependencyPath), false);
+  } finally {
+    Date.now = originalNow;
+    fs.openSync = originalOpenSync;
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("compiler stack failures return partial analyzer JSON", () => {
+  const repo = fs.mkdtempSync(
+    path.join(os.tmpdir(), "apex-ray-ts-analyzer-compiler-stack-"),
+  );
+  try {
+    const chainLength = 800;
+    const chainPaths = Array.from(
+      { length: chainLength },
+      (_, index) => `src/chain-${String(index).padStart(4, "0")}.ts`,
+    );
+    for (let index = 0; index < chainPaths.length; index += 1) {
+      const nextPath = chainPaths[index + 1];
+      const content = nextPath
+        ? [
+            `import { value as nextValue } from './${path.basename(nextPath, ".ts")}.js';`,
+            "export const value = nextValue + 1;",
+          ].join("\n")
+        : "export const value = 1;\n";
+      writeFile(repo, chainPaths[index], content);
+    }
+    writeFile(
+      repo,
+      "tsconfig.json",
+      JSON.stringify({ files: [chainPaths[0]] }),
+    );
+    const manifestPath = path.join(repo, "files.json");
+    fs.writeFileSync(
+      manifestPath,
+      JSON.stringify({
+        version: 2,
+        files: chainPaths,
+        config_files: ["tsconfig.json"],
+      }),
+      "utf8",
+    );
+
+    const stdout = execFileSync(
+      process.execPath,
+      [
+        "--stack-size=256",
+        analyzerScript,
+        "--repo",
+        repo,
+        "--changed",
+        chainPaths[0],
+        "--range",
+        `${chainPaths[0]}:1-2`,
+        "--file-manifest",
+        manifestPath,
+        "--analysis-time-budget-ms",
+        "120000",
+        "--no-index-cache",
+      ],
+      { encoding: "utf8", timeout: 30_000 },
+    );
+    const result = JSON.parse(stdout) as AnalyzerResult;
+
+    assert.equal(result.partial, true);
+    assert.deepEqual(result.files, []);
+    assert.deepEqual(result.failedFiles, [chainPaths[0]]);
+    assert.ok(
+      result.shardFailures.some(
+        (failure) => failure.status === "failed",
+      ),
+    );
+    assert.ok(
+      result.warnings.some((warning) =>
+        warning.includes("TypeScript compiler could not create a program"),
+      ),
+    );
+    assert.ok(
+      result.warnings.some((warning) =>
+        warning.includes("No TypeScript program could be created"),
+      ),
+    );
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("repo-index parser stack failures return partial analyzer JSON", () => {
+  const repo = fs.mkdtempSync(
+    path.join(os.tmpdir(), "apex-ray-ts-analyzer-index-stack-"),
+  );
+  try {
+    const sourcePath = "src/deep.ts";
+    const nestingDepth = 1_200;
+    writeFile(
+      repo,
+      sourcePath,
+      `export const deep = ${"(".repeat(nestingDepth)}1${")".repeat(nestingDepth)};\n`,
+    );
+    writeFile(
+      repo,
+      "tsconfig.json",
+      JSON.stringify({ files: [sourcePath] }),
+    );
+    const manifestPath = path.join(repo, "files.json");
+    fs.writeFileSync(
+      manifestPath,
+      JSON.stringify({
+        version: 2,
+        files: [sourcePath],
+        config_files: ["tsconfig.json"],
+      }),
+      "utf8",
+    );
+
+    const stdout = execFileSync(
+      process.execPath,
+      [
+        "--stack-size=256",
+        analyzerScript,
+        "--repo",
+        repo,
+        "--changed",
+        sourcePath,
+        "--range",
+        `${sourcePath}:1-1`,
+        "--file-manifest",
+        manifestPath,
+        "--analysis-time-budget-ms",
+        "120000",
+        "--no-index-cache",
+      ],
+      { encoding: "utf8", timeout: 30_000 },
+    );
+    const result = JSON.parse(stdout) as AnalyzerResult;
+
+    assert.equal(result.partial, true);
+    assert.deepEqual(result.files, []);
+    assert.deepEqual(result.failedFiles, [sourcePath]);
+    assert.ok(
+      result.warnings.some((warning) =>
+        warning.includes("could not be indexed safely"),
+      ),
+    );
   } finally {
     fs.rmSync(repo, { recursive: true, force: true });
   }

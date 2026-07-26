@@ -153,6 +153,10 @@ def test_action_uses_pinned_dependencies_and_has_no_secret_inputs() -> None:
 
     assert action["inputs"]["fail-on-quality-gate"]["default"] == "true"
     assert action["outputs"]["quality-gate-status"]["value"] == "${{ steps.finalize.outputs.quality-gate-status }}"
+    assert action["outputs"]["repository-path"]["value"] == "${{ steps.prepare.outputs.repository-path }}"
+    assert action["outputs"]["markdown-path"]["value"] == "${{ steps.prepare.outputs.markdown-path }}"
+    assert action["outputs"]["json-path"]["value"] == "${{ steps.prepare.outputs.json-path }}"
+    assert action["outputs"]["sarif-path"]["value"] == "${{ steps.prepare.outputs.sarif-path }}"
 
     upload_sarif = next(step for step in action["runs"]["steps"] if step.get("id") == "upload-sarif")
     assert upload_sarif["continue-on-error"] is True
@@ -169,11 +173,18 @@ def test_action_uses_pinned_dependencies_and_has_no_secret_inputs() -> None:
 def test_action_builds_its_pinned_source_with_hash_locked_dependencies() -> None:
     action = yaml.safe_load(ACTION_PATH.read_text(encoding="utf-8"))
     steps = action["runs"]["steps"]
+    verify_source = next(step for step in steps if step.get("id") == "verify-source")
+    checkout = next(step for step in steps if step.get("id") == "checkout")
     setup_python = next(step for step in steps if step["name"] == "Set up Python")
     setup_node = next(step for step in steps if step["name"] == "Set up Node.js for TypeScript analysis")
     setup_uv = next(step for step in steps if step["name"] == "Set up uv")
     runtime = next(step for step in steps if step["name"] == "Prepare locked Apex Ray runtime")
 
+    assert steps.index(verify_source) < steps.index(checkout)
+    assert verify_source["env"]["APEX_RAY_ACTION_REF"] == "${{ github.action_ref }}"
+    assert "^[0-9a-f]{40}$" in verify_source["run"]
+    assert "local paths and mutable tags are not supported" in verify_source["run"]
+    assert checkout["with"]["path"] == ".apex-ray/repository"
     assert re.fullmatch(r"3\.14\.\d+", setup_python["with"]["python-version"])
     assert re.fullmatch(r"24\.\d+\.\d+", setup_node["with"]["node-version"])
     assert re.fullmatch(r"\d+\.\d+\.\d+", setup_uv["with"]["version"])
@@ -192,6 +203,19 @@ def test_action_builds_its_pinned_source_with_hash_locked_dependencies() -> None
         step = next(candidate for candidate in steps if candidate.get("id") == step_id)
         assert step["env"]["PYTHONPATH"] == "${{ github.action_path }}/../../../src"
         assert step["env"]["PYTHONNOUSERSITE"] == "1"
+    prepare = next(step for step in steps if step.get("id") == "prepare")
+    assert prepare["env"]["APEX_RAY_REPOSITORY_PATH"] == (
+        "${{ inputs.checkout == 'true' && format('{0}/.apex-ray/repository', github.workspace) || github.workspace }}"
+    )
+
+    upload_artifact = next(step for step in steps if step.get("id") == "upload-artifact")
+    assert upload_artifact["with"]["path"].splitlines() == [
+        "${{ steps.prepare.outputs.markdown-path }}",
+        "${{ steps.prepare.outputs.json-path }}",
+        "${{ steps.prepare.outputs.sarif-path }}",
+    ]
+    upload_sarif = next(step for step in steps if step.get("id") == "upload-sarif")
+    assert upload_sarif["with"]["sarif_file"] == "${{ steps.prepare.outputs.sarif-path }}"
 
     serialized = ACTION_PATH.read_text(encoding="utf-8")
     locked_helper_prefix = (
@@ -202,6 +226,54 @@ def test_action_builds_its_pinned_source_with_hash_locked_dependencies() -> None
     assert "--no-editable" not in serialized
     assert "uv pip install" not in serialized
     assert "apex-ray==" not in serialized
+
+
+def test_plan_environment_uses_the_isolated_repository_checkout(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    helper = _load_helper()
+    github_workspace = tmp_path / "trusted-caller-workspace"
+    repository = github_workspace / ".apex-ray" / "repository"
+    runner_temp = tmp_path / "runner"
+    repository.mkdir(parents=True)
+    runner_temp.mkdir()
+    _init_repository(repository)
+    event_path = tmp_path / "event.json"
+    event_path.write_text("{}\n", encoding="utf-8")
+    github_output = tmp_path / "github-output"
+
+    environment = {
+        "GITHUB_WORKSPACE": str(github_workspace),
+        "APEX_RAY_REPOSITORY_PATH": str(repository),
+        "RUNNER_TEMP": str(runner_temp),
+        "GITHUB_EVENT_PATH": str(event_path),
+        "GITHUB_REPOSITORY": "owner/repository",
+        "GITHUB_ACTOR": "trusted-maintainer",
+        "GITHUB_OUTPUT": str(github_output),
+        "INPUT_CONFIG_PATH": ".apex-ray/config.yml",
+        "INPUT_REVIEWERS": "",
+        "INPUT_LLM": "false",
+        "INPUT_FAIL_ON_QUALITY_GATE": "true",
+        "INPUT_BASE": "",
+        "INPUT_TRUST_PR_CONFIG": "false",
+        "INPUT_MARKDOWN_OUTPUT": ".apex-ray/ci/review.md",
+        "INPUT_JSON_OUTPUT": ".apex-ray/ci/review.json",
+        "INPUT_SARIF_OUTPUT": ".apex-ray/ci/review.sarif",
+        "INPUT_ARTIFACT_NAME": "apex-ray-review",
+        "INPUT_SARIF_CATEGORY": "apex-ray-review",
+    }
+    for name, value in environment.items():
+        monkeypatch.setenv(name, value)
+
+    assert helper._plan_from_environment() == 0
+
+    plan = json.loads((runner_temp / "apex-ray-ci" / "plan.json").read_text(encoding="utf-8"))
+    assert plan["workspace"] == str(repository.resolve())
+    assert plan["markdown_path"] == str(repository / ".apex-ray" / "ci" / "review.md")
+    outputs = github_output.read_text(encoding="utf-8")
+    assert f"repository-path={repository.resolve()}\n" in outputs
+    assert f"markdown-path={repository / '.apex-ray' / 'ci' / 'review.md'}\n" in outputs
 
 
 @pytest.mark.parametrize(
@@ -417,7 +489,7 @@ review:
     assert "attacker.invalid" not in Path(plan["config_path"]).read_text(encoding="utf-8")
 
 
-def test_same_repository_pr_can_explicitly_trust_head_config(tmp_path: Path) -> None:
+def test_same_repository_pr_can_use_sanitized_declarative_head_config(tmp_path: Path) -> None:
     helper = _load_helper()
     workspace = tmp_path / "repo"
     runner_temp = tmp_path / "runner"
@@ -448,10 +520,69 @@ def test_same_repository_pr_can_explicitly_trust_head_config(tmp_path: Path) -> 
     )
 
     assert plan["untrusted_pr"] is False
-    assert plan["config_source"] == "head"
-    assert plan["config_path"] == str(workspace / ".apex-ray" / "config.yml")
+    assert plan["config_source"] == "restricted-head"
+    assert plan["config_path"] == str(runner_temp / "apex-ray-ci" / "config.yml")
     assert "--llm" in plan["args"]
     assert "--no-llm" not in plan["args"]
+    safe_config = yaml.safe_load(Path(plan["config_path"]).read_text(encoding="utf-8"))
+    assert safe_config["review"]["analyzer"]["script_path"] is None
+    assert safe_config["review"]["rule_paths"] == []
+    assert safe_config["review"]["memory"]["enabled"] is False
+
+
+def test_trusted_head_config_still_rejects_executable_cli_provider(
+    tmp_path: Path,
+) -> None:
+    helper = _load_helper()
+    workspace = tmp_path / "repo"
+    runner_temp = tmp_path / "runner"
+    workspace.mkdir()
+    runner_temp.mkdir()
+    base_sha = _init_repository(workspace)
+    (workspace / ".apex-ray" / "config.yml").write_text(
+        """\
+review:
+  llm:
+    enabled: true
+    provider: codex_cli
+    codex_path: scripts/from-pull-request.sh
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="cannot enable CLI LLM provider routes"):
+        helper.create_plan(
+            _plan_options(
+                helper,
+                workspace=workspace,
+                runner_temp=runner_temp,
+                event=_pull_request_event(base_sha),
+                trust_pr_config=True,
+            )
+        )
+
+
+def test_pull_request_target_runtime_never_resolves_from_the_review_checkout() -> None:
+    action = yaml.safe_load(ACTION_PATH.read_text(encoding="utf-8"))
+    steps = action["runs"]["steps"]
+    checkout = next(step for step in steps if step.get("id") == "checkout")
+    runtime = next(step for step in steps if step["name"] == "Prepare locked Apex Ray runtime")
+
+    assert checkout["with"]["ref"] == "${{ github.event.pull_request.head.sha || github.sha }}"
+    assert checkout["with"]["path"] == ".apex-ray/repository"
+    assert checkout["with"]["persist-credentials"] is False
+    assert runtime["env"]["APEX_RAY_SOURCE"] == "${{ github.action_path }}/../../.."
+    assert runtime["env"]["APEX_RAY_TYPESCRIPT_RUNTIME"] == (
+        "${{ github.action_path }}/../../../analyzer-runtimes/typescript"
+    )
+    assert runtime["env"]["PYTHONPATH"] == "${{ github.action_path }}/../../../src"
+    assert ".apex-ray/repository" not in runtime["run"]
+
+    for step_id in ("prepare", "review", "finalize"):
+        step = next(candidate for candidate in steps if candidate.get("id") == step_id)
+        assert "$GITHUB_ACTION_PATH/prepare.py" in step["run"]
+        assert step["env"]["PYTHONPATH"] == "${{ github.action_path }}/../../../src"
+        assert ".apex-ray/repository" not in step["run"]
 
 
 def test_fork_plan_executes_static_review_and_finalizes_sarif(
@@ -744,15 +875,71 @@ def test_action_rejects_overlapping_report_outputs(tmp_path: Path) -> None:
         helper.create_plan(options)
 
 
+def test_action_rejects_symlinked_report_output_before_deleting_repository_file(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    helper = _load_helper()
+    workspace = tmp_path / "repo"
+    runner_temp = tmp_path / "runner"
+    workspace.mkdir()
+    runner_temp.mkdir()
+    _init_repository(workspace)
+    source = workspace / "app.ts"
+    source.write_text("export const changed = true;\n", encoding="utf-8")
+    plan = helper.create_plan(
+        _plan_options(
+            helper,
+            workspace=workspace,
+            runner_temp=runner_temp,
+            event={},
+        )._replace(reviewers="", llm="false")
+    )
+    json_output = workspace / plan["json_output"]
+    json_output.symlink_to(source.relative_to(json_output.parent, walk_up=True))
+    plan_path = runner_temp / "plan.json"
+    plan_path.write_text(json.dumps(plan), encoding="utf-8")
+
+    def fail_if_review_starts(*args: object, **kwargs: object) -> SimpleNamespace:
+        raise AssertionError("Review process started with a symlinked report output")
+
+    monkeypatch.setattr(helper.subprocess, "run", fail_if_review_starts)
+
+    with pytest.raises(ValueError, match="symbolic links"):
+        helper._run(plan_path)
+
+    assert source.read_text(encoding="utf-8") == "export const changed = true;\n"
+
+
+def test_action_rejects_symlinked_report_output_parent(tmp_path: Path) -> None:
+    helper = _load_helper()
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    real_reports = workspace / "real-reports"
+    real_reports.mkdir()
+    (workspace / "reports").symlink_to(real_reports, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="symbolic links"):
+        helper.safe_workspace_path(
+            workspace,
+            "reports/review.json",
+            label="JSON output",
+        )
+
+
 def test_documented_workflows_are_valid_yaml_and_avoid_pull_request_target() -> None:
     docs = DOCS_PATH.read_text(encoding="utf-8")
     blocks = re.findall(r"```yaml\n(.*?)```", docs, flags=re.DOTALL)
 
     assert blocks
     assert all(yaml.safe_load(block) is not None for block in blocks)
-    assert "pull_request_target" not in docs
+    assert all("pull_request_target" not in block for block in blocks)
+    assert "Do not switch this workflow to `pull_request_target`" in docs
     assert "security-events: write" in docs
     assert "concurrency:" in docs
     assert "fail-on-quality-gate" in docs
     assert "`uv.lock`" in docs
     assert "required: true" not in docs
+    assert all("uses: ./.github/actions/apex-ray-review" not in block for block in blocks)
+    assert "Do not replace the pinned remote `uses:` line" in docs
+    assert ".apex-ray/repository" in docs

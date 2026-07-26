@@ -204,8 +204,10 @@ def test_typescript_analyzer_manifest_respects_project_ignore(
 
     assert result is not None
     assert seen_manifest is not None
-    assert seen_manifest["version"] == 1
+    assert seen_manifest["version"] == 2
     assert sorted(seen_manifest["files"]) == ["analyze.js", "src/cart.ts", "src/globals.d.ts"]
+    assert seen_manifest["package_files"] == []
+    assert seen_manifest["config_files"] == []
 
 
 def test_typescript_manifest_includes_modern_module_and_declaration_extensions(tmp_path: Path) -> None:
@@ -227,8 +229,469 @@ def test_typescript_manifest_includes_modern_module_and_declaration_extensions(t
     )
 
     assert json.loads(manifest_path.read_text(encoding="utf-8")) == {
-        "version": 1,
+        "version": 2,
         "files": sorted(path.as_posix() for path in project_files[:-1]),
+        "package_files": [],
+        "config_files": [],
+    }
+
+
+def test_typescript_manifest_includes_package_and_config_metadata(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "files.json"
+    project_files = [
+        Path("src/service.ts"),
+        Path("package.json"),
+        Path("tsconfig.json"),
+        Path("configs/tsconfig.shared.json"),
+        Path("README.md"),
+    ]
+
+    typescript_analyzer_module._write_typescript_file_manifest(
+        tmp_path,
+        manifest_path,
+        project_files=project_files,
+    )
+
+    assert json.loads(manifest_path.read_text(encoding="utf-8")) == {
+        "version": 2,
+        "files": ["src/service.ts"],
+        "package_files": ["package.json"],
+        "config_files": [
+            "configs/tsconfig.shared.json",
+            "package.json",
+            "tsconfig.json",
+        ],
+    }
+
+
+def test_typescript_manifest_follows_recursive_relative_jsonc_and_extensionless_config_extends(
+    tmp_path: Path,
+) -> None:
+    manifest_path = tmp_path / "files.json"
+    config_files = {
+        Path("tsconfig.json"): """\
+{
+  // Comments and trailing commas are valid in TypeScript configs.
+  "compilerOptions": {
+    "baseUrl": "https://example.test/*not-a-comment*/",
+  },
+  "extends": "./configs/base.jsonc",
+}
+""",
+        Path("configs/base.jsonc"): """\
+{
+  "description": "// still part of a string",
+  "extends": "./extensionless",
+}
+""",
+        Path("configs/extensionless"): """\
+{
+  "description": "escaped quote: \\" /* still a string */",
+  "extends": "./final.rules",
+}
+""",
+        Path("configs/final.rules"): """\
+{
+  "compilerOptions": {
+    "strict": true,
+  },
+}
+""",
+    }
+    for relative_path, content in config_files.items():
+        target = tmp_path / relative_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+    source_path = Path("src/service.ts")
+    (tmp_path / source_path).parent.mkdir(parents=True)
+    (tmp_path / source_path).write_text("export const service = true;\n", encoding="utf-8")
+    project_files = [source_path, *config_files]
+
+    typescript_analyzer_module._write_typescript_file_manifest(
+        tmp_path,
+        manifest_path,
+        project_files=project_files,
+    )
+
+    assert json.loads(manifest_path.read_text(encoding="utf-8")) == {
+        "version": 2,
+        "files": ["src/service.ts"],
+        "package_files": [],
+        "config_files": [
+            "configs/base.jsonc",
+            "configs/extensionless",
+            "configs/final.rules",
+            "tsconfig.json",
+        ],
+    }
+
+
+def test_typescript_manifest_follows_package_exports_for_root_subpath_and_all_conditions(
+    tmp_path: Path,
+) -> None:
+    manifest_path = tmp_path / "files.json"
+    project_content = {
+        Path("tsconfig.json"): json.dumps(
+            {
+                "extends": [
+                    "@acme/review-config/strict",
+                    "root-review-config",
+                ]
+            }
+        ),
+        Path("packages/review-config/package.json"): json.dumps(
+            {
+                "name": "@acme/review-config",
+                "exports": {
+                    "./strict": {
+                        "types": "./configs/strict.rules",
+                        "default": [
+                            "./configs/default.custom",
+                            "./../outside.custom",
+                        ],
+                    }
+                },
+            }
+        ),
+        Path("packages/review-config/configs/strict.rules"): "{}",
+        Path("packages/review-config/configs/default.custom"): "{}",
+        Path("packages/outside.custom"): "{}",
+        Path("packages/root-review-config/package.json"): json.dumps(
+            {
+                "name": "root-review-config",
+                "exports": {
+                    "types": "./configs/types.custom",
+                    "default": ["./configs/default.rules"],
+                },
+            }
+        ),
+        Path("packages/root-review-config/configs/types.custom"): "{}",
+        Path("packages/root-review-config/configs/default.rules"): "{}",
+    }
+    for relative_path, content in project_content.items():
+        target = tmp_path / relative_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+
+    typescript_analyzer_module._write_typescript_file_manifest(
+        tmp_path,
+        manifest_path,
+        project_files=list(project_content),
+    )
+
+    assert json.loads(manifest_path.read_text(encoding="utf-8"))["config_files"] == [
+        "packages/review-config/configs/default.custom",
+        "packages/review-config/configs/strict.rules",
+        "packages/review-config/package.json",
+        "packages/root-review-config/configs/default.rules",
+        "packages/root-review-config/configs/types.custom",
+        "packages/root-review-config/package.json",
+        "tsconfig.json",
+    ]
+
+
+def test_typescript_manifest_follows_package_tsconfig_and_conventional_config_candidates(
+    tmp_path: Path,
+) -> None:
+    manifest_path = tmp_path / "files.json"
+    project_content = {
+        Path("tsconfig.json"): json.dumps(
+            {
+                "extends": [
+                    "tsconfig-field",
+                    "conventional-root",
+                    "conventional-subpath/strict",
+                ]
+            }
+        ),
+        Path("packages/tsconfig-field/package.json"): json.dumps(
+            {
+                "name": "tsconfig-field",
+                "tsconfig": "configs/base.custom",
+            }
+        ),
+        Path("packages/tsconfig-field/configs/base.custom"): "{}",
+        Path("packages/conventional-root/package.json"): '{"name":"conventional-root"}',
+        Path("packages/conventional-root/tsconfig.json"): '{"extends":"./nested.rules"}',
+        Path("packages/conventional-root/nested.rules"): "{}",
+        Path("packages/conventional-subpath/package.json"): '{"name":"conventional-subpath"}',
+        Path("packages/conventional-subpath/strict.json"): '{"extends":"./nested.custom"}',
+        Path("packages/conventional-subpath/nested.custom"): "{}",
+    }
+    for relative_path, content in project_content.items():
+        target = tmp_path / relative_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+
+    typescript_analyzer_module._write_typescript_file_manifest(
+        tmp_path,
+        manifest_path,
+        project_files=list(project_content),
+    )
+
+    assert json.loads(manifest_path.read_text(encoding="utf-8"))["config_files"] == [
+        "packages/conventional-root/nested.rules",
+        "packages/conventional-root/package.json",
+        "packages/conventional-root/tsconfig.json",
+        "packages/conventional-subpath/nested.custom",
+        "packages/conventional-subpath/package.json",
+        "packages/conventional-subpath/strict.json",
+        "packages/tsconfig-field/configs/base.custom",
+        "packages/tsconfig-field/package.json",
+        "tsconfig.json",
+    ]
+
+
+def test_typescript_manifest_prefers_bare_package_tsconfig_over_exports(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "files.json"
+    project_content = {
+        Path("tsconfig.json"): '{"extends":"priority-config"}',
+        Path("packages/priority-config/package.json"): json.dumps(
+            {
+                "name": "priority-config",
+                "tsconfig": "./base.custom",
+                "exports": "./dist.js",
+            }
+        ),
+        Path("packages/priority-config/base.custom"): "{}",
+        Path("packages/priority-config/dist.js"): "export default {};\n",
+    }
+    for relative_path, content in project_content.items():
+        target = tmp_path / relative_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+
+    typescript_analyzer_module._write_typescript_file_manifest(
+        tmp_path,
+        manifest_path,
+        project_files=list(project_content),
+    )
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["config_files"] == [
+        "packages/priority-config/base.custom",
+        "packages/priority-config/package.json",
+        "tsconfig.json",
+    ]
+    assert "packages/priority-config/dist.js" not in manifest["config_files"]
+
+
+def test_typescript_manifest_treats_null_exports_as_conventional_fallback(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "files.json"
+    project_content = {
+        Path("tsconfig.json"): '{"extends":"null-exports-config"}',
+        Path("packages/null-exports-config/package.json"): json.dumps(
+            {
+                "name": "null-exports-config",
+                "exports": None,
+            }
+        ),
+        Path("packages/null-exports-config/tsconfig"): '{"extends":"./nested.custom"}',
+        Path("packages/null-exports-config/nested.custom"): "{}",
+    }
+    for relative_path, content in project_content.items():
+        target = tmp_path / relative_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+
+    typescript_analyzer_module._write_typescript_file_manifest(
+        tmp_path,
+        manifest_path,
+        project_files=list(project_content),
+    )
+
+    assert json.loads(manifest_path.read_text(encoding="utf-8"))["config_files"] == [
+        "packages/null-exports-config/nested.custom",
+        "packages/null-exports-config/package.json",
+        "packages/null-exports-config/tsconfig",
+        "tsconfig.json",
+    ]
+
+
+def test_typescript_manifest_follows_wildcard_package_export_subpath(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "files.json"
+    project_content = {
+        Path("tsconfig.json"): '{"extends":"wildcard-config/strict"}',
+        Path("packages/wildcard-config/package.json"): json.dumps(
+            {
+                "name": "wildcard-config",
+                "exports": {
+                    "./*": {
+                        "types": "./configs/*.rules",
+                        "default": "./fallback/*.custom",
+                    }
+                },
+            }
+        ),
+        Path("packages/wildcard-config/configs/strict.rules"): "{}",
+        Path("packages/wildcard-config/fallback/strict.custom"): "{}",
+    }
+    for relative_path, content in project_content.items():
+        target = tmp_path / relative_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+
+    typescript_analyzer_module._write_typescript_file_manifest(
+        tmp_path,
+        manifest_path,
+        project_files=list(project_content),
+    )
+
+    assert json.loads(manifest_path.read_text(encoding="utf-8"))["config_files"] == [
+        "packages/wildcard-config/configs/strict.rules",
+        "packages/wildcard-config/fallback/strict.custom",
+        "packages/wildcard-config/package.json",
+        "tsconfig.json",
+    ]
+
+
+def test_typescript_manifest_reads_utf16_config_chain(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "files.json"
+    root_config = tmp_path / "tsconfig.json"
+    root_config.write_bytes(b"\xff\xfe" + '{"extends":"./configs/base.custom"}'.encode("utf-16-le"))
+    base_config = tmp_path / "configs" / "base.custom"
+    base_config.parent.mkdir()
+    base_config.write_bytes(b"\xfe\xff" + '{"extends":"./final.rules"}'.encode("utf-16-be"))
+    final_config = tmp_path / "configs" / "final.rules"
+    final_config.write_text("{}\n", encoding="utf-8")
+
+    typescript_analyzer_module._write_typescript_file_manifest(
+        tmp_path,
+        manifest_path,
+        project_files=[
+            Path("tsconfig.json"),
+            Path("configs/base.custom"),
+            Path("configs/final.rules"),
+        ],
+    )
+
+    assert json.loads(manifest_path.read_text(encoding="utf-8"))["config_files"] == [
+        "configs/base.custom",
+        "configs/final.rules",
+        "tsconfig.json",
+    ]
+
+
+def test_typescript_manifest_rejects_leaf_symlink_swapped_during_config_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest_path = tmp_path / "files.json"
+    (tmp_path / "tsconfig.json").write_text(
+        '{"extends":"./configs/swapped.custom"}',
+        encoding="utf-8",
+    )
+    swapped_config = tmp_path / "configs" / "swapped.custom"
+    swapped_config.parent.mkdir()
+    swapped_config.write_text("{}\n", encoding="utf-8")
+    leaked_config = tmp_path / "configs" / "leaked.rules"
+    leaked_config.write_text("{}\n", encoding="utf-8")
+    symlink_target = tmp_path / "symlink-target.json"
+    symlink_target.write_text('{"extends":"./leaked.rules"}', encoding="utf-8")
+
+    original_is_file = Path.is_file
+    original_os_open = typescript_analyzer_module.os.open
+    swapped = False
+
+    def swap_leaf() -> None:
+        nonlocal swapped
+        if swapped:
+            return
+        swapped = True
+        swapped_config.unlink()
+        swapped_config.symlink_to(symlink_target)
+
+    def swap_before_path_open(path: Path) -> bool:
+        result = original_is_file(path)
+        if path == swapped_config:
+            swap_leaf()
+        return result
+
+    def swap_before_fd_open(path: str | Path, flags: int, mode: int = 0o777) -> int:
+        if Path(path) == swapped_config:
+            swap_leaf()
+        return original_os_open(path, flags, mode)
+
+    monkeypatch.setattr(Path, "is_file", swap_before_path_open)
+    monkeypatch.setattr(typescript_analyzer_module.os, "open", swap_before_fd_open)
+
+    typescript_analyzer_module._write_typescript_file_manifest(
+        tmp_path,
+        manifest_path,
+        project_files=[
+            Path("tsconfig.json"),
+            Path("configs/swapped.custom"),
+            Path("configs/leaked.rules"),
+        ],
+    )
+
+    assert swapped
+    assert json.loads(manifest_path.read_text(encoding="utf-8"))["config_files"] == [
+        "configs/swapped.custom",
+        "tsconfig.json",
+    ]
+
+
+def test_typescript_manifest_does_not_read_packages_for_relative_extends(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest_path = tmp_path / "files.json"
+    (tmp_path / "tsconfig.json").write_text('{"extends":"./base.custom"}', encoding="utf-8")
+    (tmp_path / "base.custom").write_text("{}\n", encoding="utf-8")
+    (tmp_path / "package.json").write_text('{"name":"unused"}', encoding="utf-8")
+    original_read = typescript_analyzer_module._read_inventory_config
+    reads: list[Path] = []
+
+    def record_read(repo_root: Path, relative_path: Path) -> str | None:
+        reads.append(relative_path)
+        return original_read(repo_root, relative_path)
+
+    monkeypatch.setattr(typescript_analyzer_module, "_read_inventory_config", record_read)
+
+    typescript_analyzer_module._write_typescript_file_manifest(
+        tmp_path,
+        manifest_path,
+        project_files=[
+            Path("tsconfig.json"),
+            Path("base.custom"),
+            Path("package.json"),
+        ],
+    )
+
+    assert Path("package.json") not in reads
+
+
+def test_typescript_manifest_does_not_follow_config_extends_outside_project_inventory(
+    tmp_path: Path,
+) -> None:
+    manifest_path = tmp_path / "files.json"
+    (tmp_path / "tsconfig.json").write_text(
+        '{"extends":"./ignored/private.config"}\n',
+        encoding="utf-8",
+    )
+    ignored_config = tmp_path / "ignored" / "private.config"
+    ignored_config.parent.mkdir()
+    ignored_config.write_text(
+        '{"extends":"../also-ignored.jsonc"}\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "ignored" / "also-ignored.jsonc").write_text("{}\n", encoding="utf-8")
+
+    typescript_analyzer_module._write_typescript_file_manifest(
+        tmp_path,
+        manifest_path,
+        project_files=[
+            Path("src/service.ts"),
+            Path("tsconfig.json"),
+        ],
+    )
+
+    assert json.loads(manifest_path.read_text(encoding="utf-8")) == {
+        "version": 2,
+        "files": ["src/service.ts"],
+        "package_files": [],
+        "config_files": ["tsconfig.json"],
     }
 
 
@@ -346,8 +809,10 @@ def test_run_analyzers_reuses_supplied_project_inventory_for_typescript_manifest
     assert result.results
     assert project_files == [Path("src/helper.ts"), Path("src/cart.ts"), Path("README.md")]
     assert seen_manifest == {
-        "version": 1,
+        "version": 2,
         "files": ["src/cart.ts", "src/helper.ts"],
+        "package_files": [],
+        "config_files": [],
     }
 
 

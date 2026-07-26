@@ -367,8 +367,8 @@ def render_markdown(report: ReviewReport) -> str:
         approved_findings = [verification.finding for verification in approved]
         verified_findings = [finding for finding in report.findings if finding_matches_any(finding, approved_findings)]
         lines.append(f"- Unique verified findings: `{len(verified_findings)}`")
-        lines.append(f"- Approved reviewer decisions: `{len(approved)}`")
-        lines.append(f"- Rejected reviewer decisions: `{len(rejected)}`")
+        lines.append(f"- Approved: `{len(approved)}`")
+        lines.append(f"- Rejected: `{len(rejected)}`")
         if rejected:
             lines.append("")
             lines.append("### Rejected")

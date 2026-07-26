@@ -10,7 +10,12 @@ import type {
   RepoFileIndexEntry,
   RepoIndex,
 } from "../types.js";
-import { normalizeRelPath, readUtf8 } from "../utils.js";
+import {
+  canonicalPathKey,
+  normalizeRelPath,
+  readStableFile,
+  sameStableFileIdentity,
+} from "../utils.js";
 
 const indexedSourceLines = new WeakMap<RepoIndex, Map<string, string[] | null>>();
 
@@ -62,8 +67,23 @@ export function materializeIdentifierReference(
   }
   let lines = linesByFile.get(entry.absPath);
   if (lines === undefined) {
-    const text = readUtf8(entry.absPath);
-    lines = text === null ? null : text.split(/\r?\n/);
+    const expectedIdentity = repoIndex.fileIdentities?.get(
+      canonicalPathKey(entry.absPath),
+    );
+    const snapshot = expectedIdentity
+      ? readStableFile(
+          entry.absPath,
+          () => true,
+          (identity) => sameStableFileIdentity(expectedIdentity, identity),
+        )
+      : null;
+    lines =
+      snapshot?.text !== null &&
+      snapshot?.text !== undefined &&
+      expectedIdentity &&
+      sameStableFileIdentity(expectedIdentity, snapshot.identity)
+        ? snapshot.text.split(/\r?\n/)
+        : null;
     linesByFile.set(entry.absPath, lines);
   }
   return materializedReference(

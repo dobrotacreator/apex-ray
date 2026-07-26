@@ -37,6 +37,7 @@ from apex_ray.report.run_state import (
     EffectiveLLMPackRunState,
     reduce_llm_pack_run_states,
 )
+from apex_ray.reviewers import reviewer_matches_pack
 
 
 def _build_llm_coverage(
@@ -55,16 +56,24 @@ def _build_llm_coverage(
     failed_verify_runs = [run for run in verify_runs if run.status != "ok"]
     effective_run_states = reduce_llm_pack_run_states(llm_runs)
     current_reviewer_selections = reviewer_selections or {}
-    configured_reviewer_ids = (
-        {reviewer.id for reviewer in config.reviewers if reviewer.enabled} if config.reviewers else None
+    configured_reviewer_pack_ids = (
+        {
+            reviewer.id: {pack.id for pack in context_packs if reviewer_matches_pack(reviewer, pack)}
+            for reviewer in config.reviewers
+            if reviewer.enabled
+        }
+        if config.reviewers
+        else None
     )
+    scoped_context_pack_ids = {pack.id for pack in context_packs}
     scoped_effective_run_states = {
         key: state
         for key, state in effective_run_states.items()
         if _run_state_in_reviewer_scope(
             state,
             current_reviewer_selections,
-            configured_reviewer_ids,
+            configured_reviewer_pack_ids,
+            scoped_context_pack_ids,
         )
     }
     effective_review_runs = [state.review for state in scoped_effective_run_states.values() if state.review is not None]
@@ -79,6 +88,7 @@ def _build_llm_coverage(
     active_failed_verify_runs = [run for run in effective_verify_runs if run.status != "ok"]
     reviewer_coverage = _build_reviewer_coverage(
         config,
+        context_packs,
         current_reviewer_selections,
         llm_runs,
         scoped_effective_run_states,
@@ -337,15 +347,21 @@ def _build_llm_coverage(
 
 def _build_reviewer_coverage(
     config: ReviewConfig,
+    context_packs: list[ContextPack],
     reviewer_selections: dict[str, LLMContextSelection],
     llm_runs: list[LLMRun],
     effective_run_states: dict[tuple[str, str], EffectiveLLMPackRunState],
 ) -> list[LLMReviewerCoverageSummary]:
     configured = {reviewer.id: reviewer for reviewer in config.reviewers}
+    enabled_configured_ids = {reviewer.id for reviewer in config.reviewers if reviewer.enabled}
+    reviewer_ids = set(reviewer_selections) | {reviewer_id for reviewer_id, _pack_id in effective_run_states}
+    if not reviewer_selections:
+        reviewer_ids.update(enabled_configured_ids)
     summaries: list[LLMReviewerCoverageSummary] = []
-    for reviewer_id, selection in reviewer_selections.items():
+    for reviewer_id in sorted(reviewer_ids):
+        selection = reviewer_selections.get(reviewer_id)
         reviewer = configured.get(reviewer_id)
-        required = reviewer.required if reviewer is not None else False
+        required = reviewer.required if reviewer is not None and reviewer.enabled else False
         verify_enabled = reviewer.verify if reviewer is not None and reviewer.verify is not None else config.llm.verify
         runs = [run for run in llm_runs if run.reviewer_id == reviewer_id]
         review_runs = [run for run in runs if run.kind in {"review", "review_shallow"}]
@@ -364,8 +380,17 @@ def _build_reviewer_coverage(
             for run in effective_review_runs
             if run.status == "ok" and run.context_pack_id is not None
         }
-        matching_ids = list(selection.total_context_pack_ids)
-        selected_ids = list(selection.selected_context_pack_ids)
+        if selection is not None:
+            matching_ids = list(selection.total_context_pack_ids)
+            selected_ids = list(selection.selected_context_pack_ids)
+        else:
+            reviewer_state_ids = {state.context_pack_id for state in reviewer_states}
+            if reviewer is not None and reviewer.enabled:
+                matching_ids = [pack.id for pack in context_packs if reviewer_matches_pack(reviewer, pack)]
+                selected_ids = list(matching_ids)
+            else:
+                matching_ids = [pack.id for pack in context_packs if pack.id in reviewer_state_ids]
+                selected_ids = list(matching_ids)
         reviewed_ids = [pack_id for pack_id in matching_ids if pack_id in reviewed]
         missing_ids = [pack_id for pack_id in selected_ids if pack_id not in reviewed]
         active_failed_verify_runs = [run for run in effective_verify_runs if run.status != "ok"]
@@ -387,8 +412,12 @@ def _build_reviewer_coverage(
                 f"{'Required reviewer' if required else 'Reviewer'} {reviewer_id} had "
                 f"{len(active_failed_verify_runs)} failed verification run(s)."
             )
-        if not matching_ids:
-            status: Literal["not_applicable", "pass", "warn", "fail"] = "not_applicable"
+        status: Literal["not_applicable", "pass", "warn", "fail"]
+        if not config.llm.enabled:
+            reasons = []
+            status = "not_applicable"
+        elif not matching_ids:
+            status = "not_applicable"
         elif reasons:
             status = "fail" if required else "warn"
         else:
@@ -430,15 +459,21 @@ def _reviewer_verify_enabled(config: ReviewConfig, reviewer_id: str) -> bool:
 def _run_state_in_reviewer_scope(
     state: EffectiveLLMPackRunState,
     reviewer_selections: dict[str, LLMContextSelection],
-    configured_reviewer_ids: set[str] | None,
+    configured_reviewer_pack_ids: dict[str, set[str]] | None,
+    scoped_context_pack_ids: set[str],
 ) -> bool:
+    if state.context_pack_id not in scoped_context_pack_ids:
+        return False
     selection = reviewer_selections.get(state.reviewer_id)
     if selection is not None:
         return state.context_pack_id in selection.total_context_pack_ids
     if reviewer_selections:
         return False
-    if configured_reviewer_ids is not None:
-        return state.reviewer_id in configured_reviewer_ids
+    if configured_reviewer_pack_ids is not None:
+        return state.context_pack_id in configured_reviewer_pack_ids.get(
+            state.reviewer_id,
+            set(),
+        )
     return True
 
 
@@ -704,6 +739,8 @@ def _build_reviewer_coverage_todos(
     priority_rank = {"p0": 0, "p1": 1, "p2": 2}
     todos: list[LLMCoverageTodo] = []
     for reviewer in reviewer_coverage:
+        if reviewer.status == "not_applicable":
+            continue
         reviewer_states = {
             pack_id: state
             for (reviewer_id, pack_id), state in effective_run_states.items()

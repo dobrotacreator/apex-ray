@@ -246,6 +246,145 @@ def test_stdlib_transport_serializes_json_and_disables_redirects(
     }
 
 
+@pytest.mark.parametrize(
+    ("url", "message"),
+    [
+        pytest.param("http://models.example.test/v1/review", "HTTPS", id="remote-http"),
+        pytest.param("https://user:password@api.example/v1/review", "credentials", id="userinfo"),
+        pytest.param("https:///v1/review", "host", id="missing-host"),
+        pytest.param("https://api.example:invalid/v1/review", "port", id="invalid-port"),
+        pytest.param("https://[not-an-ipv6]/v1/review", "host", id="invalid-ipv6"),
+        pytest.param("https://api%2f.example/v1/review", "host", id="encoded-host-separator"),
+        pytest.param("https://api.example/v1/review?key=value", "query or fragment", id="query"),
+        pytest.param("https://api.example\\@attacker.example/v1/review", "credentials", id="ambiguous-host"),
+        pytest.param(" https://api.example/v1/review", "path", id="leading-space"),
+        pytest.param("https://api.example/v1 bad", "path", id="raw-path-space"),
+        pytest.param("https://api.example/v1\\bad", "path", id="raw-path-backslash"),
+        pytest.param("https://api.example/v1/%zz", "path", id="invalid-percent-escape"),
+    ],
+)
+def test_stdlib_transport_rejects_unsafe_url_before_building_opener(
+    monkeypatch: pytest.MonkeyPatch,
+    url: str,
+    message: str,
+) -> None:
+    opener_calls = 0
+
+    def fail_if_built(*handlers: object) -> StubOpener:
+        nonlocal opener_calls
+        opener_calls += 1
+        raise AssertionError("unsafe URL reached the network opener")
+
+    monkeypatch.setattr(http_module, "build_opener", fail_if_built)
+
+    with pytest.raises(JSONTransportError, match=message) as caught:
+        UrllibJSONTransport().request(
+            url=url,
+            headers={"Authorization": "Bearer secret"},
+            payload={},
+            timeout_seconds=7,
+            use_system_proxy=False,
+        )
+
+    assert caught.value.kind == "malformed"
+    assert opener_calls == 0
+
+
+def test_stdlib_transport_normalizes_idn_host_before_opening(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    opener = StubOpener(StubHTTPHandle(b'{"ok":true}'))
+    monkeypatch.setattr(http_module, "build_opener", lambda *handlers: opener)
+
+    response = UrllibJSONTransport().request(
+        url="https://例え.テスト/v1/review",
+        headers={"Authorization": "Bearer secret"},
+        payload={},
+        timeout_seconds=7,
+        use_system_proxy=False,
+    )
+
+    assert response.data == {"ok": True}
+    assert opener.request is not None
+    assert opener.request.full_url == "https://xn--r8jz45g.xn--zckzah/v1/review"
+
+
+@pytest.mark.parametrize(
+    "request_error",
+    [
+        pytest.param(ValueError("invalid request target"), id="value-error"),
+        pytest.param(
+            UnicodeEncodeError("ascii", "例", 0, 1, "invalid request target"),
+            id="unicode-error",
+        ),
+    ],
+)
+def test_stdlib_transport_normalizes_request_construction_failures(
+    monkeypatch: pytest.MonkeyPatch,
+    request_error: Exception,
+) -> None:
+    opener_calls = 0
+
+    def fail_request(*args: object, **kwargs: object) -> Request:
+        raise request_error
+
+    def fail_if_built(*handlers: object) -> StubOpener:
+        nonlocal opener_calls
+        opener_calls += 1
+        raise AssertionError("malformed request reached the network opener")
+
+    monkeypatch.setattr(http_module, "Request", fail_request)
+    monkeypatch.setattr(http_module, "build_opener", fail_if_built)
+
+    with pytest.raises(JSONTransportError, match="valid HTTP request") as caught:
+        UrllibJSONTransport().request(
+            url="https://api.example/v1/review",
+            headers={"Authorization": "Bearer secret"},
+            payload={},
+            timeout_seconds=7,
+            use_system_proxy=False,
+        )
+
+    assert caught.value.kind == "malformed"
+    assert opener_calls == 0
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        pytest.param("http://localhost:11434/v1/review", id="localhost"),
+        pytest.param("http://127.0.0.1:11434/v1/review", id="ipv4"),
+        pytest.param("http://[::1]:11434/v1/review", id="ipv6"),
+    ],
+)
+def test_stdlib_transport_allows_intentional_loopback_http(
+    monkeypatch: pytest.MonkeyPatch,
+    url: str,
+) -> None:
+    opener = StubOpener(StubHTTPHandle(b'{"ok":true}'))
+    installed_handlers: list[object] = []
+
+    def fake_build_opener(*handlers: object) -> StubOpener:
+        installed_handlers.extend(handlers)
+        return opener
+
+    monkeypatch.setattr(http_module, "build_opener", fake_build_opener)
+
+    response = UrllibJSONTransport().request(
+        url=url,
+        headers={"Authorization": "Bearer local-secret"},
+        payload={},
+        timeout_seconds=7,
+        use_system_proxy=True,
+    )
+
+    assert response.data == {"ok": True}
+    assert opener.request is not None
+    assert opener.request.full_url == url
+    proxy_handler = next(handler for handler in installed_handlers if isinstance(handler, http_module.ProxyHandler))
+    assert getattr(proxy_handler, "proxies", None) == {}
+
+
 def test_stdlib_transport_keeps_http_status_for_non_json_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -491,6 +630,28 @@ def test_openai_responses_request_and_usage_are_exact() -> None:
     assert str(prompt).startswith("You are Apex Ray")
 
 
+def test_openai_responses_preserves_explicit_none_reasoning_effort() -> None:
+    transport = StubTransport(
+        JSONHTTPResponse(
+            status_code=200,
+            headers={},
+            data={
+                "status": "completed",
+                "output_text": '{"findings":[]}',
+            },
+        )
+    )
+    config = LLMConfig(
+        provider=LLMProviderName.OPENAI_API,
+        model="gpt-5.6-sol",
+        effort=LLMReasoningEffort.NONE,
+    )
+
+    provider(config, transport, {"OPENAI_API_KEY": "secret"}).review_context_pack(make_pack(), Path("."))
+
+    assert transport.calls[0].payload["reasoning"] == {"effort": "none"}
+
+
 def test_anthropic_messages_request_is_native_and_strict() -> None:
     transport = StubTransport(
         JSONHTTPResponse(
@@ -661,6 +822,25 @@ def test_openai_chat_presets_use_documented_capabilities(
     }
 
 
+def test_qwen_preset_allows_official_workspace_dedicated_endpoint() -> None:
+    transport = StubTransport(success_response())
+    config = LLMConfig(
+        provider=LLMProviderName.QWEN_API,
+        model="qwen3.7-max",
+        api=LLMAPIConfig(base_url=("https://llm-example.cn-beijing.maas.aliyuncs.com/compatible-mode/v1")),
+    )
+
+    provider(
+        config,
+        transport,
+        {"DASHSCOPE_API_KEY": "provider-secret"},
+    ).review_context_pack(make_pack(), Path("."))
+
+    assert (
+        transport.calls[0].url == "https://llm-example.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/chat/completions"
+    )
+
+
 @pytest.mark.parametrize(
     ("provider_name", "key_env", "model", "effort", "reasoning_fields"),
     [
@@ -816,6 +996,59 @@ def test_generic_compatible_provider_uses_env_endpoint_headers_and_allowlist_in_
     assert call.url == "https://llm-gateway.example/v1/chat/completions"
     assert call.headers["Authorization"] == "Bearer company-secret"
     assert call.headers["X-Project"] == "apex-ray"
+
+
+def test_generic_compatible_provider_uses_normalized_idn_host_for_ci_allowlist() -> None:
+    transport = StubTransport(success_response())
+    config = LLMConfig(
+        provider=LLMProviderName.OPENAI_COMPATIBLE,
+        model="company-reviewer",
+        api=LLMAPIConfig(
+            protocol=LLMAPIProtocol.OPENAI_CHAT,
+            structured_output=LLMStructuredOutput.JSON_OBJECT,
+            base_url_env="COMPANY_LLM_URL",
+            api_key_env="COMPANY_LLM_KEY",
+            allowed_hosts_env="COMPANY_LLM_ALLOWED_HOSTS",
+        ),
+    )
+
+    provider(
+        config,
+        transport,
+        {
+            "CI": "true",
+            "COMPANY_LLM_URL": "https://例え.テスト/v1",
+            "COMPANY_LLM_KEY": "company-secret",
+            "COMPANY_LLM_ALLOWED_HOSTS": "xn--r8jz45g.xn--zckzah",
+        },
+    ).review_context_pack(make_pack(), Path("."))
+
+    assert len(transport.calls) == 1
+
+
+def test_generic_compatible_provider_preserves_local_loopback_endpoint() -> None:
+    transport = StubTransport(success_response())
+    config = LLMConfig(
+        provider=LLMProviderName.OPENAI_COMPATIBLE,
+        model="local-model",
+        api=LLMAPIConfig(
+            protocol=LLMAPIProtocol.OPENAI_CHAT,
+            structured_output=LLMStructuredOutput.JSON_OBJECT,
+            base_url_env="LOCAL_LLM_URL",
+            api_key_env="LOCAL_LLM_KEY",
+        ),
+    )
+
+    provider(
+        config,
+        transport,
+        {
+            "LOCAL_LLM_URL": "http://127.0.0.1:11434/v1",
+            "LOCAL_LLM_KEY": "local-secret",
+        },
+    ).review_context_pack(make_pack(), Path("."))
+
+    assert transport.calls[0].url == "http://127.0.0.1:11434/v1/chat/completions"
 
 
 def test_generic_provider_can_use_native_anthropic_protocol() -> None:
@@ -1021,7 +1254,7 @@ def test_quota_error_is_terminal_and_classified_separately() -> None:
     assert len(transport.calls) == 1
 
 
-def test_timeout_retries_but_completed_malformed_response_does_not() -> None:
+def test_timeout_retries_but_malformed_transport_or_response_does_not() -> None:
     timeout_transport = StubTransport(
         JSONTransportError("request timed out", kind="timeout"),
         success_response(),
@@ -1043,6 +1276,16 @@ def test_timeout_retries_but_completed_malformed_response_does_not() -> None:
 
     assert len(timeout_transport.calls) == 2
 
+    malformed_url_transport = StubTransport(
+        JSONTransportError("API endpoint must use HTTPS.", kind="malformed"),
+        success_response(),
+    )
+    with pytest.raises(LLMProviderError) as caught:
+        provider(config, malformed_url_transport, {"KEY": "secret"}).review_context_pack(make_pack(), Path("."))
+
+    assert caught.value.category == "malformed"
+    assert len(malformed_url_transport.calls) == 1
+
     malformed_transport = StubTransport(
         JSONHTTPResponse(
             status_code=200,
@@ -1057,6 +1300,32 @@ def test_timeout_retries_but_completed_malformed_response_does_not() -> None:
     assert caught.value.category == "malformed"
     assert classify_llm_provider_error(caught.value) == "failed_malformed"
     assert len(malformed_transport.calls) == 1
+
+
+def test_malformed_endpoint_configuration_is_terminal_before_transport() -> None:
+    transport = StubTransport(success_response())
+    config = LLMConfig(
+        provider=LLMProviderName.OPENAI_COMPATIBLE,
+        model="model",
+        api=LLMAPIConfig(
+            protocol=LLMAPIProtocol.OPENAI_CHAT,
+            structured_output=LLMStructuredOutput.JSON_OBJECT,
+            base_url_env="ENDPOINT",
+            api_key_env="KEY",
+            max_retries=2,
+        ),
+    )
+
+    with pytest.raises(LLMProviderError) as caught:
+        provider(
+            config,
+            transport,
+            {"ENDPOINT": "https://gateway.example/v1 bad", "KEY": "secret"},
+        )
+
+    assert caught.value.category == "malformed"
+    assert classify_llm_provider_error(caught.value) == "failed_malformed"
+    assert transport.calls == []
 
 
 def test_refusal_and_truncation_are_explicit_terminal_errors() -> None:

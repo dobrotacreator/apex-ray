@@ -43,8 +43,11 @@ test("source file index captures imports, exports, receivers, heritage, aliases,
     repo,
     absPath,
     relPath,
+    dev: 1,
+    ino: 2,
     size: Buffer.byteLength(text),
     mtimeMs: 123,
+    ctimeMs: 124,
     text,
   });
 
