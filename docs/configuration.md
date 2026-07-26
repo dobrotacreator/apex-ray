@@ -69,6 +69,7 @@ review:
       max_stdout_findings: 10
       stdout_format: agent
       auto_followup_p0: true
+      auto_followup_p0_max_pack_reviews: 16
       progress: auto
       progress_interval_seconds: 5
 ```
@@ -256,6 +257,7 @@ review:
       max_deep_packs: 10
       max_input_tokens: 120000
       verify: true
+      required: true
 
     - id: finance
       name: Financial risk reviewer
@@ -273,6 +275,11 @@ packs. `review_depth` is:
   selected packs receive the compact shallow pass;
 - `deep`: only the deep selection is run;
 - `shallow`: all selected packs receive the compact pass.
+
+Set `required: true` when that specialist must finish every selected
+reviewer-pack assignment for the coverage quality gate to pass. Unfinished
+assignments for an optional reviewer remain visible in reviewer coverage and
+continuation todos, but are warnings rather than blocking debt.
 
 Run every enabled reviewer by default, or select one or more explicitly:
 
@@ -335,14 +342,15 @@ review:
 `retention: null` to disable pruning. Newly generated configurations explicitly
 use `compression: auto`, which stores artifacts at
 or above the threshold as deterministic `.gz` files and records encoding and
-sizes in `manifest.json`; `none` and `gzip` force either behavior. Older
+sizes in the versioned `manifest.json`; `none` and `gzip` force either behavior. Older
 configurations that omit `compression` retain the legacy uncompressed behavior. Small
 archives remain directly readable.
 
 Report archives may contain source snippets, findings, file paths, and
 provider metadata; keep generated reports ignored unless the team
 intentionally curates a specific artifact. Manifest source paths are stored
-relative to the repository where possible.
+relative to the repository where possible. External sources use opaque IDs,
+and same-named artifacts are stored under distinct filenames.
 
 ## Pre-Push Gate
 
@@ -356,6 +364,16 @@ Default behavior:
 - block on failed LLM coverage quality gate;
 - block on `critical` partial coverage;
 - print live progress to stderr and a compact, agent-readable summary to stdout.
+
+When `auto_followup_p0` is enabled, the gate can make one deep continuation
+pass over residual P0 work. `auto_followup_p0_max_pack_reviews` limits primary
+reviewer-pack assignments in that pass (the default is `16`), including when
+several reviewers match the same context pack. Globally unreviewed P0 work and
+deferred assignments for reviewers marked `required: true` remain blocking
+coverage debt. Deferred optional-specialist assignments remain visible as
+warnings and continuation todos. This bounds API or subscription use without
+hiding unfinished work. Provider retries, fallbacks, and finding verification
+can add requests beyond this primary-review cap.
 
 Set `review.gates.pre_push.enabled: false` in local config to skip the hook gate. Prefer local config for personal cost/model/provider differences instead of editing the shared hook command.
 
@@ -427,7 +445,19 @@ Incremental retry is fail-closed:
 - previous verified blocking findings keep blocking until the resolution verifier returns `resolved`;
 - `still_present` and `uncertain` resolution results keep blocking;
 - critical carried coverage debt is not cleared by a delta-only run;
+- a continuation command emitted by the gate updates the same pre-push JSON
+  report; the next eligible retry validates that report and resumes bounded P0
+  coverage instead of permanently OR-ing stale debt;
+- when commits were added while carried coverage was being resumed, the gate
+  preserves the earlier retry HEAD and asks for one more run so the new delta
+  cannot bypass review;
+- a missing or mismatched coverage-debt report falls back to a full
+  `review.base...HEAD` review while retaining prior blocking findings;
 - missing state, missing previous HEAD, merge-base changes, or config/rule/memory/model/prompt/gate-policy changes fall back to a full `review.base...HEAD` review.
+
+Except for the coverage-debt recovery case above, a full fallback is a new
+authoritative review for its target and configuration and replaces the prior
+incremental state.
 
 ## Config Validation
 

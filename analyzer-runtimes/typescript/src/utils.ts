@@ -71,10 +71,14 @@ export function readUtf8(filePath: string): string | null {
 }
 
 export function scriptKindForPath(filePath: string): ts.ScriptKind {
-  if (/\.tsx$/.test(filePath)) return ts.ScriptKind.TSX;
-  if (/\.jsx$/.test(filePath)) return ts.ScriptKind.JSX;
-  if (/\.js$/.test(filePath)) return ts.ScriptKind.JS;
+  if (/\.tsx$/i.test(filePath)) return ts.ScriptKind.TSX;
+  if (/\.jsx$/i.test(filePath)) return ts.ScriptKind.JSX;
+  if (/\.[cm]?js$/i.test(filePath)) return ts.ScriptKind.JS;
   return ts.ScriptKind.TS;
+}
+
+export function isDeclarationFileName(filePath: string): boolean {
+  return /\.d\.(?:ts|mts|cts)$/i.test(normalizeRelPath(filePath));
 }
 
 export function isRecord(value: unknown): value is Record<string, unknown> {

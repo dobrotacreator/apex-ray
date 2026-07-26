@@ -128,3 +128,33 @@ test("repo index builder rejects manifest paths outside the repository", () => {
     fs.rmSync(repo, { recursive: true, force: true });
   }
 });
+
+test("repo inventory rejects manifest symlinks that resolve outside the repository", () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "apex-ray-ts-index-manifest-symlink-"));
+  const outsideRoot = fs.mkdtempSync(path.join(os.tmpdir(), "apex-ray-ts-index-manifest-outside-"));
+  try {
+    writeFile(outsideRoot, "outside.d.ts", "declare const outsideSecret: string;\n");
+    fs.mkdirSync(path.join(repo, "src"), { recursive: true });
+    fs.symlinkSync(path.join(outsideRoot, "outside.d.ts"), path.join(repo, "src", "outside.d.ts"));
+    const manifestPath = path.join(repo, "typescript-files.json");
+    fs.writeFileSync(
+      manifestPath,
+      JSON.stringify({ version: 1, files: ["src/outside.d.ts"] }),
+      "utf8",
+    );
+    const args = parseArgs([
+      "--repo",
+      repo,
+      "--changed",
+      "src/cart.ts",
+      "--file-manifest",
+      manifestPath,
+      "--no-index-cache",
+    ]);
+
+    assert.throws(() => buildRepoIndex(args), /outside the repository/);
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
+    fs.rmSync(outsideRoot, { recursive: true, force: true });
+  }
+});

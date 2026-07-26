@@ -21,7 +21,7 @@ from apex_ray.models import (
 )
 from apex_ray.reviewers import effective_reviewers
 
-STATE_SCHEMA_VERSION = "pre-push-state/v1"
+STATE_SCHEMA_VERSION = "pre-push-state/v2"
 
 
 class CarriedFinding(ApexModel):

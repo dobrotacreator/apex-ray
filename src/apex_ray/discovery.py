@@ -15,6 +15,8 @@ LANGUAGE_EXTENSIONS = {
     ".cjs": "javascript",
     ".ts": "typescript",
     ".tsx": "typescript",
+    ".mts": "typescript",
+    ".cts": "typescript",
     ".go": "go",
     ".rs": "rust",
     ".java": "java",
@@ -42,6 +44,14 @@ DISCOVERY_IGNORED_DIRS = {
     "out",
     "coverage",
     "sim-results",
+}
+VITE_CONFIG_NAMES = {
+    "vite.config.js",
+    "vite.config.mjs",
+    "vite.config.cjs",
+    "vite.config.ts",
+    "vite.config.mts",
+    "vite.config.cts",
 }
 
 
@@ -189,7 +199,7 @@ def _detect_frameworks(root: Path) -> set[str]:
     filenames = {path.name for path in root.iterdir()} if root.exists() else set()
     if "next.config.js" in filenames or "next.config.mjs" in filenames or "next.config.ts" in filenames:
         frameworks.add("nextjs")
-    if "vite.config.js" in filenames or "vite.config.ts" in filenames:
+    if filenames & VITE_CONFIG_NAMES:
         frameworks.add("vite")
     if "manage.py" in filenames:
         frameworks.add("django")

@@ -3,8 +3,11 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
+from http.client import HTTPException, HTTPMessage, IncompleteRead
+from io import BytesIO
 from pathlib import Path
 from typing import cast
+from urllib.error import HTTPError, URLError
 from urllib.request import Request
 
 import pytest
@@ -105,6 +108,46 @@ class StubOpener:
         return self.response
 
 
+class StubHTTPErrorBody(BytesIO):
+    def __init__(
+        self,
+        body: bytes = b'{"error":{"message":"unavailable"}}',
+        *,
+        read_error: Exception | None = None,
+        close_error: Exception | None = None,
+    ) -> None:
+        super().__init__(body)
+        self.read_error = read_error
+        self.close_error = close_error
+
+    def read(self, n: int | None = -1) -> bytes:
+        if self.read_error is not None:
+            raise self.read_error
+        return super().read(n)
+
+    def close(self) -> None:
+        if self.close_error is not None:
+            error = self.close_error
+            self.close_error = None
+            super().close()
+            raise error
+        super().close()
+
+
+class StubHTTPErrorOpener:
+    def __init__(self, body: StubHTTPErrorBody) -> None:
+        self.body = body
+
+    def open(self, request: Request, timeout: float) -> StubHTTPHandle:
+        raise HTTPError(
+            request.full_url,
+            503,
+            "Service Unavailable",
+            HTTPMessage(),
+            self.body,
+        )
+
+
 def make_pack() -> ContextPack:
     return ContextPack(id="src/cart.ts#calculate:1", file="src/cart.ts", changed_lines=[(4, 5)])
 
@@ -183,7 +226,10 @@ def test_stdlib_transport_serializes_json_and_disables_redirects(
 
     response = UrllibJSONTransport().request(
         url="https://api.example/v1/review",
-        headers={"Authorization": "Bearer secret"},
+        headers={
+            "Authorization": "Bearer secret",
+            "Accept-Encoding": "gzip",
+        },
         payload={"model": "model", "input": "review"},
         timeout_seconds=7,
         use_system_proxy=False,
@@ -192,6 +238,7 @@ def test_stdlib_transport_serializes_json_and_disables_redirects(
     assert response.data == {"ok": True}
     assert opener.request is not None
     assert json.loads(cast(bytes, opener.request.data)) == {"model": "model", "input": "review"}
+    assert opener.request.get_header("Accept-encoding") == "identity"
     assert opener.timeout == 7
     assert {type(handler).__name__ for handler in installed_handlers} == {
         "ProxyHandler",
@@ -202,7 +249,7 @@ def test_stdlib_transport_serializes_json_and_disables_redirects(
 def test_stdlib_transport_keeps_http_status_for_non_json_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    opener = StubOpener(StubHTTPHandle(b"upstream unavailable", status=503))
+    opener = StubHTTPErrorOpener(StubHTTPErrorBody(b"upstream unavailable"))
     monkeypatch.setattr(http_module, "build_opener", lambda *handlers: opener)
 
     response = UrllibJSONTransport().request(
@@ -215,6 +262,157 @@ def test_stdlib_transport_keeps_http_status_for_non_json_error(
 
     assert response.status_code == 503
     assert response.data == {}
+
+
+@pytest.mark.parametrize(
+    ("read_error", "expected_kind"),
+    [
+        pytest.param(TimeoutError("body stalled"), "timeout", id="timeout-error"),
+        pytest.param(
+            URLError(TimeoutError("socket stalled")),
+            "timeout",
+            id="wrapped-socket-timeout",
+        ),
+        pytest.param(URLError("TLS failure"), "network", id="url-error"),
+        pytest.param(OSError("connection reset"), "network", id="os-error"),
+        pytest.param(HTTPException("invalid HTTP framing"), "network", id="http-error"),
+        pytest.param(IncompleteRead(b'{"partial":'), "network", id="incomplete-read"),
+    ],
+)
+def test_stdlib_transport_normalizes_http_error_body_read_failures(
+    monkeypatch: pytest.MonkeyPatch,
+    read_error: Exception,
+    expected_kind: str,
+) -> None:
+    opener = StubHTTPErrorOpener(StubHTTPErrorBody(read_error=read_error))
+    monkeypatch.setattr(http_module, "build_opener", lambda *handlers: opener)
+
+    with pytest.raises(JSONTransportError) as caught:
+        UrllibJSONTransport().request(
+            url="https://api.example/v1/review",
+            headers={},
+            payload={},
+            timeout_seconds=7,
+            use_system_proxy=False,
+        )
+
+    assert caught.value.kind == expected_kind
+
+
+def test_stdlib_transport_normalizes_http_error_body_close_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    opener = StubHTTPErrorOpener(StubHTTPErrorBody(close_error=OSError("close failed")))
+    monkeypatch.setattr(http_module, "build_opener", lambda *handlers: opener)
+
+    with pytest.raises(JSONTransportError) as caught:
+        UrllibJSONTransport().request(
+            url="https://api.example/v1/review",
+            headers={},
+            payload={},
+            timeout_seconds=7,
+            use_system_proxy=False,
+        )
+
+    assert caught.value.kind == "network"
+
+
+def test_api_provider_retries_oversized_http_503_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(http_module, "_MAX_RESPONSE_BYTES", 128)
+    first_opener = StubHTTPErrorOpener(StubHTTPErrorBody(b"x" * 129))
+    second_opener = StubOpener(
+        StubHTTPHandle(
+            json.dumps(responses_success_response().data).encode("utf-8"),
+        )
+    )
+    openers = iter([first_opener, second_opener])
+    monkeypatch.setattr(http_module, "build_opener", lambda *handlers: next(openers))
+    config = LLMConfig(
+        provider=LLMProviderName.OPENAI_API,
+        model="gpt-5.6",
+        api=LLMAPIConfig(max_retries=1, retry_backoff_seconds=0.001),
+    )
+    api_provider = APILLMProvider(
+        config,
+        transport=UrllibJSONTransport(),
+        environment={"OPENAI_API_KEY": "secret"},
+        sleep_fn=lambda _seconds: None,
+        random_fn=lambda: 1.0,
+    )
+
+    result = api_provider.review_context_pack(make_pack(), Path("."))
+
+    assert result == []
+    assert second_opener.request is not None
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param(b"1" * 10_000, id="integer-digit-limit"),
+        pytest.param(b"[" * 500_000 + b"0" + b"]" * 500_000, id="recursion-limit"),
+    ],
+)
+def test_stdlib_transport_normalizes_pathological_success_json(
+    monkeypatch: pytest.MonkeyPatch,
+    body: bytes,
+) -> None:
+    monkeypatch.setattr(
+        http_module,
+        "build_opener",
+        lambda *handlers: StubOpener(StubHTTPHandle(body)),
+    )
+
+    with pytest.raises(JSONTransportError) as caught:
+        UrllibJSONTransport().request(
+            url="https://api.example/v1/review",
+            headers={},
+            payload={},
+            timeout_seconds=7,
+            use_system_proxy=False,
+        )
+
+    assert caught.value.kind == "malformed"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param(b"1" * 10_000, id="integer-digit-limit"),
+        pytest.param(b"[" * 500_000 + b"0" + b"]" * 500_000, id="recursion-limit"),
+    ],
+)
+def test_api_provider_retries_pathological_http_503_json(
+    monkeypatch: pytest.MonkeyPatch,
+    body: bytes,
+) -> None:
+    first_opener = StubHTTPErrorOpener(StubHTTPErrorBody(body))
+    second_opener = StubOpener(
+        StubHTTPHandle(
+            json.dumps(responses_success_response().data).encode("utf-8"),
+        )
+    )
+    openers = iter([first_opener, second_opener])
+    monkeypatch.setattr(http_module, "build_opener", lambda *handlers: next(openers))
+    config = LLMConfig(
+        provider=LLMProviderName.OPENAI_API,
+        model="gpt-5.6",
+        api=LLMAPIConfig(max_retries=1, retry_backoff_seconds=0.001),
+    )
+    api_provider = APILLMProvider(
+        config,
+        transport=UrllibJSONTransport(),
+        environment={"OPENAI_API_KEY": "secret"},
+        sleep_fn=lambda _seconds: None,
+        random_fn=lambda: 1.0,
+    )
+
+    result = api_provider.review_context_pack(make_pack(), Path("."))
+
+    assert result == []
+    assert second_opener.request is not None
 
 
 def test_openai_responses_request_and_usage_are_exact() -> None:

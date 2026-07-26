@@ -412,6 +412,9 @@ class IncrementalPrePushRetryConfig(StrictApexModel):
     fallback_on_uncertain_resolution: Literal["block"] = "block"
 
 
+DEFAULT_AUTO_FOLLOWUP_P0_MAX_PACK_REVIEWS = 16
+
+
 class PrePushGateConfig(StrictApexModel):
     enabled: bool = True
     min_finding_severity: FindingSeverity | None = FindingSeverity.HIGH
@@ -421,6 +424,10 @@ class PrePushGateConfig(StrictApexModel):
     max_stdout_findings: int = Field(default=10, ge=0)
     stdout_format: Literal["agent", "compact"] = "agent"
     auto_followup_p0: bool = True
+    auto_followup_p0_max_pack_reviews: int = Field(
+        default=DEFAULT_AUTO_FOLLOWUP_P0_MAX_PACK_REVIEWS,
+        gt=0,
+    )
     progress: ProgressMode = ProgressMode.AUTO
     progress_interval_seconds: float = Field(default=5.0, ge=0.0)
     incremental_retry: IncrementalPrePushRetryConfig = Field(default_factory=IncrementalPrePushRetryConfig)

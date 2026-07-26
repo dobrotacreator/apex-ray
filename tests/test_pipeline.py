@@ -829,6 +829,160 @@ def test_continue_review_retries_required_reviewer_debt_even_when_pack_was_revie
     assert continued.llm_coverage.quality_gate_status != "fail"
 
 
+def test_continue_review_caps_reviewer_pack_assignments_fairly(
+    tmp_path: Path,
+) -> None:
+    packs = [
+        ContextPack(
+            id=f"src/payment-{index}.ts#settle:1",
+            file=f"src/payment-{index}.ts",
+            file_kind=FileKind.SOURCE,
+            risk_signals=[
+                RiskSignal(
+                    kind="financial",
+                    severity=RiskSeverity.CRITICAL,
+                    reason="Settlement behavior changed.",
+                    file=f"src/payment-{index}.ts",
+                )
+            ],
+        )
+        for index in range(3)
+    ]
+    config = ReviewConfig(
+        reviewers=[
+            ReviewerConfig(id="security", focus="Authorization.", verify=False),
+            ReviewerConfig(id="finance", focus="Financial correctness.", required=True, verify=False),
+        ]
+    )
+    config.llm.enabled = True
+    config.llm.provider = LLMProviderName.FAKE
+    config.llm.cache_enabled = False
+    initial = build_report(
+        ProjectProfile(root=str(tmp_path), is_git_repo=True),
+        config,
+        DiffSummary(
+            target_mode=TargetMode.PATCH,
+            stats=DiffStats(files_changed=3),
+            files=[
+                ChangedFile(
+                    old_path=pack.file,
+                    new_path=pack.file,
+                    file_kind=FileKind.SOURCE,
+                )
+                for pack in packs
+            ],
+        ),
+        context_packs=packs,
+    )
+
+    continued, selected = continue_review_from_report(
+        initial,
+        repo_root=tmp_path,
+        residual_priorities={"p0"},
+        max_pack_reviews=3,
+        provider=FakeLLMProvider([]),
+    )
+
+    primary_runs = [run for run in continued.llm_runs if run.kind in {"review", "review_shallow"}]
+    assert [(run.reviewer_id, run.context_pack_id) for run in primary_runs] == [
+        ("security", packs[0].id),
+        ("finance", packs[0].id),
+        ("finance", packs[1].id),
+    ]
+    assert [pack.id for pack in selected] == [packs[0].id, packs[1].id]
+    assert continued.llm_coverage.partial_severity == "critical"
+    assert {(todo.reviewer_id, todo.context_pack_id) for todo in continued.llm_coverage.coverage_todos}.issuperset(
+        {
+            ("security", packs[1].id),
+            ("security", packs[2].id),
+            ("finance", packs[2].id),
+        }
+    )
+
+
+def test_continue_review_cap_allocation_is_independent_of_reviewer_order(
+    tmp_path: Path,
+) -> None:
+    finance_pack = ContextPack(
+        id="src/payments/ledger.ts#post:1",
+        file="src/payments/ledger.ts",
+        risk_signals=[
+            RiskSignal(
+                kind="financial",
+                severity=RiskSeverity.CRITICAL,
+                reason="Ledger mutation changed.",
+                file="src/payments/ledger.ts",
+            )
+        ],
+    )
+    security_pack = ContextPack(
+        id="src/auth/session.ts#authorize:1",
+        file="src/auth/session.ts",
+        risk_signals=[
+            RiskSignal(
+                kind="security",
+                severity=RiskSeverity.CRITICAL,
+                reason="Authorization behavior changed.",
+                file="src/auth/session.ts",
+            )
+        ],
+    )
+    packs = [security_pack, finance_pack]
+    changed_files = [ChangedFile(old_path=pack.file, new_path=pack.file, file_kind=FileKind.SOURCE) for pack in packs]
+
+    def capped_assignment(config: ReviewConfig, reviewer_ids: list[str]) -> list[tuple[str | None, str]]:
+        config.llm.enabled = True
+        config.llm.provider = LLMProviderName.FAKE
+        config.llm.cache_enabled = False
+        initial = build_report(
+            ProjectProfile(root=str(tmp_path), is_git_repo=True),
+            config,
+            DiffSummary(
+                target_mode=TargetMode.PATCH,
+                stats=DiffStats(files_changed=2),
+                files=changed_files,
+            ),
+            context_packs=packs,
+        )
+        continued, _selected = continue_review_from_report(
+            initial,
+            repo_root=tmp_path,
+            residual_priorities={"p0"},
+            max_pack_reviews=1,
+            reviewer_ids=reviewer_ids,
+            provider=FakeLLMProvider([]),
+        )
+        return [
+            (run.reviewer_id, run.context_pack_id)
+            for run in continued.llm_runs
+            if run.kind in {"review", "review_shallow"}
+        ]
+
+    security = ReviewerConfig(
+        id="security",
+        paths=["src/auth/**"],
+        required=True,
+        verify=False,
+    )
+    finance = ReviewerConfig(
+        id="finance",
+        paths=["src/payments/**"],
+        required=True,
+        verify=False,
+    )
+
+    forward = capped_assignment(
+        ReviewConfig(reviewers=[security, finance]),
+        ["security", "finance"],
+    )
+    reversed_order = capped_assignment(
+        ReviewConfig(reviewers=[finance, security]),
+        ["finance", "security"],
+    )
+
+    assert forward == reversed_order == [("finance", finance_pack.id)]
+
+
 def test_continue_review_clean_retry_supersedes_failed_verifier_run(
     tmp_path: Path,
 ) -> None:

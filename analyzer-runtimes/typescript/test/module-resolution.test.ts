@@ -42,6 +42,40 @@ test("module resolution expands relative imports and tsconfig path aliases", () 
       path.join(repo, "src/shared.ts"),
     );
     assertIncludesPath(
+      moduleSpecifierCandidatePaths("../modern.mjs", importerPath, repo, null),
+      path.join(repo, "src/modern.mts"),
+    );
+    assertIncludesPath(
+      moduleSpecifierCandidatePaths("../legacy.cjs", importerPath, repo, null),
+      path.join(repo, "src/legacy.cts"),
+    );
+    assertIncludesPath(
+      moduleSpecifierCandidatePaths("../browser", importerPath, repo, null),
+      path.join(repo, "src/browser.mjs"),
+    );
+    assertIncludesPath(
+      moduleSpecifierCandidatePaths("../worker", importerPath, repo, null),
+      path.join(repo, "src/worker.cjs"),
+    );
+    assert.equal(
+      moduleSpecifierCandidatePaths("../shared.js", importerPath, repo, null).includes(
+        path.join(repo, "src/shared.mts"),
+      ),
+      false,
+    );
+    assert.equal(
+      moduleSpecifierCandidatePaths("../modern.mjs", importerPath, repo, null).includes(
+        path.join(repo, "src/modern.cts"),
+      ),
+      false,
+    );
+    assert.equal(
+      moduleSpecifierCandidatePaths("../legacy.cjs", importerPath, repo, null).includes(
+        path.join(repo, "src/legacy.ts"),
+      ),
+      false,
+    );
+    assertIncludesPath(
       moduleSpecifierCandidatePaths("@app/shared", importerPath, repo, null),
       path.join(repo, "src/shared.ts"),
     );

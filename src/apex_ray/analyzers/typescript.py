@@ -25,7 +25,7 @@ from apex_ray.risk import risk_signal_score
 from .common import AnalyzerError, _collapse_ranges
 
 TS_JS_LANGUAGES = {"typescript", "javascript"}
-TS_JS_INDEX_SUFFIXES = {".js", ".jsx", ".ts", ".tsx"}
+TS_JS_INDEX_SUFFIXES = {".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts"}
 
 
 def has_ts_js_changes(files: list[ChangedFile]) -> bool:
@@ -224,15 +224,42 @@ def _write_typescript_file_manifest(
     project_files: list[Path] | None = None,
 ) -> None:
     inventory = project_files if project_files is not None else list_project_files(repo_root, ignored_patterns)
-    files = sorted(
-        path.as_posix()
-        for path in inventory
-        if path.suffix.lower() in TS_JS_INDEX_SUFFIXES and not path.name.lower().endswith(".d.ts")
-    )
-    manifest_path.write_text(
-        json.dumps({"version": 1, "files": files}, separators=(",", ":")),
-        encoding="utf-8",
-    )
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=manifest_path.parent,
+            prefix=f".{manifest_path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as temporary_file:
+            temporary_path = Path(temporary_file.name)
+            temporary_file.write('{"version":1,"files":[')
+            first_path = True
+            for path in _ordered_typescript_inventory(inventory):
+                if path.suffix.lower() not in TS_JS_INDEX_SUFFIXES:
+                    continue
+                if not first_path:
+                    temporary_file.write(",")
+                temporary_file.write(json.dumps(path.as_posix()))
+                first_path = False
+            temporary_file.write("]}")
+        temporary_path.replace(manifest_path)
+    except BaseException:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+        raise
+
+
+def _ordered_typescript_inventory(inventory: list[Path]) -> list[Path]:
+    previous_path: str | None = None
+    for path in inventory:
+        normalized = path.as_posix()
+        if previous_path is not None and normalized < previous_path:
+            return sorted(inventory, key=lambda candidate: candidate.as_posix())
+        previous_path = normalized
+    return inventory
 
 
 def _run_analyzer_process(

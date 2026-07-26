@@ -83,6 +83,7 @@ def default_config_text(base: str = DEFAULT_BASE_BRANCH) -> str:
       max_stdout_findings: 10
       stdout_format: agent
       auto_followup_p0: true
+      auto_followup_p0_max_pack_reviews: 16
       progress: auto
       progress_interval_seconds: 5
 """

@@ -9,6 +9,26 @@ import type { PackageInfo, RepoIndex, TsConfigPathAliases } from "./types.js";
 import { isRecord, isSameOrInsideRepo, normalizeRelPath, uniquePaths } from "./utils.js";
 
 const pathAliasCache = new Map<string, TsConfigPathAliases | null>();
+// TypeScript substitutes extensions within these families during module
+// resolution; mixing the ESM and CommonJS families creates false references.
+const STANDARD_SOURCE_EXTENSIONS = [".ts", ".tsx", ".d.ts", ".js", ".jsx"];
+const ESM_SOURCE_EXTENSIONS = [".mts", ".d.mts", ".mjs"];
+const COMMONJS_SOURCE_EXTENSIONS = [".cts", ".d.cts", ".cjs"];
+const EXTENSIONLESS_SOURCE_EXTENSIONS = [
+  ...STANDARD_SOURCE_EXTENSIONS,
+  ...ESM_SOURCE_EXTENSIONS,
+  ...COMMONJS_SOURCE_EXTENSIONS,
+];
+const SOURCE_EXTENSION_SUBSTITUTIONS = new Map<string, string[]>([
+  [".js", STANDARD_SOURCE_EXTENSIONS],
+  [".jsx", STANDARD_SOURCE_EXTENSIONS],
+  [".ts", STANDARD_SOURCE_EXTENSIONS],
+  [".tsx", STANDARD_SOURCE_EXTENSIONS],
+  [".mjs", ESM_SOURCE_EXTENSIONS],
+  [".mts", ESM_SOURCE_EXTENSIONS],
+  [".cjs", COMMONJS_SOURCE_EXTENSIONS],
+  [".cts", COMMONJS_SOURCE_EXTENSIONS],
+]);
 
 export function isModuleSpecifierRelatedToPath(
   specifier: string,
@@ -225,14 +245,14 @@ function sourceCandidatePaths(basePath: string): string[] {
   add(basePath);
   if (ext) {
     const withoutExt = basePath.slice(0, -ext.length);
-    for (const sourceExt of [".ts", ".tsx", ".js", ".jsx"]) {
+    for (const sourceExt of SOURCE_EXTENSION_SUBSTITUTIONS.get(ext.toLowerCase()) ?? []) {
       add(`${withoutExt}${sourceExt}`);
     }
   } else {
-    for (const sourceExt of [".ts", ".tsx", ".js", ".jsx"]) {
+    for (const sourceExt of EXTENSIONLESS_SOURCE_EXTENSIONS) {
       add(`${basePath}${sourceExt}`);
     }
-    for (const sourceExt of [".ts", ".tsx", ".js", ".jsx"]) {
+    for (const sourceExt of EXTENSIONLESS_SOURCE_EXTENSIONS) {
       add(path.join(basePath, `index${sourceExt}`));
     }
   }

@@ -30,6 +30,38 @@ def test_discovery_prunes_large_generated_and_worktree_directories(tmp_path: Pat
     assert profile.ignored_patterns == ["**/generated/**"]
 
 
+def test_discovery_detects_modern_javascript_and_typescript_module_extensions(tmp_path: Path) -> None:
+    (tmp_path / "src").mkdir()
+    for filename in (
+        "browser.mjs",
+        "worker.cjs",
+        "service.mts",
+        "config.cts",
+        "public-api.d.mts",
+        "legacy-api.d.cts",
+    ):
+        (tmp_path / "src" / filename).write_text("export {};\n", encoding="utf-8")
+
+    profile = discover_project(tmp_path)
+
+    assert profile.detected_languages == ["javascript", "typescript"]
+
+
+@pytest.mark.parametrize(
+    "config_name",
+    ["vite.config.mjs", "vite.config.cjs", "vite.config.mts", "vite.config.cts"],
+)
+def test_discovery_detects_vite_from_modern_config_extensions(
+    tmp_path: Path,
+    config_name: str,
+) -> None:
+    (tmp_path / config_name).write_text("export default {};\n", encoding="utf-8")
+
+    profile = discover_project(tmp_path)
+
+    assert "vite" in profile.framework_hints
+
+
 def test_discovery_uses_git_inventory_with_untracked_files(tmp_path: Path) -> None:
     subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True, text=True)
     subprocess.run(["git", "config", "user.email", "apex@example.test"], cwd=tmp_path, check=True)

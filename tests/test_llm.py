@@ -112,7 +112,7 @@ def make_python_pack() -> ContextPack:
     )
 
 
-def make_unknown_language_pack(file: str = "src/module.mts") -> ContextPack:
+def make_unknown_language_pack(file: str = "src/types.pyi") -> ContextPack:
     return ContextPack(
         id=f"{file}#changed:1",
         file=file,
@@ -2463,7 +2463,15 @@ def test_shallow_review_prompt_is_language_neutral_and_python_aware() -> None:
     assert "FastAPI/Pydantic/SQLAlchemy/Alembic" in prompt
 
 
-@pytest.mark.parametrize("file", ["src/module.mts", "src/module.cts", "src/types.pyi"])
+@pytest.mark.parametrize("file", ["src/module.mts", "src/module.cts"])
+def test_review_prompt_uses_typescript_guidance_for_modern_module_suffixes(file: str) -> None:
+    prompt = build_review_prompt(make_unknown_language_pack(file))
+
+    assert "Language hint: TypeScript/JavaScript." in prompt
+    assert "Language hint: unknown." not in prompt
+
+
+@pytest.mark.parametrize("file", ["src/types.pyi", "src/module.lua"])
 def test_review_prompt_uses_unknown_guidance_for_unclassified_suffixes(file: str) -> None:
     prompt = build_review_prompt(make_unknown_language_pack(file))
 

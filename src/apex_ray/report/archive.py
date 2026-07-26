@@ -1,12 +1,17 @@
 import gzip
+import hashlib
 import json
+import re
 import shutil
+import unicodedata
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
 from apex_ray.models import ReportsConfig
+
+_RUN_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 
 
 @dataclass(frozen=True)
@@ -26,28 +31,38 @@ def archive_report_artifacts(
     if not config.archive or not artifacts:
         return None
 
-    archive_root = _resolve_archive_root(root, config.archive_dir)
+    archive_root = _resolve_archive_root(root, config.archive_dir).resolve(strict=False)
     timestamp = _archive_timestamp(created_at or datetime.now(UTC))
-    archive_id = f"{timestamp}-{run_id or uuid.uuid4().hex[:8]}"
+    run_component = _validate_run_id(run_id) if run_id is not None else uuid.uuid4().hex[:8]
+    archive_id = f"{timestamp}-{run_component}"
     run_dir = _unique_run_dir(archive_root, archive_id)
+    try:
+        run_dir.resolve(strict=False).relative_to(archive_root)
+    except ValueError as exc:
+        raise ValueError("run_id must keep the archive directory inside archive_root") from exc
     run_dir.mkdir(parents=True)
 
     written: list[dict[str, str | int]] = []
+    used_names = {_artifact_name_key("manifest.json")}
     for artifact in artifacts:
         content = artifact.content.encode("utf-8")
         compress = config.compression == "gzip" or (
             config.compression == "auto" and len(content) >= config.compression_min_bytes
         )
-        artifact_name = f"{artifact.path.name}.gz" if compress else artifact.path.name
+        artifact_name = _unique_artifact_name(artifact.path.name, compress=compress, used_names=used_names)
+        used_names.add(_artifact_name_key(artifact_name))
         artifact_path = run_dir / artifact_name
         if compress:
             artifact_path.write_bytes(gzip.compress(content, compresslevel=6, mtime=0))
         else:
             artifact_path.write_bytes(content)
+        source_path, source_scope, source_id = _manifest_source(root, artifact.path)
         written.append(
             {
                 "file": artifact_path.name,
-                "source_path": _manifest_source_path(root, artifact.path),
+                "source_path": source_path,
+                "source_scope": source_scope,
+                "source_id": source_id,
                 "encoding": "gzip" if compress else "identity",
                 "original_bytes": len(content),
                 "stored_bytes": artifact_path.stat().st_size,
@@ -55,6 +70,7 @@ def archive_report_artifacts(
         )
 
     manifest = {
+        "schema_version": "archive-manifest/v2",
         "archive_id": run_dir.name,
         "created_at": datetime.now(UTC).isoformat(),
         "files": written,
@@ -71,12 +87,44 @@ def _resolve_archive_root(root: Path, archive_dir: str) -> Path:
     return root / configured
 
 
-def _manifest_source_path(root: Path, source_path: Path) -> str:
+def _validate_run_id(run_id: str) -> str:
+    if not _RUN_ID_PATTERN.fullmatch(run_id):
+        raise ValueError(
+            "run_id must be 1-64 ASCII letters, digits, dots, underscores, or hyphens "
+            "and must start with a letter or digit"
+        )
+    return run_id
+
+
+def _manifest_source(root: Path, source_path: Path) -> tuple[str, str, str]:
     absolute = source_path.resolve(strict=False)
     try:
-        return absolute.relative_to(root.resolve(strict=False)).as_posix()
+        relative = absolute.relative_to(root.resolve(strict=False)).as_posix()
+        return relative, "repository", f"repository:{relative}"
     except ValueError:
-        return source_path.name
+        digest = hashlib.sha256(absolute.as_posix().encode("utf-8")).hexdigest()[:20]
+        return source_path.name, "external", f"external:{digest}"
+
+
+def _unique_artifact_name(
+    source_name: str,
+    *,
+    compress: bool,
+    used_names: set[str],
+) -> str:
+    suffixes = "".join(Path(source_name).suffixes)
+    stem = source_name[: -len(suffixes)] if suffixes else source_name
+    gzip_suffix = ".gz" if compress else ""
+    candidate = f"{source_name}{gzip_suffix}"
+    index = 2
+    while _artifact_name_key(candidate) in used_names:
+        candidate = f"{stem}-{index}{suffixes}{gzip_suffix}"
+        index += 1
+    return candidate
+
+
+def _artifact_name_key(name: str) -> str:
+    return unicodedata.normalize("NFC", name).casefold()
 
 
 def _archive_timestamp(value: datetime) -> str:

@@ -1,8 +1,8 @@
 from pathlib import Path
 
-from apex_ray.cli.gate import _resolve_incremental_carried_findings
-from apex_ray.gate_retry import CarriedFinding, config_fingerprint, relevant_files_for_finding
-from apex_ray.gates import evaluate_pre_push_gate, render_pre_push_gate_stdout
+from apex_ray.cli.gate import _combine_incremental_decision, _resolve_incremental_carried_findings
+from apex_ray.gate_retry import CarriedFinding, CoverageDebt, config_fingerprint, relevant_files_for_finding
+from apex_ray.gates import PrePushGateDecision, evaluate_pre_push_gate, render_pre_push_gate_stdout
 from apex_ray.models import (
     ChangedFile,
     ContextPack,
@@ -81,6 +81,33 @@ def test_incremental_retry_fingerprint_includes_effective_reviewer_config() -> N
     )
 
     assert original_hash != changed_hash
+
+
+def test_incremental_decision_deduplicates_current_and_carried_finding() -> None:
+    finding = Finding(
+        title="Missing tenant predicate",
+        severity=FindingSeverity.HIGH,
+        confidence=FindingConfidence.HIGH,
+        file="src/orders.ts",
+        failure_mode="The lookup can cross tenant boundaries.",
+        evidence="The same concrete issue remains in the current report.",
+        suggested_fix="Restore tenant scoping.",
+        suggested_test="Add a cross-tenant lookup regression test.",
+    )
+    current = PrePushGateDecision(
+        blocked=True,
+        reasons=["Blocking findings: 1 >= high"],
+        blocking_findings=[finding],
+    )
+
+    combined = _combine_incremental_decision(
+        current,
+        [CarriedFinding(finding=finding)],
+        CoverageDebt(),
+    )
+
+    assert combined.blocking_findings == [finding]
+    assert combined.reasons == current.reasons
 
 
 def test_pre_push_gate_stdout_explains_provider_failures_without_findings(tmp_path: Path) -> None:

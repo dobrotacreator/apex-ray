@@ -760,8 +760,12 @@ def continue_command_for_pack(
     pack_id: str,
     report_path: str = "<report.json>",
     reviewer_id: str | None = None,
+    *,
+    json_output_path: str | None = None,
 ) -> str:
     command = f"apex-ray review --continue-from {quote(report_path)} --only-pack {quote(pack_id)} --llm"
     if reviewer_id is not None:
         command += f" --reviewer {quote(reviewer_id)}"
+    if json_output_path is not None:
+        command += f" --json {quote(json_output_path)}"
     return command

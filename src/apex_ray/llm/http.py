@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import json
-import socket
 from collections.abc import Mapping
 from dataclasses import dataclass
+from http.client import HTTPException
 from typing import Literal, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
@@ -68,10 +68,12 @@ class UrllibJSONTransport:
         timeout_seconds: float,
         use_system_proxy: bool,
     ) -> JSONHTTPResponse:
+        request_headers = {name: value for name, value in headers.items() if name.lower() != "accept-encoding"}
+        request_headers["Accept-Encoding"] = "identity"
         request = Request(
             url,
             data=json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode(),
-            headers=dict(headers),
+            headers=request_headers,
             method="POST",
         )
         try:
@@ -79,19 +81,19 @@ class UrllibJSONTransport:
                 opener = build_opener(_NoRedirectHandler())
             else:
                 opener = build_opener(ProxyHandler({}), _NoRedirectHandler())
-            response = opener.open(request, timeout=timeout_seconds)
+            try:
+                response = opener.open(request, timeout=timeout_seconds)
+            except HTTPError as exc:
+                response = exc
             with response:
                 return _response_from_handle(response)
-        except HTTPError as exc:
-            with exc:
-                return _response_from_handle(exc)
         except TimeoutError as exc:
             raise JSONTransportError("API request timed out.", kind="timeout") from exc
         except URLError as exc:
-            if isinstance(exc.reason, (TimeoutError, socket.timeout)):
+            if isinstance(exc.reason, TimeoutError):
                 raise JSONTransportError("API request timed out.", kind="timeout") from exc
             raise JSONTransportError("API request failed at the network boundary.", kind="network") from exc
-        except OSError as exc:
+        except (OSError, HTTPException) as exc:
             raise JSONTransportError("API request failed at the network boundary.", kind="network") from exc
 
 
@@ -110,10 +112,12 @@ def _response_from_handle(response: _ResponseHandle) -> JSONHTTPResponse:
     )
     raw = response.read(_MAX_RESPONSE_BYTES + 1)
     if len(raw) > _MAX_RESPONSE_BYTES:
+        if not 200 <= status < 300:
+            return JSONHTTPResponse(status_code=status, headers=headers, data={})
         raise JSONTransportError("API response exceeded the maximum supported size.", kind="malformed")
     try:
         data = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+    except (ValueError, RecursionError) as exc:
         if not 200 <= status < 300:
             return JSONHTTPResponse(status_code=status, headers=headers, data={})
         raise JSONTransportError("API response was not valid UTF-8 JSON.", kind="malformed") from exc

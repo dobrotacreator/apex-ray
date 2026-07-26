@@ -11,7 +11,7 @@ import {
   collectTypeAliasIndex,
 } from "./semantic-file.js";
 import type { RepoFileIndexEntry } from "../types.js";
-import { normalizeRelPath, scriptKindForPath } from "../utils.js";
+import { isDeclarationFileName, normalizeRelPath, scriptKindForPath } from "../utils.js";
 
 interface SourceFileIndexInput {
   repo: string;
@@ -24,7 +24,7 @@ interface SourceFileIndexInput {
 
 export function isAnalyzableSourceFile(filePath: string): boolean {
   const normalized = normalizeRelPath(filePath);
-  return /\.(ts|tsx|js|jsx)$/.test(normalized) && !/\.d\.ts$/.test(normalized);
+  return /\.(?:[cm]?[jt]s|[jt]sx)$/i.test(normalized) && !isDeclarationFileName(normalized);
 }
 
 export function indexSourceFile(input: SourceFileIndexInput): RepoFileIndexEntry {

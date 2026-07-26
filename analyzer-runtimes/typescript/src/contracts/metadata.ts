@@ -7,7 +7,12 @@ import { isDeclarationInsideTarget } from "../declaration-utils.js";
 import { addReference } from "../references/merge.js";
 import { referenceForNode } from "../references/utils.js";
 import { metadataNodesForTarget } from "./targets.js";
-import type { CollectedSymbol, MetadataKeyIdentity, Reference } from "../types.js";
+import type {
+  CollectedSymbol,
+  MetadataKeyIdentity,
+  Reference,
+  SourceFilePredicate,
+} from "../types.js";
 import { isInsideRepo } from "../utils.js";
 
 export function collectDecoratorMetadataKeyConsumerContracts(
@@ -18,13 +23,18 @@ export function collectDecoratorMetadataKeyConsumerContracts(
   target: CollectedSymbol,
   repo: string,
   limit: number,
+  sourceAllowed: SourceFilePredicate = () => true,
 ): void {
   const keys = metadataKeysForTargetDecorators(checker, target);
   if (keys.length === 0) return;
 
   for (const source of program.getSourceFiles()) {
     if (refs.length >= limit) return;
-    if (source.isDeclarationFile || !isInsideRepo(repo, source.fileName)) continue;
+    if (
+      source.isDeclarationFile ||
+      !isInsideRepo(repo, source.fileName) ||
+      !sourceAllowed(source)
+    ) continue;
     visit(source);
   }
 

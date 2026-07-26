@@ -17,6 +17,7 @@ export const REFERENCE_COLLECTION_LIMIT = REFERENCE_LIMIT * 2;
 export const CLASS_HERITAGE_CONTRACT_DEPTH_LIMIT = 4;
 export const CONTRACT_DEPENDENCY_DEPTH_LIMIT = 3;
 export const FOCUSED_PROGRAM_CHANGED_FILE_THRESHOLD = 40;
+export const FOCUSED_PROGRAM_DECLARATION_ROOT_LIMIT = 128;
 export const REFLECTOR_METADATA_METHOD_NAMES = new Set(["get", "getAll", "getAllAndMerge", "getAllAndOverride"]);
 export const REPO_INDEX_CACHE_VERSION = 20;
 export const REPO_INDEX_CACHE_FILE = `typescript-repo-index-v${REPO_INDEX_CACHE_VERSION}.json`;

@@ -87,8 +87,17 @@ apex-ray review \
 Continue with automatic P0 follow-up after a first pass:
 
 ```bash
-apex-ray review --base main --llm --auto-followup
+apex-ray review \
+  --base main \
+  --llm \
+  --auto-followup \
+  --auto-followup-max-pack-reviews 16
 ```
+
+The automatic pass is capped by reviewer-pack assignment, so a context pack
+matched by two specialist reviewers consumes two assignments. Explicit
+`--continue-from` commands remain available when you intentionally want to
+process more residual work.
 
 ## Pre-Push Gate
 
@@ -102,13 +111,25 @@ Default gate behavior:
 - blocks on `critical` partial coverage;
 - prints live progress to stderr and a compact blocking summary to stdout.
 
+The default automatic P0 follow-up is limited to 16 primary reviewer-pack
+assignments. Globally unreviewed P0 work and unfinished assignments for
+reviewers marked `required: true` remain critical coverage debt and block the
+gate. Optional-specialist debt remains visible as a warning. Retries, provider
+fallbacks, and finding verification may add requests.
+
 Run it manually before relying on hook behavior:
 
 ```bash
 apex-ray gate pre-push
 ```
 
-If repeated push attempts review the same packs, Apex Ray uses the LLM response cache and analyzer caches where available to reduce repeated work.
+If a bounded pass leaves blocking P0 debt, the next eligible incremental
+attempt resumes the validated pre-push report for another bounded pass. The
+printed continuation commands also write back to that report, so a completed
+manual continuation clears the carried debt. If commits were added in the
+meantime, Apex Ray requires one additional gate run to review that pending
+delta. Response and analyzer caches reduce repeated work throughout this
+process.
 
 ### Local False Positives
 

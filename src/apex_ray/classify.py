@@ -44,6 +44,19 @@ DEPENDENCY_CONFIG_NAMES = {
 CONFIG_EXTENSIONS = {".json", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf"}
 DOC_EXTENSIONS = {".md", ".mdx", ".rst", ".txt", ".adoc"}
 SCHEMA_NAMES = {"schema.sql", "schema.prisma", "openapi.yaml", "openapi.yml", "swagger.yaml", "swagger.yml"}
+GENERATED_TS_JS_SUFFIXES = (
+    ".generated.ts",
+    ".generated.tsx",
+    ".generated.mts",
+    ".generated.cts",
+    ".generated.js",
+    ".generated.jsx",
+    ".generated.mjs",
+    ".generated.cjs",
+    ".generated.d.ts",
+    ".generated.d.mts",
+    ".generated.d.cts",
+)
 
 RISK_KEYWORDS: dict[str, tuple[RiskSeverity, tuple[str, ...], str]] = {
     "auth": (
@@ -172,7 +185,9 @@ def detect_file_kind(path: str) -> FileKind:
         return FileKind.LOCKFILE
     if "vendor" in parts or "vendors" in parts:
         return FileKind.VENDORED
-    if _contains_part(normalized, ("generated", "__generated__", "dist", "build")) or name.endswith(".generated.ts"):
+    if _contains_part(normalized, ("generated", "__generated__", "dist", "build")) or name.endswith(
+        GENERATED_TS_JS_SUFFIXES
+    ):
         return FileKind.GENERATED
     if name in DEPENDENCY_CONFIG_NAMES:
         return FileKind.DEPENDENCY

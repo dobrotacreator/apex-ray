@@ -1,11 +1,13 @@
 import json
 import shutil
 import subprocess
+import tracemalloc
 from pathlib import Path
 
 import pytest
 
 import apex_ray.analyzers.go as go_analyzer_module
+import apex_ray.analyzers.typescript as typescript_analyzer_module
 from apex_ray.analyzers import (
     PYTHON_DELETED_SYMBOL_RE,
     PYTHON_LANGUAGES,
@@ -108,6 +110,7 @@ def test_typescript_analyzer_passes_internal_time_budget(
     seen_command: list[str] | None = None
 
     monkeypatch.setattr("apex_ray.analyzers.typescript.shutil.which", lambda name: "/usr/bin/node")
+    monkeypatch.setattr("apex_ray.analyzers.typescript.time.monotonic", lambda: 100.0)
 
     def fake_run(
         args: list[str],
@@ -151,7 +154,15 @@ def test_typescript_analyzer_manifest_respects_project_ignore(
     (tmp_path / "vendor").mkdir()
     (tmp_path / "generated").mkdir()
     (tmp_path / "src" / "cart.ts").write_text("export const cart = true;\n", encoding="utf-8")
+    (tmp_path / "src" / "globals.d.ts").write_text(
+        "declare function charge(accountId: string): Promise<void>;\n",
+        encoding="utf-8",
+    )
     (tmp_path / "vendor" / "generated.ts").write_text("export const generated = true;\n", encoding="utf-8")
+    (tmp_path / "vendor" / "generated.d.ts").write_text(
+        "declare function generated(): void;\n",
+        encoding="utf-8",
+    )
     (tmp_path / "generated" / "client.ts").write_text("export const client = true;\n", encoding="utf-8")
     changed = ChangedFile(
         old_path="src/cart.ts",
@@ -194,7 +205,93 @@ def test_typescript_analyzer_manifest_respects_project_ignore(
     assert result is not None
     assert seen_manifest is not None
     assert seen_manifest["version"] == 1
-    assert seen_manifest["files"] == ["analyze.js", "src/cart.ts"]
+    assert sorted(seen_manifest["files"]) == ["analyze.js", "src/cart.ts", "src/globals.d.ts"]
+
+
+def test_typescript_manifest_includes_modern_module_and_declaration_extensions(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "files.json"
+    project_files = [
+        Path("src/browser.mjs"),
+        Path("src/worker.cjs"),
+        Path("src/service.mts"),
+        Path("src/config.cts"),
+        Path("src/public-api.d.mts"),
+        Path("src/legacy-api.d.cts"),
+        Path("README.md"),
+    ]
+
+    typescript_analyzer_module._write_typescript_file_manifest(
+        tmp_path,
+        manifest_path,
+        project_files=project_files,
+    )
+
+    assert json.loads(manifest_path.read_text(encoding="utf-8")) == {
+        "version": 1,
+        "files": sorted(path.as_posix() for path in project_files[:-1]),
+    }
+
+
+def test_typescript_manifest_streams_large_inventory_with_bounded_memory(tmp_path: Path) -> None:
+    inventory = [
+        Path(f"packages/workspace-{index:05d}/src/component-{index:05d}-with-a-long-name.tsx")
+        for index in range(30_000)
+    ]
+    # Project discovery has already classified these paths before it passes the
+    # inventory to the analyzer. Exclude pathlib's one-time suffix cache from
+    # the writer-specific allocation measurement.
+    for path in inventory:
+        _ = path.suffix
+    manifest_path = tmp_path / "files.json"
+
+    tracemalloc.start()
+    try:
+        typescript_analyzer_module._write_typescript_file_manifest(
+            tmp_path,
+            manifest_path,
+            project_files=inventory,
+        )
+        _current, peak_bytes = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    output_bytes = manifest_path.stat().st_size
+    assert peak_bytes < output_bytes * 4
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert len(payload["files"]) == len(inventory)
+
+
+def test_typescript_manifest_atomic_write_preserves_existing_target_on_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest_path = tmp_path / "files.json"
+    manifest_path.write_text('{"version":1,"files":["original.ts"]}', encoding="utf-8")
+    original_dumps = json.dumps
+    encoded_paths = 0
+
+    def fail_during_stream(value: object, *args: object, **kwargs: object) -> str:
+        nonlocal encoded_paths
+        if isinstance(value, str):
+            encoded_paths += 1
+            if encoded_paths == 2:
+                raise OSError("simulated manifest write failure")
+        return original_dumps(value, *args, **kwargs)
+
+    monkeypatch.setattr(typescript_analyzer_module.json, "dumps", fail_during_stream)
+
+    with pytest.raises(OSError, match="simulated manifest write failure"):
+        typescript_analyzer_module._write_typescript_file_manifest(
+            tmp_path,
+            manifest_path,
+            project_files=[Path("src/first.ts"), Path("src/second.ts")],
+        )
+
+    assert json.loads(manifest_path.read_text(encoding="utf-8")) == {
+        "version": 1,
+        "files": ["original.ts"],
+    }
+    assert list(tmp_path.glob(".files.json.*.tmp")) == []
 
 
 def test_run_analyzers_reuses_supplied_project_inventory_for_typescript_manifest(
@@ -238,14 +335,16 @@ def test_run_analyzers_reuses_supplied_project_inventory_for_typescript_manifest
 
     monkeypatch.setattr("apex_ray.analyzers.typescript._run_analyzer_process", fake_run)
 
+    project_files = [Path("src/helper.ts"), Path("src/cart.ts"), Path("README.md")]
     result = run_analyzers(
         tmp_path,
         [changed],
         AnalyzerConfig(script_path=str(script)),
-        project_files=[Path("src/cart.ts"), Path("src/helper.ts"), Path("README.md")],
+        project_files=project_files,
     )
 
     assert result.results
+    assert project_files == [Path("src/helper.ts"), Path("src/cart.ts"), Path("README.md")]
     assert seen_manifest == {
         "version": 1,
         "files": ["src/cart.ts", "src/helper.ts"],

@@ -587,6 +587,7 @@ def _set_report_continue_commands(report: ReviewReport, report_json_path: Path) 
             todo.context_pack_id,
             str(report_json_path),
             todo.reviewer_id,
+            json_output_path=str(report_json_path),
         )
 
 

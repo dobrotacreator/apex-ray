@@ -28,7 +28,7 @@ import type {
   FileAnalysis,
   Reference,
 } from "./types.js";
-import { rangesOverlap } from "./utils.js";
+import { normalizeRelPath, rangesOverlap } from "./utils.js";
 import {
   collectProviderTokenInjectionReferences,
   collectWorkspaceDiReferences,
@@ -36,6 +36,7 @@ import {
   collectWorkspaceMemberReferences,
   filterInvalidWorkspaceMemberReferences,
 } from "./workspace/references.js";
+import { loadRepoFileInventory, type RepoFileInventory } from "./workspace/inventory.js";
 
 export type {
   AnalyzerResult,
@@ -51,8 +52,21 @@ export type {
 export function analyze(args: Args): AnalyzerResult {
   const warnings: string[] = [];
   const budgetExhausted = analysisBudget(args.analysisTimeBudgetMs);
-  const contextsByFile = createProgramContexts(args, warnings);
-  const repoIndex = buildRepoIndex(args, warnings);
+  const inventory = loadRepoFileInventory(args);
+  const contextsByFile = createProgramContexts(args, warnings, inventory);
+  const repoIndex = buildRepoIndex(args, warnings, inventory);
+  const changedPathKeys = new Set(
+    args.changed.map((fileName) => normalizeRelPath(path.resolve(args.repo, fileName))),
+  );
+  const sourcePermissionCache = new WeakMap<import("typescript").SourceFile, boolean>();
+  const sourceAllowed = (source: import("typescript").SourceFile): boolean => {
+    const cached = sourcePermissionCache.get(source);
+    if (cached !== undefined) return cached;
+    const pathKey = normalizeRelPath(path.resolve(source.fileName));
+    const allowed = inventory.pathKeys.has(pathKey) || changedPathKeys.has(pathKey);
+    sourcePermissionCache.set(source, allowed);
+    return allowed;
+  };
   const syntheticReferenceScanCache = new Map<string, ReferenceScanResult>();
   const failedFileSet = new Set<string>();
   const failedFiles: string[] = [];
@@ -140,7 +154,15 @@ export function analyze(args: Args): AnalyzerResult {
       const cachedReferenceScan = referenceScanCacheKey ? syntheticReferenceScanCache.get(referenceScanCacheKey) : undefined;
       const referenceScan =
         cachedReferenceScan ??
-        collectReferenceScan(program, checker, symbol, args.repo, symbol.analysis.name.includes(":"), budgetExhausted);
+        collectReferenceScan(
+          program,
+          checker,
+          symbol,
+          args.repo,
+          symbol.analysis.name.includes(":"),
+          budgetExhausted,
+          sourceAllowed,
+        );
       if (!referenceScan.completed || budgetExhausted()) {
         markBudgetExhausted(args.changed.slice(changedIndex));
         completedFile = false;
@@ -162,6 +184,12 @@ export function analyze(args: Args): AnalyzerResult {
         REFERENCE_LIMIT,
       );
       symbol.analysis.references = filterInvalidWorkspaceMemberReferences(args.repo, repoIndex, symbol, symbol.analysis.references);
+      symbol.analysis.references = filterReferencesByInventory(
+        symbol.analysis.references,
+        args.repo,
+        inventory,
+        changedPathKeys,
+      );
       if (budgetExhausted()) {
         markBudgetExhausted(args.changed.slice(changedIndex));
         completedFile = false;
@@ -170,7 +198,14 @@ export function analyze(args: Args): AnalyzerResult {
 
       let calleeReferences: Reference[];
       try {
-        calleeReferences = collectCallees(checker, symbol, args.repo, REFERENCE_COLLECTION_LIMIT, budgetExhausted);
+        calleeReferences = collectCallees(
+          checker,
+          symbol,
+          args.repo,
+          REFERENCE_COLLECTION_LIMIT,
+          budgetExhausted,
+          sourceAllowed,
+        );
       } catch (error) {
         if (error instanceof ReferenceScanCancelled) {
           markBudgetExhausted(args.changed.slice(changedIndex));
@@ -180,6 +215,12 @@ export function analyze(args: Args): AnalyzerResult {
         throw error;
       }
       symbol.analysis.callees = mergeReferences([...calleeReferences, ...referenceScan.consumerImpact.callees], REFERENCE_LIMIT);
+      symbol.analysis.callees = filterReferencesByInventory(
+        symbol.analysis.callees,
+        args.repo,
+        inventory,
+        changedPathKeys,
+      );
       if (budgetExhausted()) {
         markBudgetExhausted(args.changed.slice(changedIndex));
         completedFile = false;
@@ -187,8 +228,21 @@ export function analyze(args: Args): AnalyzerResult {
       }
 
       symbol.analysis.contracts = mergeReferences(
-        collectSchemaContracts(program, checker, symbol, args.repo, REFERENCE_COLLECTION_LIMIT),
+        collectSchemaContracts(
+          program,
+          checker,
+          symbol,
+          args.repo,
+          REFERENCE_COLLECTION_LIMIT,
+          sourceAllowed,
+        ),
         REFERENCE_LIMIT,
+      );
+      symbol.analysis.contracts = filterReferencesByInventory(
+        symbol.analysis.contracts,
+        args.repo,
+        inventory,
+        changedPathKeys,
       );
       if (budgetExhausted()) {
         markBudgetExhausted(args.changed.slice(changedIndex));
@@ -199,6 +253,12 @@ export function analyze(args: Args): AnalyzerResult {
       symbol.analysis.metadata = mergeReferences(
         collectFrameworkMetadata(symbol, args.repo, REFERENCE_COLLECTION_LIMIT),
         REFERENCE_LIMIT,
+      );
+      symbol.analysis.metadata = filterReferencesByInventory(
+        symbol.analysis.metadata,
+        args.repo,
+        inventory,
+        changedPathKeys,
       );
       if (budgetExhausted()) {
         markBudgetExhausted(args.changed.slice(changedIndex));
@@ -254,6 +314,18 @@ interface ReferenceScanResult {
   completed: boolean;
 }
 
+function filterReferencesByInventory(
+  references: Reference[],
+  repo: string,
+  inventory: RepoFileInventory,
+  changedPathKeys: Set<string>,
+): Reference[] {
+  return references.filter((reference) => {
+    const pathKey = normalizeRelPath(path.resolve(repo, reference.file));
+    return inventory.pathKeys.has(pathKey) || changedPathKeys.has(pathKey);
+  });
+}
+
 function collectReferenceScan(
   program: import("typescript").Program,
   checker: import("typescript").TypeChecker,
@@ -261,16 +333,41 @@ function collectReferenceScan(
   repo: string,
   includeConsumerImpact: boolean,
   shouldStop: () => boolean = () => false,
+  sourceAllowed: (source: import("typescript").SourceFile) => boolean = () => true,
 ): ReferenceScanResult {
   try {
-    const directReferences = collectReferences(program, checker, symbol, repo, REFERENCE_COLLECTION_LIMIT, shouldStop);
+    const directReferences = collectReferences(
+      program,
+      checker,
+      symbol,
+      repo,
+      REFERENCE_COLLECTION_LIMIT,
+      shouldStop,
+      sourceAllowed,
+    );
     if (!shouldStop()) {
       directReferences.push(
-        ...collectImplementedMemberUsageReferences(program, checker, symbol, repo, REFERENCE_COLLECTION_LIMIT, shouldStop),
+        ...collectImplementedMemberUsageReferences(
+          program,
+          checker,
+          symbol,
+          repo,
+          REFERENCE_COLLECTION_LIMIT,
+          shouldStop,
+          sourceAllowed,
+        ),
       );
     }
     const consumerImpact = includeConsumerImpact && !shouldStop()
-      ? collectReferenceConsumerImpact(program, checker, symbol, repo, REFERENCE_COLLECTION_LIMIT, shouldStop)
+      ? collectReferenceConsumerImpact(
+          program,
+          checker,
+          symbol,
+          repo,
+          REFERENCE_COLLECTION_LIMIT,
+          shouldStop,
+          sourceAllowed,
+        )
       : { references: [], callees: [] };
     return { directReferences, consumerImpact, completed: !shouldStop() };
   } catch (error) {

@@ -11,6 +11,7 @@ export type SymbolKind =
   | "enum-member"
   | "unknown";
 export type ReferenceKind = "call" | "callee" | "contract" | "import" | "metadata" | "read" | "write" | "type" | "unknown";
+export type SourceFilePredicate = (source: ts.SourceFile) => boolean;
 
 export interface AnalyzerSymbol {
   name: string;

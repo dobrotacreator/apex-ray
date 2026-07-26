@@ -1,9 +1,31 @@
 from pathlib import Path
 
+import pytest
+
 from apex_ray.classify import classify_diff, detect_file_kind, detect_language
 from apex_ray.diff import parse_unified_diff
 from apex_ray.models import FileKind, RiskConfig, RiskRule, RiskSeverity, TargetMode
 from apex_ray.risk import risk_signal_score
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "src/api.generated.ts",
+        "src/api.generated.tsx",
+        "src/api.generated.mts",
+        "src/api.generated.cts",
+        "src/api.generated.js",
+        "src/api.generated.jsx",
+        "src/api.generated.mjs",
+        "src/api.generated.cjs",
+        "src/api.generated.d.ts",
+        "src/api.generated.d.mts",
+        "src/api.generated.d.cts",
+    ],
+)
+def test_detect_file_kind_recognizes_generated_ts_js_extensions(path: str) -> None:
+    assert detect_file_kind(path) == FileKind.GENERATED
 
 
 def test_detect_file_kind() -> None:
@@ -17,6 +39,8 @@ def test_detect_file_kind() -> None:
 
 def test_detect_language() -> None:
     assert detect_language("src/app.ts") == "typescript"
+    assert detect_language("src/app.mts") == "typescript"
+    assert detect_language("src/app.cts") == "typescript"
     assert detect_language("src/app.py") == "python"
     assert detect_language("internal/auth/service.go") == "go"
     assert detect_language("unknown.file") == "unknown"

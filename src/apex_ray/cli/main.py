@@ -33,7 +33,13 @@ from apex_ray.discovery import discover_project
 from apex_ray.invocation import ReviewOverrides, apply_review_overrides
 from apex_ray.llm import LLMProviderError
 from apex_ray.local_data import LOCAL_DATA_TOKEN, LocalDataPathError, resolve_config_path, resolve_runtime_config_paths
-from apex_ray.models import LLMCoverageMode, LLMProviderName, ReviewReport, TargetMode
+from apex_ray.models import (
+    DEFAULT_AUTO_FOLLOWUP_P0_MAX_PACK_REVIEWS,
+    LLMCoverageMode,
+    LLMProviderName,
+    ReviewReport,
+    TargetMode,
+)
 from apex_ray.pipeline import continue_review_from_report, run_review_pipeline
 from apex_ray.report import (
     ReportArtifact,
@@ -293,6 +299,14 @@ def review(
         bool,
         typer.Option("--auto-followup", help="After the first pass, automatically review unreviewed P0 packs."),
     ] = False,
+    auto_followup_max_pack_reviews: Annotated[
+        int,
+        typer.Option(
+            "--auto-followup-max-pack-reviews",
+            min=1,
+            help="Maximum reviewer-pack assignments in the automatic P0 follow-up.",
+        ),
+    ] = DEFAULT_AUTO_FOLLOWUP_P0_MAX_PACK_REVIEWS,
     output: Annotated[Path, typer.Option("--output", help="Markdown report path.")] = Path(
         ".apex-ray/reports/review.md"
     ),
@@ -498,6 +512,7 @@ def review(
                     config=effective_config,
                     residual_priorities={"p0"},
                     only_unreviewed=True,
+                    max_pack_reviews=auto_followup_max_pack_reviews,
                     review_depth="deep",
                     reviewer_ids=reviewer,
                 )
@@ -573,6 +588,7 @@ def _set_continue_commands(report: ReviewReport, json_output: Path) -> None:
             todo.context_pack_id,
             str(json_output),
             todo.reviewer_id,
+            json_output_path=str(json_output),
         )
 
 

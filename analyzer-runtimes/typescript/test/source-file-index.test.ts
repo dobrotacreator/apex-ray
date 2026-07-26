@@ -3,7 +3,10 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
+import ts from "typescript";
+
 import { indexSourceFile, isAnalyzableSourceFile } from "../dist/indexes/source-file.js";
+import { scriptKindForPath } from "../dist/utils.js";
 
 test("source file index captures imports, exports, receivers, heritage, aliases, and DI", () => {
   const repo = path.join(os.tmpdir(), "apex-ray-ts-source-file-index");
@@ -47,6 +50,14 @@ test("source file index captures imports, exports, receivers, heritage, aliases,
 
   assert.equal(isAnalyzableSourceFile(absPath), true);
   assert.equal(isAnalyzableSourceFile(path.join(repo, "src/types.d.ts")), false);
+  for (const extension of [".mjs", ".cjs", ".mts", ".cts"]) {
+    assert.equal(isAnalyzableSourceFile(path.join(repo, `src/module${extension}`)), true);
+  }
+  for (const extension of [".d.mts", ".d.cts"]) {
+    assert.equal(isAnalyzableSourceFile(path.join(repo, `src/types${extension}`)), false);
+  }
+  assert.equal(scriptKindForPath(path.join(repo, "src/module.mjs")), ts.ScriptKind.JS);
+  assert.equal(scriptKindForPath(path.join(repo, "src/module.cjs")), ts.ScriptKind.JS);
   assert.equal(entry.relPath, relPath);
   assert.equal(entry.relLower, relPath);
   assert.equal(entry.size, Buffer.byteLength(text));
