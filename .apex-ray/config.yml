@@ -32,13 +32,47 @@ review:
   llm:
     enabled: true
     provider: codex_cli
-    effort: medium
-    timeout_seconds: 900
-    jobs: 1
+    profiles:
+      cheap:
+        provider: codex_cli
+        model: gpt-5.3-codex-spark
+        effort: xhigh
+      strong:
+        provider: codex_cli
+        model: gpt-5.4
+        effort: medium
+      frontier:
+        provider: codex_cli
+        model: gpt-5.5
+        effort: medium
+    routing:
+      review_profile: cheap
+      verify_profile: strong
+      escalated_review_profile: frontier
+      escalated_verify_profile: frontier
+      escalate_review_when:
+        risk:
+          - auth
+          - shell
+          - persistence
+          - public_api
+          - external_io
+          - migration
+        rule_severity:
+          - high
+          - critical
+        strict_rule: true
+        pack_truncated: true
+      escalate_verify_when:
+        finding_severity:
+          - high
+          - critical
     coverage_mode: balanced
-    max_packs: 64
-    max_deep_packs: 48
-    max_input_tokens: 300000
+    max_packs: 96
+    max_deep_packs: 64
+    max_input_tokens: 450000
+    timeout_seconds: 900
+    jobs: 4
     verify: true
     cache_dir: ${local_data}/cache/llm
   telemetry:
