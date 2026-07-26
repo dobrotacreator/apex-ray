@@ -29,7 +29,7 @@ from apex_ray.config import (
 from apex_ray.config import (
     refresh_agent_artifacts as refresh_project_agent_artifacts,
 )
-from apex_ray.discovery import discover_project
+from apex_ray.discovery import DiscoveryError, discover_project, discover_repo_root
 from apex_ray.invocation import ReviewOverrides, apply_review_overrides
 from apex_ray.llm import LLMProviderError
 from apex_ray.local_data import LOCAL_DATA_TOKEN, LocalDataPathError, resolve_config_path, resolve_runtime_config_paths
@@ -187,13 +187,20 @@ def doctor(
     config: Annotated[Path | None, typer.Option("--config", help="Path to config file.")] = None,
 ) -> None:
     """Check local Apex Ray prerequisites and project discovery."""
-    root = git.repo_root(Path.cwd()) or Path.cwd()
     try:
+        root = discover_repo_root(Path.cwd())
         review_config, config_path = load_config(root, config)
-    except ConfigError as exc:
+    except (ConfigError, DiscoveryError) as exc:
         raise typer.BadParameter(str(exc)) from exc
 
-    project = discover_project(root, ignored_patterns=review_config.ignore)
+    try:
+        project = discover_project(
+            root,
+            ignored_patterns=review_config.ignore,
+            timeout_seconds=review_config.analyzer.timeout_seconds,
+        )
+    except DiscoveryError as exc:
+        raise typer.BadParameter(str(exc)) from exc
     typer.echo("Apex Ray doctor")
     typer.echo(f"- Version: {__version__}")
     typer.echo("- Python runtime: 3.14 required")
@@ -373,10 +380,10 @@ def review(
     ] = None,
 ) -> None:
     """Inspect a diff and write markdown/JSON reports."""
-    root = git.repo_root(Path.cwd()) or Path.cwd()
     try:
+        root = discover_repo_root(Path.cwd())
         review_config, config_path = load_config(root, config)
-    except ConfigError as exc:
+    except (ConfigError, DiscoveryError) as exc:
         raise typer.BadParameter(str(exc)) from exc
 
     explicit_modes = sum(
@@ -518,7 +525,7 @@ def review(
                 )
                 if selected_packs:
                     typer.echo(f"Auto-followup reviewed {len(selected_packs)} residual P0 context pack(s).")
-    except LLMProviderError as exc:
+    except (DiscoveryError, LLMProviderError) as exc:
         raise typer.BadParameter(str(exc)) from exc
     duration_ms = round((time.monotonic() - started_monotonic) * 1000)
 

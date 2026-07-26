@@ -12,6 +12,7 @@ from apex_ray.cli.common import (
     warn_outdated_agent_artifacts,
 )
 from apex_ray.config import ConfigError, load_config
+from apex_ray.discovery import DiscoveryError, discover_repo_root
 from apex_ray.findings import finding_fingerprint
 from apex_ray.gate_retry import (
     CarriedFinding,
@@ -94,10 +95,10 @@ def pre_push(
     ] = None,
 ) -> None:
     """Run the configured pre-push review gate and block on policy failures."""
-    root = git.repo_root(Path.cwd()) or Path.cwd()
     try:
+        root = discover_repo_root(Path.cwd())
         review_config, config_path = load_config(root, config)
-    except ConfigError as exc:
+    except (ConfigError, DiscoveryError) as exc:
         raise typer.BadParameter(str(exc)) from exc
     try:
         review_config = resolve_runtime_config_paths(root, review_config)
@@ -216,7 +217,7 @@ def pre_push(
             )
             if selected_packs:
                 progress.event(f"auto-followup reviewed {len(selected_packs)} residual P0 context pack(s)", force=True)
-    except LLMProviderError as exc:
+    except (DiscoveryError, LLMProviderError) as exc:
         raise typer.BadParameter(str(exc)) from exc
     duration_ms = round((time.monotonic() - started_monotonic) * 1000)
 

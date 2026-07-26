@@ -38,6 +38,15 @@ P0/P1 counts, LLM duration, cache hit/miss counts, failed LLM runs, pack
 statuses, model routes, and pre-push triage counters when a gate run
 suppresses or prunes findings.
 
+Verification metrics distinguish active approved/rejected decisions,
+unresolved attempts, and superseded historical decisions so a provider
+failure is not reported as an effective rejection. The v2 compatibility
+fields `verification_decisions_count` and
+`approved_verification_decisions_count` continue to count full history; use
+`active_verification_decisions_count`,
+`active_approved_verification_decisions_count`, and
+`active_rejected_verification_decisions_count` for current outcomes.
+
 Newly generated configurations explicitly use `path_mode: anonymized`. It omits the repository's absolute
 path, stores artifact paths relative to the repository (or only a basename
 when outside it), and writes a one-way 16-character repository ID so multiple

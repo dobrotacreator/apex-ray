@@ -202,6 +202,111 @@ def test_review_telemetry_counts_canonical_verified_findings_and_reviewer_decisi
     assert entry["verified_findings_count"] == 1
     assert entry["verification_decisions_count"] == 2
     assert entry["approved_verification_decisions_count"] == 2
+    assert entry["active_approved_verification_decisions_count"] == 2
+    assert entry["active_rejected_verification_decisions_count"] == 0
+
+
+def test_review_telemetry_counts_legacy_replaced_decision_as_superseded(
+    tmp_path: Path,
+) -> None:
+    finding = Finding(
+        title="Authorization bypass",
+        severity=FindingSeverity.HIGH,
+        confidence=FindingConfidence.HIGH,
+        file="src/auth.ts",
+        failure_mode="A caller can bypass authorization.",
+        evidence="The changed branch skips the ownership check.",
+        suggested_fix="Check ownership before returning.",
+        suggested_test="Add a cross-account authorization test.",
+    )
+    report = build_report(
+        ProjectProfile(root=str(tmp_path), is_git_repo=True),
+        ReviewConfig(),
+        DiffSummary(target_mode=TargetMode.PATCH),
+        findings=[finding],
+        verifications=[
+            FindingVerification(
+                finding=finding,
+                reviewer_id="security",
+                approved=True,
+                confidence=FindingConfidence.HIGH,
+                reason="The original verifier approved the finding.",
+            ),
+            FindingVerification(
+                finding=finding,
+                reviewer_id="security",
+                approved=False,
+                confidence=FindingConfidence.HIGH,
+                reason="The later verifier rejected the finding.",
+            ),
+        ],
+    )
+    telemetry_path = tmp_path / "review-runs.jsonl"
+
+    append_review_telemetry(
+        report,
+        telemetry_path,
+        source_repo=tmp_path,
+        duration_ms=10,
+    )
+    entry = load_review_telemetry(telemetry_path)[0]
+
+    assert entry["verified_findings_count"] == 0
+    assert entry["verification_decisions_count"] == 2
+    assert entry["approved_verification_decisions_count"] == 1
+    assert entry["active_verification_decisions_count"] == 1
+    assert entry["active_approved_verification_decisions_count"] == 0
+    assert entry["active_rejected_verification_decisions_count"] == 1
+    assert entry["unresolved_verification_decisions_count"] == 0
+    assert entry["superseded_verification_decisions_count"] == 1
+
+
+def test_review_telemetry_counts_failed_verification_as_unresolved(
+    tmp_path: Path,
+) -> None:
+    finding = Finding(
+        title="Authorization bypass",
+        severity=FindingSeverity.HIGH,
+        confidence=FindingConfidence.HIGH,
+        file="src/auth.ts",
+        failure_mode="A caller can bypass authorization.",
+        evidence="The changed branch skips the ownership check.",
+        suggested_fix="Check ownership before returning.",
+        suggested_test="Add a cross-account authorization test.",
+    )
+    report = build_report(
+        ProjectProfile(root=str(tmp_path), is_git_repo=True),
+        ReviewConfig(),
+        DiffSummary(target_mode=TargetMode.PATCH),
+        verifications=[
+            FindingVerification(
+                finding=finding,
+                reviewer_id="security",
+                approved=False,
+                confidence=FindingConfidence.LOW,
+                reason="The verifier was unavailable.",
+                superseded=True,
+                superseded_reason="Verification run did not complete successfully (failed_provider).",
+            )
+        ],
+    )
+    telemetry_path = tmp_path / "review-runs.jsonl"
+
+    append_review_telemetry(
+        report,
+        telemetry_path,
+        source_repo=tmp_path,
+        duration_ms=10,
+    )
+    entry = load_review_telemetry(telemetry_path)[0]
+
+    assert entry["verification_decisions_count"] == 1
+    assert entry["approved_verification_decisions_count"] == 0
+    assert entry["active_verification_decisions_count"] == 0
+    assert entry["active_approved_verification_decisions_count"] == 0
+    assert entry["active_rejected_verification_decisions_count"] == 0
+    assert entry["unresolved_verification_decisions_count"] == 1
+    assert entry["superseded_verification_decisions_count"] == 0
 
 
 def test_review_telemetry_aggregates_reviewer_outcomes_without_source_paths(tmp_path: Path) -> None:
@@ -256,6 +361,48 @@ def test_review_telemetry_aggregates_reviewer_outcomes_without_source_paths(tmp_
         },
     }
     assert str(tmp_path) not in telemetry_path.read_text(encoding="utf-8")
+
+
+def test_review_telemetry_includes_required_reviewer_with_no_runs(
+    tmp_path: Path,
+) -> None:
+    config = ReviewConfig(
+        reviewers=[
+            ReviewerConfig(
+                id="security",
+                required=True,
+                verify=False,
+            )
+        ]
+    )
+    config.llm.enabled = True
+    report = build_report(
+        ProjectProfile(root=str(tmp_path), is_git_repo=True),
+        config,
+        DiffSummary(target_mode=TargetMode.PATCH),
+        context_packs=[
+            ContextPack(
+                id="src/auth.ts#authorize:1",
+                file="src/auth.ts",
+            )
+        ],
+    )
+    telemetry_path = tmp_path / "review-runs.jsonl"
+
+    append_review_telemetry(
+        report,
+        telemetry_path,
+        source_repo=tmp_path,
+        duration_ms=1,
+    )
+    entry = load_review_telemetry(telemetry_path)[0]
+
+    assert entry["reviewers"]["security"] == {
+        "failed_runs": 0,
+        "findings": 0,
+        "runs": 0,
+        "verify_enabled": False,
+    }
 
 
 def test_review_telemetry_can_opt_in_to_full_local_paths(tmp_path: Path) -> None:

@@ -1,3 +1,4 @@
+from apex_ray.gates import evaluate_pre_push_gate
 from apex_ray.models import (
     AnalyzerSymbol,
     ChangedFile,
@@ -125,6 +126,170 @@ def test_render_markdown_explains_project_risk_and_focused_reviewers() -> None:
     assert "## Focused Reviewers" in markdown
     assert "`security` (Security)" in markdown
     assert "`finance` (Finance)" in markdown
+
+
+def test_render_markdown_counts_empty_reviewer_ids_as_general() -> None:
+    pack_id = "src/auth.ts#authorize:1"
+    config = ReviewConfig()
+    config.llm.enabled = True
+    selection = LLMContextSelection(
+        total_context_pack_ids=[pack_id],
+        selected_context_pack_ids=[pack_id],
+        deep_selected_context_pack_ids=[pack_id],
+    )
+    report = build_report(
+        ProjectProfile(root="/repo", is_git_repo=True),
+        config,
+        DiffSummary(target_mode=TargetMode.PATCH),
+        context_packs=[ContextPack(id=pack_id, file="src/auth.ts")],
+        findings=[
+            Finding(
+                title="Authorization bypass",
+                severity=FindingSeverity.HIGH,
+                confidence=FindingConfidence.HIGH,
+                file="src/auth.ts",
+                failure_mode="A request can bypass authorization.",
+                evidence="The changed branch returns before the guard.",
+                suggested_fix="Run the guard first.",
+                suggested_test="Reject an unauthorized request.",
+                context_pack_id=pack_id,
+                reviewer_context_pack_ids={"general": [pack_id]},
+            )
+        ],
+        llm_runs=[
+            LLMRun(
+                provider="fake",
+                reviewer_id="general",
+                context_pack_id=pack_id,
+                status="ok",
+                duration_ms=1,
+                findings_count=1,
+            )
+        ],
+        reviewer_selections={"general": selection},
+    )
+
+    markdown = render_markdown(report)
+
+    assert "`general` (general)" in markdown
+    assert "Deep/shallow selected: `1`/`0`; findings: `1`; failed runs: `0`" in markdown
+
+
+def test_render_markdown_lists_legacy_configured_reviewers_when_selection_data_is_missing() -> None:
+    config = ReviewConfig(
+        reviewers=[
+            ReviewerConfig(
+                id="security",
+                name="Security",
+                focus="Authorization boundaries.",
+            ),
+            ReviewerConfig(
+                id="ux",
+                name="UX",
+                focus="User-facing behavior.",
+            ),
+        ]
+    )
+    report = build_report(
+        ProjectProfile(root="/repo", is_git_repo=True),
+        config,
+        DiffSummary(target_mode=TargetMode.PATCH),
+        reviewer_selections=None,
+    )
+
+    markdown = render_markdown(report)
+
+    assert "`security` (Security) - Authorization boundaries." in markdown
+    assert "`ux` (UX) - User-facing behavior." in markdown
+    assert "selection data was not recorded" in markdown
+    assert "No focused reviewer passes configured." not in markdown
+
+
+def test_render_markdown_filters_configured_reviewers_by_explicit_scope_when_selections_are_missing() -> None:
+    config = ReviewConfig(
+        reviewers=[
+            ReviewerConfig(
+                id="security",
+                name="Security",
+                focus="Authorization boundaries.",
+                required=True,
+            ),
+            ReviewerConfig(
+                id="ux",
+                name="UX",
+                focus="User-facing behavior.",
+            ),
+        ]
+    )
+    report = build_report(
+        ProjectProfile(root="/repo", is_git_repo=True),
+        config,
+        DiffSummary(target_mode=TargetMode.PATCH),
+        reviewer_selections=None,
+        reviewer_scope_ids=["ux"],
+    )
+
+    markdown = render_markdown(report)
+
+    assert "`ux` (UX) - User-facing behavior." in markdown
+    assert "`security`" not in markdown
+    assert [reviewer.reviewer_id for reviewer in report.llm_coverage.reviewers] == ["ux"]
+
+
+def test_render_markdown_includes_missing_required_reviewer_when_other_selection_exists() -> None:
+    pack_id = "src/auth.ts#authorize:1"
+    config = ReviewConfig(
+        reviewers=[
+            ReviewerConfig(
+                id="security",
+                name="Security",
+                required=True,
+                verify=False,
+            ),
+            ReviewerConfig(
+                id="ux",
+                name="UX",
+                verify=False,
+            ),
+        ]
+    )
+    config.llm.enabled = True
+    selection = LLMContextSelection(
+        total_context_pack_ids=[pack_id],
+        selected_context_pack_ids=[pack_id],
+        deep_selected_context_pack_ids=[pack_id],
+    )
+    report = build_report(
+        ProjectProfile(root="/repo", is_git_repo=True),
+        config,
+        DiffSummary(target_mode=TargetMode.PATCH),
+        context_packs=[
+            ContextPack(
+                id=pack_id,
+                file="src/auth.ts",
+                file_kind=FileKind.SOURCE,
+            )
+        ],
+        llm_runs=[
+            LLMRun(
+                provider="fake",
+                reviewer_id="ux",
+                context_pack_id=pack_id,
+                status="ok",
+                duration_ms=1,
+            )
+        ],
+        reviewer_selections={"ux": selection},
+    )
+
+    markdown = render_markdown(report)
+
+    assert "`security` (Security)" in markdown
+    assert "Status: `fail`, required" in markdown
+    assert "Selection data: `missing`" in markdown
+    assert "Required reviewer security did not review" in markdown
+    assert "`ux` (UX)" in markdown
+    assert "Status: `pass`" in markdown
 
 
 def test_render_markdown_preserves_legacy_verifier_counters_and_adds_unique_summary() -> None:
@@ -294,7 +459,7 @@ def test_missing_selections_fail_closed_for_every_required_reviewer_pack() -> No
     assert report.llm_coverage.quality_gate_status == "fail"
 
 
-def test_partial_reviewer_selections_preserve_explicit_reviewer_scope() -> None:
+def test_partial_reviewer_selections_fail_closed_for_missing_required_reviewer() -> None:
     pack_id = "src/auth.ts#authorize:1"
     selection = LLMContextSelection(
         total_context_pack_ids=[pack_id],
@@ -328,8 +493,64 @@ def test_partial_reviewer_selections_preserve_explicit_reviewer_scope() -> None:
     coverage = {reviewer.reviewer_id: reviewer for reviewer in report.llm_coverage.reviewers}
 
     assert coverage["ux"].status == "pass"
-    assert "security" not in coverage
+    assert coverage["security"].status == "fail"
+    assert coverage["security"].matching_context_pack_ids == [pack_id]
+    assert coverage["security"].selected_context_pack_ids == [pack_id]
+    assert coverage["security"].reviewed_context_pack_ids == []
+    assert report.llm_coverage.quality_gate_status == "fail"
+
+
+def test_partial_reviewer_selections_honor_persisted_explicit_scope() -> None:
+    pack_id = "src/auth.ts#authorize:1"
+    selection = LLMContextSelection(
+        total_context_pack_ids=[pack_id],
+        selected_context_pack_ids=[pack_id],
+        deep_selected_context_pack_ids=[pack_id],
+    )
+    config = ReviewConfig(
+        reviewers=[
+            ReviewerConfig(id="security", paths=["src/**"], required=True),
+            ReviewerConfig(id="ux", paths=["src/**"]),
+        ]
+    )
+    config.llm.enabled = True
+    report = build_report(
+        ProjectProfile(root="/repo", is_git_repo=True),
+        config,
+        DiffSummary(target_mode=TargetMode.PATCH),
+        context_packs=[ContextPack(id=pack_id, file="src/auth.ts", file_kind=FileKind.SOURCE)],
+        llm_runs=[
+            LLMRun(
+                provider="openai_api",
+                reviewer_id="ux",
+                context_pack_id=pack_id,
+                status="ok",
+                duration_ms=1,
+            )
+        ],
+        reviewer_selections={"ux": selection},
+        reviewer_scope_ids=["ux"],
+    )
+
+    assert report.reviewer_scope_ids == ["ux"]
+    assert [reviewer.reviewer_id for reviewer in report.llm_coverage.reviewers] == ["ux"]
+    assert report.llm_coverage.reviewers[0].status == "pass"
     assert report.llm_coverage.quality_gate_status == "pass"
+    assert type(report).model_validate_json(report.model_dump_json()).reviewer_scope_ids == ["ux"]
+
+
+def test_legacy_serialized_report_without_reviewer_scope_loads_as_full_scope() -> None:
+    report = build_report(
+        ProjectProfile(root="/repo", is_git_repo=True),
+        ReviewConfig(reviewers=[ReviewerConfig(id="security", required=True)]),
+        DiffSummary(target_mode=TargetMode.PATCH),
+    )
+    payload = report.model_dump(mode="json")
+    payload.pop("reviewer_scope_ids")
+
+    loaded = type(report).model_validate(payload)
+
+    assert loaded.reviewer_scope_ids is None
 
 
 def test_disabled_llm_keeps_configured_required_reviewers_not_applicable() -> None:
@@ -456,10 +677,92 @@ def test_successful_reviewer_retry_clears_prior_review_and_verification_failures
 
     reviewer = report.llm_coverage.reviewers[0]
     assert reviewer.status == "pass"
-    assert reviewer.failed_review_runs == 1
-    assert reviewer.failed_verify_runs == 1
+    assert reviewer.failed_review_runs == 0
+    assert reviewer.failed_verify_runs == 0
     assert report.llm_coverage.quality_gate_status == "pass"
     assert report.llm_coverage.partial_severity == "none"
+
+
+def test_reviewer_usage_excludes_superseded_disabled_verify_and_out_of_scope_runs() -> None:
+    selected_pack_id = "src/auth.ts#authorize:1"
+    outside_pack_id = "src/outside.ts#legacy:1"
+    config = ReviewConfig(
+        reviewers=[
+            ReviewerConfig(
+                id="security",
+                focus="Authorization.",
+                paths=["src/auth.ts"],
+                verify=False,
+            )
+        ]
+    )
+    config.llm.enabled = True
+    selection = LLMContextSelection(
+        total_context_pack_ids=[selected_pack_id],
+        selected_context_pack_ids=[selected_pack_id],
+        deep_selected_context_pack_ids=[selected_pack_id],
+    )
+    report = build_report(
+        ProjectProfile(root="/repo", is_git_repo=True),
+        config,
+        DiffSummary(target_mode=TargetMode.PATCH),
+        context_packs=[
+            ContextPack(id=selected_pack_id, file="src/auth.ts", file_kind=FileKind.SOURCE),
+            ContextPack(id=outside_pack_id, file="src/outside.ts", file_kind=FileKind.SOURCE),
+        ],
+        llm_runs=[
+            LLMRun(
+                provider="openai_api",
+                reviewer_id="security",
+                context_pack_id=selected_pack_id,
+                status="failed_auth",
+                duration_ms=1,
+                estimated_input_tokens=10,
+                actual_total_tokens=10,
+                estimated_cost_usd=0.1,
+            ),
+            LLMRun(
+                provider="openai_api",
+                reviewer_id="security",
+                context_pack_id=selected_pack_id,
+                status="ok",
+                duration_ms=1,
+                estimated_input_tokens=20,
+                actual_total_tokens=20,
+                estimated_cost_usd=0.2,
+            ),
+            LLMRun(
+                kind="verify",
+                provider="openai_api",
+                reviewer_id="security",
+                context_pack_id=selected_pack_id,
+                status="provider_error",
+                duration_ms=1,
+                estimated_input_tokens=40,
+                actual_total_tokens=40,
+                estimated_cost_usd=0.4,
+            ),
+            LLMRun(
+                provider="openai_api",
+                reviewer_id="security",
+                context_pack_id=outside_pack_id,
+                status="ok",
+                duration_ms=1,
+                estimated_input_tokens=80,
+                actual_total_tokens=80,
+                estimated_cost_usd=0.8,
+            ),
+        ],
+        reviewer_selections={"security": selection},
+    )
+
+    reviewer = report.llm_coverage.reviewers[0]
+    assert reviewer.status == "pass"
+    assert reviewer.failed_review_runs == 0
+    assert reviewer.failed_verify_runs == 0
+    assert reviewer.estimated_input_tokens == 20
+    assert reviewer.actual_total_tokens == 20
+    assert reviewer.estimated_cost_usd == 0.2
 
 
 def test_sibling_verifier_failure_is_not_hidden_by_later_success() -> None:
@@ -528,6 +831,176 @@ def test_sibling_verifier_failure_is_not_hidden_by_later_success() -> None:
     assert "--reviewer security" in report.llm_coverage.coverage_todos[0].suggested_command
 
 
+def test_active_decisions_must_cover_every_reported_finding_without_verify_run() -> None:
+    pack_id = "src/auth.ts#authorize:1"
+    config = ReviewConfig(
+        reviewers=[
+            ReviewerConfig(
+                id="security",
+                focus="Authorization.",
+                required=True,
+                verify=True,
+            )
+        ]
+    )
+    config.llm.enabled = True
+    findings = [
+        Finding(
+            title=f"Authorization bypass {index}",
+            severity=FindingSeverity.HIGH,
+            confidence=FindingConfidence.HIGH,
+            file="src/auth.ts",
+            line=10 + (index * 90),
+            failure_mode=f"Authorization path {index} bypasses its tenant guard.",
+            evidence=f"Branch {index} executes before the tenant check.",
+            suggested_fix="Move the branch after the tenant check.",
+            suggested_test=f"Reject unauthorized path {index}.",
+            context_pack_id=pack_id,
+            reviewer_ids=["security"],
+        )
+        for index in range(2)
+    ]
+    selection = LLMContextSelection(
+        total_context_pack_ids=[pack_id],
+        selected_context_pack_ids=[pack_id],
+        deep_selected_context_pack_ids=[pack_id],
+    )
+
+    report = build_report(
+        ProjectProfile(root="/repo", is_git_repo=True),
+        config,
+        DiffSummary(target_mode=TargetMode.PATCH),
+        context_packs=[
+            ContextPack(
+                id=pack_id,
+                file="src/auth.ts",
+                file_kind=FileKind.SOURCE,
+            )
+        ],
+        findings=findings,
+        verifications=[
+            FindingVerification(
+                finding=findings[0],
+                reviewer_id="security",
+                approved=True,
+                confidence=FindingConfidence.HIGH,
+                reason="Only the first finding was verified.",
+            )
+        ],
+        llm_runs=[
+            LLMRun(
+                provider="openai_api",
+                reviewer_id="security",
+                context_pack_id=pack_id,
+                status="ok",
+                duration_ms=1,
+                findings_count=2,
+            )
+        ],
+        llm_selection=selection,
+        reviewer_selections={"security": selection},
+    )
+
+    reviewer = report.llm_coverage.reviewers[0]
+    assert reviewer.status == "fail"
+    assert report.llm_coverage.quality_gate_status == "fail"
+    assert any("unresolved verification subjects" in reason for reason in reviewer.reasons)
+    assert [(todo.context_pack_id, todo.reviewer_id) for todo in report.llm_coverage.coverage_todos] == [
+        (pack_id, "security")
+    ]
+
+
+def test_cross_pack_consolidation_does_not_create_false_verification_debt() -> None:
+    source_pack_id = "src/auth.ts#authorize:1"
+    test_pack_id = "src/auth.test.ts#authorize:1"
+    config = ReviewConfig(
+        reviewers=[
+            ReviewerConfig(
+                id="security",
+                required=True,
+                verify=True,
+            )
+        ]
+    )
+    config.llm.enabled = True
+    finding = Finding(
+        title="Authorization guard can be bypassed",
+        severity=FindingSeverity.HIGH,
+        confidence=FindingConfidence.HIGH,
+        file="src/auth.ts",
+        failure_mode="A transfer path executes before the tenant authorization guard.",
+        evidence="The changed branch returns before tenant ownership is checked.",
+        suggested_fix="Move the branch after the authorization guard.",
+        suggested_test="Reject a transfer for another tenant.",
+        context_pack_id=source_pack_id,
+        reviewer_ids=["security"],
+    )
+    selection = LLMContextSelection(
+        total_context_pack_ids=[source_pack_id, test_pack_id],
+        selected_context_pack_ids=[source_pack_id, test_pack_id],
+        deep_selected_context_pack_ids=[source_pack_id, test_pack_id],
+    )
+    report = build_report(
+        ProjectProfile(root="/repo", is_git_repo=True),
+        config,
+        DiffSummary(target_mode=TargetMode.PATCH),
+        context_packs=[
+            ContextPack(
+                id=source_pack_id,
+                file="src/auth.ts",
+                file_kind=FileKind.SOURCE,
+            ),
+            ContextPack(
+                id=test_pack_id,
+                file="src/auth.test.ts",
+                file_kind=FileKind.TEST,
+            ),
+        ],
+        findings=[finding],
+        verifications=[
+            FindingVerification(
+                finding=finding,
+                reviewer_id="security",
+                approved=True,
+                confidence=FindingConfidence.HIGH,
+                reason="The canonical root cause was verified.",
+            )
+        ],
+        llm_runs=[
+            LLMRun(
+                provider="fake",
+                reviewer_id="security",
+                context_pack_id=source_pack_id,
+                status="ok",
+                duration_ms=1,
+                findings_count=1,
+            ),
+            LLMRun(
+                provider="fake",
+                reviewer_id="security",
+                context_pack_id=test_pack_id,
+                status="ok",
+                duration_ms=1,
+                findings_count=1,
+            ),
+            LLMRun(
+                kind="verify",
+                provider="fake",
+                reviewer_id="security",
+                context_pack_id=source_pack_id,
+                status="ok",
+                duration_ms=1,
+            ),
+        ],
+        llm_selection=selection,
+        reviewer_selections={"security": selection},
+    )
+
+    assert report.llm_coverage.reviewers[0].status == "pass"
+    assert report.llm_coverage.quality_gate_status == "pass"
+    assert report.llm_coverage.coverage_todos == []
+
+
 def test_failed_selected_reviewer_keeps_reviewer_scoped_continuation() -> None:
     pack_id = "src/auth.ts#authorize:1"
     config = ReviewConfig(
@@ -572,9 +1045,17 @@ def test_failed_selected_reviewer_keeps_reviewer_scoped_continuation() -> None:
     )
 
     assert [(todo.context_pack_id, todo.reviewer_id) for todo in report.llm_coverage.coverage_todos] == [
-        (pack_id, "finance")
+        (pack_id, "finance"),
+        (pack_id, "security"),
     ]
-    assert "--reviewer finance" in report.llm_coverage.coverage_todos[0].suggested_command
+    assert all(
+        f"--reviewer {reviewer_id}" in todo.suggested_command
+        for todo, reviewer_id in zip(
+            report.llm_coverage.coverage_todos,
+            ("finance", "security"),
+            strict=True,
+        )
+    )
 
 
 def test_reviewer_verify_override_drives_reported_verification_mode() -> None:
@@ -698,6 +1179,117 @@ def test_legacy_general_pack_cap_does_not_become_required_reviewer_failure() -> 
     assert report.llm_coverage.quality_gate_status == "warn"
     assert report.llm_coverage.partial_severity != "critical"
     assert report.llm_coverage.reviewers[0].required is False
+
+
+def test_unresolved_general_verification_debt_blocks_the_default_quality_gate() -> None:
+    pack_id = "src/auth.ts#authorize:1"
+    config = ReviewConfig()
+    config.llm.enabled = True
+    config.llm.verify = True
+    finding = Finding(
+        title="Authorization bypass",
+        severity=FindingSeverity.HIGH,
+        confidence=FindingConfidence.HIGH,
+        file="src/auth.ts",
+        line=42,
+        failure_mode="A transfer can bypass its tenant guard.",
+        evidence="The changed branch runs before tenant authorization.",
+        suggested_fix="Run the tenant guard before dispatch.",
+        suggested_test="Reject a cross-tenant transfer.",
+        context_pack_id=pack_id,
+    )
+    selection = LLMContextSelection(
+        total_context_pack_ids=[pack_id],
+        selected_context_pack_ids=[pack_id],
+        deep_selected_context_pack_ids=[pack_id],
+    )
+    report = build_report(
+        ProjectProfile(root="/repo", is_git_repo=True),
+        config,
+        DiffSummary(target_mode=TargetMode.PATCH),
+        context_packs=[
+            ContextPack(
+                id=pack_id,
+                file="src/auth.ts",
+                file_kind=FileKind.SOURCE,
+            )
+        ],
+        verifications=[
+            FindingVerification(
+                finding=finding,
+                approved=False,
+                confidence=FindingConfidence.LOW,
+                reason="The verifier was unavailable.",
+                superseded=True,
+                superseded_reason="Verification run did not complete successfully (failed_provider).",
+            )
+        ],
+        llm_runs=[
+            LLMRun(
+                provider="fake",
+                reviewer_id="general",
+                context_pack_id=pack_id,
+                status="ok",
+                duration_ms=1,
+                findings_count=1,
+            ),
+            LLMRun(
+                kind="verify",
+                provider="fake",
+                reviewer_id="general",
+                context_pack_id=pack_id,
+                status="ok",
+                duration_ms=1,
+            ),
+        ],
+        llm_selection=selection,
+        reviewer_selections={"general": selection},
+    )
+
+    assert report.findings == []
+    assert report.llm_coverage.reviewers[0].status == "warn"
+    assert report.llm_coverage.quality_gate_status == "fail"
+    assert report.llm_coverage.partial_severity == "critical"
+    assert "unresolved verification subjects" in " ".join(report.llm_coverage.quality_gate_reasons)
+    assert evaluate_pre_push_gate(report, config.gates.pre_push).blocked is True
+    markdown = render_markdown(report)
+    assert "- Unresolved verification decisions: `1`" in markdown
+    assert "### Unresolved" in markdown
+    assert "Superseded historical decisions" not in markdown
+
+    disabled_config = config.model_copy(deep=True)
+    disabled_config.llm.verify = False
+    disabled = build_report(
+        report.project,
+        disabled_config,
+        report.diff,
+        context_packs=report.context_packs,
+        verifications=report.verifications,
+        llm_runs=report.llm_runs,
+        llm_selection=selection,
+        reviewer_selections={"general": selection},
+    )
+    assert disabled.llm_coverage.reviewers[0].status == "pass"
+    assert disabled.llm_coverage.quality_gate_status == "pass"
+    assert disabled.llm_coverage.partial_severity == "none"
+    assert evaluate_pre_push_gate(disabled, disabled_config.gates.pre_push).blocked is False
+
+    llm_disabled_config = config.model_copy(deep=True)
+    llm_disabled_config.llm.enabled = False
+    llm_disabled = build_report(
+        report.project,
+        llm_disabled_config,
+        report.diff,
+        context_packs=report.context_packs,
+        verifications=report.verifications,
+        llm_runs=report.llm_runs,
+        llm_selection=selection,
+        reviewer_selections={"general": selection},
+    )
+    assert llm_disabled.llm_coverage.reviewers[0].status == "not_applicable"
+    assert llm_disabled.llm_coverage.quality_gate_status == "disabled"
+    assert llm_disabled.llm_coverage.partial_severity == "none"
+    assert evaluate_pre_push_gate(llm_disabled, llm_disabled_config.gates.pre_push).blocked is False
 
 
 def test_render_markdown_summarizes_llm_pack_selection() -> None:

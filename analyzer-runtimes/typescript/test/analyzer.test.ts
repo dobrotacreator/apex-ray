@@ -11,7 +11,10 @@ import ts from "typescript";
 import { analyze } from "../dist/analyzer.js";
 import { parseArgs } from "../dist/cli.js";
 import { repoIndexCachePath } from "../dist/indexes/repo-cache.js";
-import { createProgramContexts } from "../dist/program.js";
+import {
+  createProgramContexts,
+  selectSupplementalDeclarationRoots,
+} from "../dist/program.js";
 import type { AnalyzerResult } from "../dist/types.js";
 import { loadRepoFileInventory } from "../dist/workspace/inventory.js";
 import { writeFile } from "./helpers.js";
@@ -1869,6 +1872,27 @@ test("focused programs cap supplemental ambient declaration roots deterministica
   }
 });
 
+test("supplemental declaration root selection keeps a bounded deterministic top set", () => {
+  const roots = Array.from(
+    { length: 10_000 },
+    (_, index) => `/repo/src/types/ambient-${String(9_999 - index).padStart(4, "0")}.d.ts`,
+  );
+  roots.push("/repo/src/types/globals.d.ts");
+  roots.push("/repo/src/types/ambient-0000.d.ts");
+  const warnings: string[] = [];
+
+  const selected = selectSupplementalDeclarationRoots(roots, [], warnings);
+
+  assert.equal(selected.length, 128);
+  assert.equal(selected[0], "/repo/src/types/globals.d.ts");
+  assert.equal(new Set(selected).size, selected.length);
+  assert.ok(selected.includes("/repo/src/types/ambient-0000.d.ts"));
+  assert.ok(!selected.includes("/repo/src/types/ambient-9999.d.ts"));
+  assert.deepEqual(warnings, [
+    "TypeScript declaration roots capped at 128 of 10001; ambient declaration coverage is partial.",
+  ]);
+});
+
 test("analyzer exposes repo index cache write failures as warnings", () => {
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), "apex-ray-ts-analyzer-cache-warning-"));
   const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "apex-ray-ts-analyzer-cache-warning-home-"));
@@ -1975,6 +1999,49 @@ test("analyzer marks missing changed source files as failed and partial", () => 
           failure.status === "failed" &&
           failure.files.includes("src/missing.ts"),
       ),
+    );
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("manifest producer partial reason preserves changed-file inventory", () => {
+  const repo = fs.mkdtempSync(
+    path.join(os.tmpdir(), "apex-ray-ts-analyzer-producer-partial-"),
+  );
+  try {
+    writeFile(repo, "src/changed.ts", "export const changed = true;\n");
+    const manifestPath = path.join(repo, "files.json");
+    const partialReason =
+      "TypeScript file manifest producer reached a safety limit; repository context is partial.";
+    fs.writeFileSync(
+      manifestPath,
+      JSON.stringify({
+        version: 2,
+        files: [],
+        package_files: [],
+        config_files: [],
+        partial_reason: partialReason,
+      }),
+      "utf8",
+    );
+    const args = parseArgs([
+      "--repo",
+      repo,
+      "--changed",
+      "src/changed.ts",
+      "--file-manifest",
+      manifestPath,
+      "--no-index-cache",
+    ]);
+
+    const inventory = loadRepoFileInventory(args);
+
+    assert.equal(inventory.partial, true);
+    assert.equal(inventory.fingerprint, null);
+    assert.equal(inventory.partialReason, partialReason);
+    assert.ok(
+      inventory.absPaths.includes(path.join(repo, "src", "changed.ts")),
     );
   } finally {
     fs.rmSync(repo, { recursive: true, force: true });

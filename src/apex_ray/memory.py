@@ -6,6 +6,7 @@ from typing import Any, Literal
 import yaml
 from pydantic import ValidationError
 
+from apex_ray.findings import verified_report_findings
 from apex_ray.models import (
     ContextPack,
     Finding,
@@ -197,22 +198,7 @@ def memory_suggestions_from_report(report: ReviewReport, *, include_unverified: 
 
 
 def _verified_report_findings(report: ReviewReport) -> list[Finding]:
-    approved = {
-        _finding_identity(verification.finding) for verification in report.verifications if verification.approved
-    }
-    if not approved:
-        return []
-    return [finding for finding in report.findings if _finding_identity(finding) in approved]
-
-
-def _finding_identity(finding: object) -> tuple[object, ...]:
-    return (
-        getattr(finding, "title", ""),
-        getattr(finding, "file", ""),
-        getattr(finding, "line", None),
-        getattr(finding, "failure_mode", ""),
-        getattr(finding, "evidence", ""),
-    )
+    return verified_report_findings(report.findings, report.verifications)
 
 
 def memory_cards_for_audience(pack: ContextPack, audience: str) -> list[MemoryMatch]:

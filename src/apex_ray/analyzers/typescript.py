@@ -7,9 +7,10 @@ import stat
 import subprocess
 import tempfile
 import time
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import Literal
+from typing import Literal, Protocol
 
 from pydantic import ValidationError
 
@@ -32,6 +33,15 @@ TS_JS_INDEX_SUFFIXES = {".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".
 TS_CONFIG_ROOT_NAMES = {"jsconfig.json", "tsconfig.json"}
 TS_CONFIG_METADATA_SUFFIXES = {".json", ".jsonc"}
 TS_CONFIG_MAX_BYTES = 4 * 1024 * 1024
+# Keep these producer bounds in sync with workspace/inventory.ts. The optional
+# v2 partial_reason marker lets the consumer retain changed-file analysis
+# without mistaking a truncated repository inventory for complete context.
+TS_FILE_MANIFEST_ENTRY_LIMIT = 50_000
+TS_FILE_MANIFEST_BYTE_LIMIT = 16 * 1024 * 1024
+_TS_FILE_MANIFEST_HEADER = b'{"version":2'
+_TS_FILE_MANIFEST_SECTIONS = ("files", "package_files", "config_files")
+_TS_FILE_MANIFEST_PARTIAL_PREFIX = b',"partial_reason":'
+_TS_FILE_MANIFEST_PARTIAL_SUFFIX = "; repository context is partial."
 
 
 @dataclass(frozen=True)
@@ -39,6 +49,18 @@ class _TypescriptPackageConfig:
     directory: str
     tsconfig: str | None
     exports: object
+
+
+@dataclass(frozen=True)
+class _TypescriptManifestPlan:
+    partial_reason: str | None
+    byte_limited: bool
+
+
+class _BinaryManifestStream(Protocol):
+    def write(self, data: bytes, /) -> int: ...
+
+    def tell(self) -> int: ...
 
 
 def has_ts_js_changes(files: list[ChangedFile]) -> bool:
@@ -76,6 +98,9 @@ def run_typescript_analyzer(
         raise AnalyzerError(f"TypeScript analyzer is not built: {script}")
 
     started_at = time.monotonic()
+    shards = list(_shard_changed_files(changed_files, config))
+    total_timeout_seconds = _typescript_total_timeout_seconds(changed_files, shards, config)
+    deadline = started_at + total_timeout_seconds
     with tempfile.TemporaryDirectory(prefix="apex-ray-typescript-inventory-") as inventory_dir:
         file_manifest_path = Path(inventory_dir) / "files.json"
         _write_typescript_file_manifest(
@@ -83,6 +108,8 @@ def run_typescript_analyzer(
             file_manifest_path,
             ignored_patterns,
             project_files=project_files,
+            deadline=deadline,
+            total_timeout_seconds=total_timeout_seconds,
         )
         return _run_typescript_analyzer_shards(
             repo_root,
@@ -90,7 +117,9 @@ def run_typescript_analyzer(
             config,
             script,
             file_manifest_path,
-            started_at=started_at,
+            shards=shards,
+            deadline=deadline,
+            total_timeout_seconds=total_timeout_seconds,
         )
 
 
@@ -101,14 +130,13 @@ def _run_typescript_analyzer_shards(
     script: Path,
     file_manifest_path: Path,
     *,
-    started_at: float,
+    shards: list[list[ChangedFile]],
+    deadline: float,
+    total_timeout_seconds: float,
 ) -> AnalyzerResult:
     results: list[AnalyzerResult] = []
     failures: list[AnalyzerShardFailure] = []
-    shards = list(_shard_changed_files(changed_files, config))
     large_change_set_size = len(changed_files) if len(changed_files) >= config.large_change_file_threshold else None
-    total_timeout_seconds = _typescript_total_timeout_seconds(changed_files, shards, config)
-    deadline = started_at + total_timeout_seconds
     for index, shard in enumerate(shards, start=1):
         remaining_seconds = deadline - time.monotonic()
         if remaining_seconds <= 0:
@@ -229,56 +257,103 @@ def _typescript_analyzer_args(
     return args
 
 
+def _typescript_inventory_deadline_check(
+    deadline: float | None,
+    total_timeout_seconds: float | None,
+) -> Callable[[], None]:
+    if deadline is None:
+        return lambda: None
+
+    def check_deadline() -> None:
+        if time.monotonic() >= deadline:
+            raise _typescript_inventory_timeout_error(total_timeout_seconds)
+
+    return check_deadline
+
+
+def _remaining_typescript_inventory_seconds(
+    deadline: float | None,
+    total_timeout_seconds: float | None,
+) -> float | None:
+    if deadline is None:
+        return None
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise _typescript_inventory_timeout_error(total_timeout_seconds)
+    return remaining
+
+
+def _typescript_inventory_timeout_error(total_timeout_seconds: float | None) -> AnalyzerError:
+    if total_timeout_seconds is None:
+        return AnalyzerError("TypeScript analyzer timed out while building repository inventory")
+    return AnalyzerError(
+        "TypeScript analyzer total timeout after "
+        f"{_format_seconds(total_timeout_seconds)} while building repository inventory"
+    )
+
+
 def _write_typescript_file_manifest(
     repo_root: Path,
     manifest_path: Path,
     ignored_patterns: list[str] | None = None,
     *,
     project_files: list[Path] | None = None,
+    deadline: float | None = None,
+    total_timeout_seconds: float | None = None,
 ) -> None:
-    inventory = project_files if project_files is not None else list_project_files(repo_root, ignored_patterns)
-    ordered_inventory = _ordered_typescript_inventory(inventory)
-    reachable_config_paths = _reachable_typescript_config_paths(repo_root, ordered_inventory)
+    check_deadline = _typescript_inventory_deadline_check(
+        deadline,
+        total_timeout_seconds,
+    )
+    check_deadline()
+    if project_files is not None:
+        inventory = project_files
+    else:
+        try:
+            inventory = list_project_files(
+                repo_root,
+                ignored_patterns,
+                timeout_seconds=_remaining_typescript_inventory_seconds(
+                    deadline,
+                    total_timeout_seconds,
+                ),
+            )
+        except TimeoutError as exc:
+            raise _typescript_inventory_timeout_error(total_timeout_seconds) from exc
+    check_deadline()
+    ordered_inventory = _ordered_typescript_inventory(
+        inventory,
+        check_deadline=check_deadline,
+    )
+    reachable_config_paths = _reachable_typescript_config_paths(
+        repo_root,
+        ordered_inventory,
+        check_deadline=check_deadline,
+    )
+    plan = _plan_typescript_file_manifest(
+        ordered_inventory,
+        reachable_config_paths,
+        check_deadline=check_deadline,
+    )
     temporary_path: Path | None = None
     try:
+        check_deadline()
         with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
+            mode="wb",
             dir=manifest_path.parent,
             prefix=f".{manifest_path.name}.",
             suffix=".tmp",
             delete=False,
         ) as temporary_file:
             temporary_path = Path(temporary_file.name)
-            temporary_file.write('{"version":2,"files":[')
-            first_path = True
-            for path in ordered_inventory:
-                if path.suffix.lower() not in TS_JS_INDEX_SUFFIXES:
-                    continue
-                if not first_path:
-                    temporary_file.write(",")
-                temporary_file.write(json.dumps(path.as_posix()))
-                first_path = False
-            temporary_file.write('],"package_files":[')
-            first_path = True
-            for path in ordered_inventory:
-                if path.name != "package.json":
-                    continue
-                if not first_path:
-                    temporary_file.write(",")
-                temporary_file.write(json.dumps(path.as_posix()))
-                first_path = False
-            temporary_file.write('],"config_files":[')
-            first_path = True
-            for path in ordered_inventory:
-                path_key = _inventory_path_key(path)
-                if path.suffix.lower() not in TS_CONFIG_METADATA_SUFFIXES and path_key not in reachable_config_paths:
-                    continue
-                if not first_path:
-                    temporary_file.write(",")
-                temporary_file.write(json.dumps(path.as_posix()))
-                first_path = False
-            temporary_file.write("]}")
+            _stream_typescript_file_manifest(
+                temporary_file,
+                ordered_inventory,
+                reachable_config_paths,
+                plan,
+                check_deadline=check_deadline,
+            )
+            check_deadline()
         temporary_path.replace(manifest_path)
     except BaseException:
         if temporary_path is not None:
@@ -286,12 +361,168 @@ def _write_typescript_file_manifest(
         raise
 
 
-def _ordered_typescript_inventory(inventory: list[Path]) -> list[Path]:
+def _plan_typescript_file_manifest(
+    inventory: list[Path],
+    reachable_config_paths: set[str],
+    *,
+    check_deadline: Callable[[], None],
+) -> _TypescriptManifestPlan:
+    # Plan sizes without materializing the JSON payload. A second pass streams
+    # the selected entries atomically while reserving the marker and all
+    # structural bytes inside the consumer's byte limit.
+    complete_size = _typescript_file_manifest_base_size(None)
+    entry_limited = False
+    for section in _TS_FILE_MANIFEST_SECTIONS:
+        entry_count = 0
+        for path in _iter_typescript_manifest_section(
+            section,
+            inventory,
+            reachable_config_paths,
+            check_deadline=check_deadline,
+        ):
+            entry_count += 1
+            if entry_count > TS_FILE_MANIFEST_ENTRY_LIMIT:
+                entry_limited = True
+                continue
+            encoded_path = _encode_typescript_manifest_path(path)
+            complete_size += len(encoded_path) + (1 if entry_count > 1 else 0)
+
+    entry_reason = _typescript_manifest_partial_reason(
+        entry_limited=entry_limited,
+        byte_limited=False,
+    )
+    candidate_size = complete_size + _typescript_file_manifest_partial_size(entry_reason)
+    byte_limited = candidate_size > TS_FILE_MANIFEST_BYTE_LIMIT
+    partial_reason = _typescript_manifest_partial_reason(
+        entry_limited=entry_limited,
+        byte_limited=byte_limited,
+    )
+    if _typescript_file_manifest_base_size(partial_reason) > TS_FILE_MANIFEST_BYTE_LIMIT:
+        raise AnalyzerError(
+            "TypeScript file manifest byte safety limit is too small to encode a partial inventory marker."
+        )
+    return _TypescriptManifestPlan(
+        partial_reason=partial_reason,
+        byte_limited=byte_limited,
+    )
+
+
+def _stream_typescript_file_manifest(
+    stream: _BinaryManifestStream,
+    inventory: list[Path],
+    reachable_config_paths: set[str],
+    plan: _TypescriptManifestPlan,
+    *,
+    check_deadline: Callable[[], None],
+) -> None:
+    write = stream.write
+    write(_TS_FILE_MANIFEST_HEADER)
+    planned_size = _typescript_file_manifest_base_size(plan.partial_reason)
+    for section in _TS_FILE_MANIFEST_SECTIONS:
+        write(f',"{section}":['.encode())
+        emitted_count = 0
+        for path in _iter_typescript_manifest_section(
+            section,
+            inventory,
+            reachable_config_paths,
+            check_deadline=check_deadline,
+        ):
+            if emitted_count >= TS_FILE_MANIFEST_ENTRY_LIMIT:
+                continue
+            encoded_path = _encode_typescript_manifest_path(path)
+            additional_size = len(encoded_path) + (1 if emitted_count else 0)
+            if plan.byte_limited and planned_size + additional_size > TS_FILE_MANIFEST_BYTE_LIMIT:
+                continue
+            if emitted_count:
+                write(b",")
+            write(encoded_path)
+            planned_size += additional_size
+            emitted_count += 1
+        write(b"]")
+    if plan.partial_reason is not None:
+        write(_TS_FILE_MANIFEST_PARTIAL_PREFIX)
+        write(json.dumps(plan.partial_reason).encode())
+    write(b"}")
+    actual_size = stream.tell()
+    if actual_size != planned_size:
+        raise AssertionError("TypeScript file manifest byte plan did not match the streamed output")
+    if actual_size > TS_FILE_MANIFEST_BYTE_LIMIT:
+        raise AssertionError("TypeScript file manifest plan exceeded its byte safety limit")
+
+
+def _iter_typescript_manifest_section(
+    section: str,
+    inventory: list[Path],
+    reachable_config_paths: set[str],
+    *,
+    check_deadline: Callable[[], None],
+) -> Iterator[Path]:
+    for path in inventory:
+        check_deadline()
+        if section == "files":
+            matches = path.suffix.lower() in TS_JS_INDEX_SUFFIXES
+        elif section == "package_files":
+            matches = path.name == "package.json"
+        else:
+            path_key = _inventory_path_key(path)
+            matches = path.suffix.lower() in TS_CONFIG_METADATA_SUFFIXES or path_key in reachable_config_paths
+        if matches:
+            yield path
+
+
+def _encode_typescript_manifest_path(path: Path) -> bytes:
+    return json.dumps(path.as_posix()).encode()
+
+
+def _typescript_file_manifest_base_size(partial_reason: str | None) -> int:
+    size = len(_TS_FILE_MANIFEST_HEADER) + 1
+    size += sum(len(f',"{section}":[]'.encode()) for section in _TS_FILE_MANIFEST_SECTIONS)
+    if partial_reason is not None:
+        size += len(_TS_FILE_MANIFEST_PARTIAL_PREFIX)
+        size += len(json.dumps(partial_reason).encode())
+    return size
+
+
+def _typescript_file_manifest_partial_size(partial_reason: str | None) -> int:
+    if partial_reason is None:
+        return 0
+    return len(_TS_FILE_MANIFEST_PARTIAL_PREFIX) + len(json.dumps(partial_reason).encode())
+
+
+def _typescript_manifest_partial_reason(
+    *,
+    entry_limited: bool,
+    byte_limited: bool,
+) -> str | None:
+    if entry_limited and byte_limited:
+        limit = f"{TS_FILE_MANIFEST_ENTRY_LIMIT}-entry and {TS_FILE_MANIFEST_BYTE_LIMIT}-byte safety limits"
+    elif entry_limited:
+        limit = f"{TS_FILE_MANIFEST_ENTRY_LIMIT}-entry safety limit"
+    elif byte_limited:
+        limit = f"{TS_FILE_MANIFEST_BYTE_LIMIT}-byte safety limit"
+    else:
+        return None
+    return f"TypeScript file manifest producer reached the {limit}{_TS_FILE_MANIFEST_PARTIAL_SUFFIX}"
+
+
+def _ordered_typescript_inventory(
+    inventory: list[Path],
+    *,
+    check_deadline: Callable[[], None] = lambda: None,
+) -> list[Path]:
     previous_path: str | None = None
     for path in inventory:
+        check_deadline()
         normalized = path.as_posix()
         if previous_path is not None and normalized < previous_path:
-            return sorted(inventory, key=lambda candidate: candidate.as_posix())
+
+            def checked_path_key(candidate: Path) -> str:
+                check_deadline()
+                return candidate.as_posix()
+
+            ordered = sorted(inventory, key=checked_path_key)
+            check_deadline()
+            return ordered
         previous_path = normalized
     return inventory
 
@@ -299,22 +530,37 @@ def _ordered_typescript_inventory(inventory: list[Path]) -> list[Path]:
 def _reachable_typescript_config_paths(
     repo_root: Path,
     inventory: list[Path],
+    *,
+    check_deadline: Callable[[], None] = lambda: None,
 ) -> set[str]:
-    config_roots = [
-        path_key
-        for path in inventory
-        if path.name in TS_CONFIG_ROOT_NAMES and (path_key := _inventory_path_key(path)) is not None
-    ]
+    config_roots: list[str] = []
+    for path in inventory:
+        check_deadline()
+        if path.name not in TS_CONFIG_ROOT_NAMES:
+            continue
+        path_key = _inventory_path_key(path)
+        if path_key is not None:
+            config_roots.append(path_key)
     if not config_roots:
         return set()
 
-    inventory_by_path = {path_key: path for path in inventory if (path_key := _inventory_path_key(path)) is not None}
+    inventory_by_path: dict[str, Path] = {}
+    for path in inventory:
+        check_deadline()
+        path_key = _inventory_path_key(path)
+        if path_key is not None:
+            inventory_by_path[path_key] = path
     reachable = set(config_roots)
     pending = list(config_roots)
     package_index: dict[str, tuple[_TypescriptPackageConfig, ...]] | None = None
     while pending:
+        check_deadline()
         config_path = pending.pop()
-        config_text = _read_inventory_config(repo_root, inventory_by_path[config_path])
+        config_text = _read_inventory_config(
+            repo_root,
+            inventory_by_path[config_path],
+            check_deadline=check_deadline,
+        )
         if config_text is None:
             continue
         for extends_value in _parse_typescript_config_extends(config_text):
@@ -330,7 +576,11 @@ def _reachable_typescript_config_paths(
                 if package_specifier is None:
                     continue
                 if package_index is None:
-                    package_index = _build_typescript_package_index(repo_root, inventory_by_path)
+                    package_index = _build_typescript_package_index(
+                        repo_root,
+                        inventory_by_path,
+                        check_deadline=check_deadline,
+                    )
                 extended_paths = _resolve_inventory_package_extends(
                     package_specifier,
                     package_index,
@@ -358,7 +608,13 @@ def _inventory_path_key(path: Path) -> str | None:
     return normalized if normalized not in {"", "."} else None
 
 
-def _read_inventory_config(repo_root: Path, relative_path: Path) -> str | None:
+def _read_inventory_config(
+    repo_root: Path,
+    relative_path: Path,
+    *,
+    check_deadline: Callable[[], None] = lambda: None,
+) -> str | None:
+    check_deadline()
     path_key = _inventory_path_key(relative_path)
     if path_key is None:
         return None
@@ -371,6 +627,7 @@ def _read_inventory_config(repo_root: Path, relative_path: Path) -> str | None:
     descriptor: int | None = None
     try:
         for component in PurePosixPath(path_key).parts:
+            check_deadline()
             current /= component
             if current.is_symlink():
                 return None
@@ -383,7 +640,11 @@ def _read_inventory_config(repo_root: Path, relative_path: Path) -> str | None:
         before = os.fstat(descriptor)
         if not stat.S_ISREG(before.st_mode) or before.st_size > TS_CONFIG_MAX_BYTES:
             return None
-        raw = _read_bounded_config_descriptor(descriptor)
+        raw = _read_bounded_config_descriptor(
+            descriptor,
+            check_deadline=check_deadline,
+        )
+        check_deadline()
         after = os.fstat(descriptor)
         if (
             len(raw) > TS_CONFIG_MAX_BYTES
@@ -414,10 +675,15 @@ def _read_inventory_config(repo_root: Path, relative_path: Path) -> str | None:
         return None
 
 
-def _read_bounded_config_descriptor(descriptor: int) -> bytes:
+def _read_bounded_config_descriptor(
+    descriptor: int,
+    *,
+    check_deadline: Callable[[], None] = lambda: None,
+) -> bytes:
     chunks: list[bytes] = []
     remaining = TS_CONFIG_MAX_BYTES + 1
     while remaining > 0:
+        check_deadline()
         chunk = os.read(descriptor, min(64 * 1024, remaining))
         if not chunk:
             break
@@ -574,12 +840,19 @@ def _parse_package_config_specifier(extends_value: str) -> tuple[str, str] | Non
 def _build_typescript_package_index(
     repo_root: Path,
     inventory_by_path: dict[str, Path],
+    *,
+    check_deadline: Callable[[], None] = lambda: None,
 ) -> dict[str, tuple[_TypescriptPackageConfig, ...]]:
     mutable_index: dict[str, list[_TypescriptPackageConfig]] = {}
     for package_path, relative_path in inventory_by_path.items():
+        check_deadline()
         if PurePosixPath(package_path).name != "package.json":
             continue
-        package_text = _read_inventory_config(repo_root, relative_path)
+        package_text = _read_inventory_config(
+            repo_root,
+            relative_path,
+            check_deadline=check_deadline,
+        )
         if package_text is None:
             continue
         try:

@@ -146,6 +146,8 @@ def test_action_uses_pinned_dependencies_and_has_no_secret_inputs() -> None:
     uses = [step["uses"] for step in action["runs"]["steps"] if "uses" in step]
     assert uses
     assert all(re.fullmatch(r"[^@]+@[0-9a-f]{40}", value) for value in uses)
+    upload_artifact = next(step for step in action["runs"]["steps"] if step.get("id") == "upload-artifact")
+    assert upload_artifact["uses"] == ("actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a")
 
     checkout = next(step for step in action["runs"]["steps"] if step.get("id") == "checkout")
     assert checkout["with"]["fetch-depth"] == 0
@@ -153,6 +155,10 @@ def test_action_uses_pinned_dependencies_and_has_no_secret_inputs() -> None:
 
     assert action["inputs"]["fail-on-quality-gate"]["default"] == "true"
     assert action["outputs"]["quality-gate-status"]["value"] == "${{ steps.finalize.outputs.quality-gate-status }}"
+    assert action["outputs"]["gate-outcome"]["value"] == "${{ steps.finalize.outputs.gate-outcome }}"
+    assert action["outputs"]["findings-count"]["value"] == "${{ steps.finalize.outputs.findings-count }}"
+    assert action["outputs"]["partial-coverage"]["value"] == "${{ steps.finalize.outputs.partial-coverage }}"
+    assert action["outputs"]["reviewer-statuses"]["value"] == "${{ steps.finalize.outputs.reviewer-statuses }}"
     assert action["outputs"]["repository-path"]["value"] == "${{ steps.prepare.outputs.repository-path }}"
     assert action["outputs"]["markdown-path"]["value"] == "${{ steps.prepare.outputs.markdown-path }}"
     assert action["outputs"]["json-path"]["value"] == "${{ steps.prepare.outputs.json-path }}"
@@ -168,6 +174,43 @@ def test_action_uses_pinned_dependencies_and_has_no_secret_inputs() -> None:
 
     serialized = ACTION_PATH.read_text(encoding="utf-8")
     assert "pull_request_target" not in serialized
+
+
+@pytest.mark.parametrize("value", ["TRUE", "yes", "1", "", "tru"])
+def test_action_rejects_non_literal_checkout_boolean(value: str) -> None:
+    action = yaml.safe_load(ACTION_PATH.read_text(encoding="utf-8"))
+    steps = action["runs"]["steps"]
+    validation = next(step for step in steps if step.get("id") == "validate-inputs")
+    checkout = next(step for step in steps if step.get("id") == "checkout")
+
+    assert steps.index(validation) < steps.index(checkout)
+    assert validation["env"]["INPUT_CHECKOUT"] == "${{ inputs.checkout }}"
+    result = subprocess.run(
+        ["bash", "-c", validation["run"]],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={"INPUT_CHECKOUT": value},
+    )
+
+    assert result.returncode != 0
+    assert "checkout must be exactly 'true' or 'false'" in result.stdout
+
+
+@pytest.mark.parametrize("value", ["true", "false"])
+def test_action_accepts_literal_checkout_boolean(value: str) -> None:
+    action = yaml.safe_load(ACTION_PATH.read_text(encoding="utf-8"))
+    validation = next(step for step in action["runs"]["steps"] if step.get("id") == "validate-inputs")
+
+    result = subprocess.run(
+        ["bash", "-c", validation["run"]],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={"INPUT_CHECKOUT": value},
+    )
+
+    assert result.returncode == 0
 
 
 def test_action_builds_its_pinned_source_with_hash_locked_dependencies() -> None:
@@ -411,6 +454,88 @@ review:
     )._replace(llm="auto")
 
     with pytest.raises(ValueError, match=r"review\.llm\.provider \(codex_cli\)"):
+        helper.create_plan(options)
+
+
+@pytest.mark.parametrize("fork", [False, True], ids=["same-repository", "fork"])
+def test_restricted_pr_config_uses_event_base_independently_of_analysis_override(
+    tmp_path: Path,
+    fork: bool,
+) -> None:
+    helper = _load_helper()
+    workspace = tmp_path / "repo"
+    runner_temp = tmp_path / "runner"
+    workspace.mkdir()
+    runner_temp.mkdir()
+    _init_repository(workspace)
+    trusted_base_sha = _commit_config(
+        workspace,
+        """\
+review:
+  llm:
+    enabled: true
+    provider: openai_api
+    model: trusted-reviewer
+""",
+    )
+    analysis_base_sha = _commit_config(
+        workspace,
+        """\
+review:
+  llm:
+    enabled: true
+    provider: openai_compatible
+    model: attacker-selected-reviewer
+    api:
+      protocol: openai_chat
+      structured_output: json_object
+      base_url_env: ATTACKER_LLM_URL
+      api_key_env: ATTACKER_LLM_KEY
+""",
+    )
+    options = _plan_options(
+        helper,
+        workspace=workspace,
+        runner_temp=runner_temp,
+        event=_pull_request_event(trusted_base_sha, fork=fork),
+    )._replace(base=analysis_base_sha)
+
+    plan = helper.create_plan(options)
+
+    assert plan["base_sha"] == analysis_base_sha
+    assert plan["args"][plan["args"].index("--base") + 1] == analysis_base_sha
+    assert plan["config_source"] == "restricted-base"
+    safe_config = yaml.safe_load(Path(plan["config_path"]).read_text(encoding="utf-8"))
+    assert safe_config["review"]["llm"]["provider"] == "openai_api"
+    assert safe_config["review"]["llm"]["model"] == "trusted-reviewer"
+    assert "attacker-selected-reviewer" not in Path(plan["config_path"]).read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    "event_base_sha",
+    [
+        pytest.param("", id="missing"),
+        pytest.param("f" * 40, id="unavailable"),
+    ],
+)
+def test_restricted_pr_config_requires_resolvable_event_base_sha_even_with_analysis_override(
+    tmp_path: Path,
+    event_base_sha: str,
+) -> None:
+    helper = _load_helper()
+    workspace = tmp_path / "repo"
+    runner_temp = tmp_path / "runner"
+    workspace.mkdir()
+    runner_temp.mkdir()
+    analysis_base_sha = _init_repository(workspace)
+    options = _plan_options(
+        helper,
+        workspace=workspace,
+        runner_temp=runner_temp,
+        event=_pull_request_event(event_base_sha),
+    )._replace(base=analysis_base_sha)
+
+    with pytest.raises(ValueError, match=r"base commit SHA.*restricted configuration"):
         helper.create_plan(options)
 
 
@@ -807,6 +932,64 @@ def test_finalize_uses_coverage_quality_gate_as_ci_result(
     assert f"Coverage quality gate: `{quality_gate_status}`" in summary
     if include_critical_finding:
         assert "critical `1`" in summary
+
+
+def test_finalize_emits_escaped_annotations_and_stable_machine_outputs(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    helper = _load_helper()
+    github_output = tmp_path / "github-output"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(github_output))
+    plan_path = _write_finalization_plan(
+        tmp_path,
+        quality_gate_status="warn",
+        fail_on_quality_gate=True,
+        include_critical_finding=True,
+    )
+    plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    report_path = Path(plan["json_path"])
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    report["findings"][0].update(
+        {
+            "title": "Critical % issue\n::error::injected",
+            "file": "src/payment,flow.ts",
+            "failure_mode": "A transfer can duplicate.\rRetry is unsafe.",
+        }
+    )
+    report["llm_coverage"].update(
+        {
+            "partial_severity": "major",
+            "partial_reasons": ["One lower-priority pack was deferred."],
+            "reviewers": [
+                {
+                    "reviewer_id": "security",
+                    "required": True,
+                    "status": "warn",
+                }
+            ],
+        }
+    )
+    report_path.write_text(json.dumps(report), encoding="utf-8")
+
+    assert helper._finalize(plan_path) == 0
+
+    outputs = github_output.read_text(encoding="utf-8")
+    assert "findings-count=1\n" in outputs
+    assert "critical-findings-count=1\n" in outputs
+    assert "high-findings-count=0\n" in outputs
+    assert "partial-coverage=true\n" in outputs
+    assert "partial-coverage-severity=major\n" in outputs
+    assert 'reviewer-statuses={"security":"warn"}\n' in outputs
+    assert "gate-outcome=pass\n" in outputs
+    annotation = capsys.readouterr().out
+    assert annotation == (
+        "::error file=src/payment%2Cflow.ts,line=10,title=Apex Ray critical finding::"
+        "Critical %25 issue%0A::error::injected: "
+        "A transfer can duplicate.%0DRetry is unsafe.\n"
+    )
+    assert "\n::error::injected" not in annotation
 
 
 def test_finalize_fails_when_current_review_has_no_json(

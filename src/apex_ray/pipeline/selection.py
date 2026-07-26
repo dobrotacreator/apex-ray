@@ -38,8 +38,9 @@ def select_continuation_context_packs(
         if pack_ids is not None and pack.id not in pack_ids:
             continue
         if residual_priorities is not None:
-            priority = (
-                status.priority if status is not None and status.priority is not None else pack_residual_priority(pack)
+            priority = pack_residual_priority(
+                pack,
+                status.priority if status is not None else None,
             )
             if priority not in residual_priorities:
                 continue
@@ -121,11 +122,14 @@ def select_llm_context_packs(
     context_packs: list[ContextPack],
     changed_files: list[ChangedFile],
     max_packs: int | None = None,
+    *,
+    priority_by_pack_id: dict[str, str] | None = None,
 ) -> list[ContextPack]:
     selected_indexes = _select_llm_context_pack_indexes(
         list(enumerate(context_packs)),
         changed_files,
         max_packs,
+        priority_by_pack_id=priority_by_pack_id,
     )
     return [context_packs[index] for index in selected_indexes]
 
@@ -167,8 +171,6 @@ def plan_llm_context_selection(
         changed_files,
         deep_cap,
     )
-    if mode == LLMCoverageMode.EXHAUSTIVE and max_input_tokens is None:
-        deep_candidate_indexes = [index for index, _pack in deep_reviewable_indexed]
 
     deep_selected_indexes, deep_tokens = _select_indexes_with_token_budget(
         deep_candidate_indexes,
@@ -299,6 +301,8 @@ def _select_llm_context_pack_indexes(
     indexed_context_packs: list[tuple[int, ContextPack]],
     changed_files: list[ChangedFile],
     max_packs: int | None,
+    *,
+    priority_by_pack_id: dict[str, str] | None = None,
 ) -> list[int]:
     if max_packs is None or len(indexed_context_packs) <= max_packs:
         return [index for index, _pack in indexed_context_packs]
@@ -310,7 +314,15 @@ def _select_llm_context_pack_indexes(
         remaining = max_packs - len(selected_indexes)
         if remaining <= 0:
             break
-        priority_packs = [item for item in indexed_context_packs if pack_residual_priority(item[1]) == priority]
+        priority_packs = [
+            item
+            for item in indexed_context_packs
+            if pack_residual_priority(
+                item[1],
+                (priority_by_pack_id or {}).get(item[1].id),
+            )
+            == priority
+        ]
         selected_indexes.extend(
             _select_llm_context_pack_indexes_within_priority(
                 priority_packs,

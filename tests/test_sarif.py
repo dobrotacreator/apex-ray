@@ -292,6 +292,30 @@ def test_render_sarif_fingerprint_is_independent_of_checkout_root() -> None:
     assert first_fingerprint == second_fingerprint
 
 
+def test_render_sarif_keeps_outside_file_fingerprints_distinct_without_exposing_paths() -> None:
+    first = _finding(
+        title="Outside duplicate",
+        severity=FindingSeverity.HIGH,
+        file="/private/tenant-a/service.ts",
+        line=8,
+    )
+    second = first.model_copy(update={"file": "/private/tenant-b/service.ts"})
+    report = build_report(
+        ProjectProfile(root="/workspace/repo", is_git_repo=True),
+        ReviewConfig(),
+        DiffSummary(target_mode=TargetMode.PATCH, stats=DiffStats(files_changed=2)),
+        findings=[first, second],
+    )
+
+    rendered = render_sarif(report)
+    results = json.loads(rendered)["runs"][0]["results"]
+    fingerprints = {result["partialFingerprints"]["apexRayFinding/v1"] for result in results}
+
+    assert len(fingerprints) == 2
+    assert "/private/tenant-a" not in rendered
+    assert "/private/tenant-b" not in rendered
+
+
 def test_render_sarif_redacts_posix_windows_and_unc_paths_without_corrupting_urls() -> None:
     finding = _finding(
         title="Path evidence",
@@ -396,6 +420,153 @@ def test_render_sarif_redacts_local_paths_embedded_in_urls() -> None:
     assert message.count("<remote-url-with-local-path>") == 3
     assert "<local-url>" in message
     assert "https://example.com/review/path?tab=security." in message
+
+
+def test_render_sarif_does_not_redact_remote_urls_for_repo_root_substrings() -> None:
+    finding = _finding(
+        title="Root substring URL evidence",
+        severity=FindingSeverity.MEDIUM,
+        file="src/service.ts",
+        line=5,
+    ).model_copy(
+        update={
+            "evidence": (
+                "Safe https://example.com/application/status. "
+                "Asset https://example.com/app.css. "
+                "Local https://example.com/open?file=%2Fapp%2Fsrc%2Fservice.ts."
+            )
+        }
+    )
+    report = build_report(
+        ProjectProfile(root="/app", is_git_repo=True),
+        ReviewConfig(),
+        DiffSummary(target_mode=TargetMode.PATCH, stats=DiffStats(files_changed=1)),
+        findings=[finding],
+    )
+
+    message = json.loads(render_sarif(report))["runs"][0]["results"][0]["message"]["text"]
+
+    assert "https://example.com/application/status." in message
+    assert "https://example.com/app.css." in message
+    assert message.count("<remote-url-with-local-path>") == 1
+
+
+def test_render_sarif_redacts_absolute_posix_paths_from_arbitrary_url_query_keys() -> None:
+    finding = _finding(
+        title="Arbitrary query path evidence",
+        severity=FindingSeverity.MEDIUM,
+        file="src/service.ts",
+        line=5,
+    ).model_copy(
+        update={
+            "evidence": (
+                "Local https://logs.example/view?location=%2Fhome%2Frunner%2Fprivate%2Ftrace.json. "
+                "Safe https://logs.example/view?location=docs%2Ftrace.json."
+            )
+        }
+    )
+    report = build_report(
+        ProjectProfile(root="/workspace/repo", is_git_repo=True),
+        ReviewConfig(),
+        DiffSummary(target_mode=TargetMode.PATCH, stats=DiffStats(files_changed=1)),
+        findings=[finding],
+    )
+
+    message = json.loads(render_sarif(report))["runs"][0]["results"][0]["message"]["text"]
+
+    assert message.count("<remote-url-with-local-path>") == 1
+    assert "%2Fhome%2Frunner" not in message
+    assert "https://logs.example/view?location=docs%2Ftrace.json." in message
+
+
+def test_render_sarif_redacts_repo_paths_from_url_query_keys() -> None:
+    finding = _finding(
+        title="Query key path evidence",
+        severity=FindingSeverity.MEDIUM,
+        file="src/service.ts",
+        line=5,
+    ).model_copy(
+        update={
+            "evidence": (
+                "Local "
+                "https://logs.example/view?%2Fhome%2Frunner%2Fwork%2Fproject%2Fsecret=value. "
+                "Safe https://logs.example/view?project%2Fsecret=value."
+            )
+        }
+    )
+    report = build_report(
+        ProjectProfile(root="/home/runner/work/project", is_git_repo=True),
+        ReviewConfig(),
+        DiffSummary(target_mode=TargetMode.PATCH, stats=DiffStats(files_changed=1)),
+        findings=[finding],
+    )
+
+    message = json.loads(render_sarif(report))["runs"][0]["results"][0]["message"]["text"]
+
+    assert message.count("<remote-url-with-local-path>") == 1
+    assert "%2Fhome%2Frunner%2Fwork%2Fproject" not in message
+    assert "https://logs.example/view?project%2Fsecret=value." in message
+
+
+def test_render_sarif_redacts_repo_root_urls_with_terminal_punctuation_or_line_suffix() -> None:
+    finding = _finding(
+        title="Terminal root path evidence",
+        severity=FindingSeverity.MEDIUM,
+        file="src/service.ts",
+        line=5,
+    ).model_copy(
+        update={
+            "evidence": (
+                "Root https://logs.example/open/%2Fhome%2Frunner%2Fwork%2Fproject. "
+                "Line https://logs.example/open/%2Fhome%2Frunner%2Fwork%2Fproject%3A42. "
+                "Safe https://logs.example/open/project.css."
+            )
+        }
+    )
+    report = build_report(
+        ProjectProfile(root="/home/runner/work/project", is_git_repo=True),
+        ReviewConfig(),
+        DiffSummary(target_mode=TargetMode.PATCH, stats=DiffStats(files_changed=1)),
+        findings=[finding],
+    )
+
+    message = json.loads(render_sarif(report))["runs"][0]["results"][0]["message"]["text"]
+
+    assert message.count("<remote-url-with-local-path>") == 2
+    assert "%2Fhome%2Frunner%2Fwork%2Fproject" not in message
+    assert "https://logs.example/open/project.css." in message
+
+
+def test_render_sarif_redacts_repeatedly_encoded_repo_paths_in_url_components() -> None:
+    finding = _finding(
+        title="Nested encoded path evidence",
+        severity=FindingSeverity.MEDIUM,
+        file="src/service.ts",
+        line=5,
+    ).model_copy(
+        update={
+            "evidence": (
+                "Path https://logs.example/open/%252Fapp%252Fsrc%252Fservice.ts. "
+                "Query key https://logs.example/view?%25252Fapp%25252Fsecret=value. "
+                "Over-nested https://logs.example/open/%252525252Fapp%252525252Fsecret.ts. "
+                "Safe https://logs.example/open/%252Fapp.css."
+            )
+        }
+    )
+    report = build_report(
+        ProjectProfile(root="/app", is_git_repo=True),
+        ReviewConfig(),
+        DiffSummary(target_mode=TargetMode.PATCH, stats=DiffStats(files_changed=1)),
+        findings=[finding],
+    )
+
+    message = json.loads(render_sarif(report))["runs"][0]["results"][0]["message"]["text"]
+
+    assert message.count("<remote-url-with-local-path>") == 3
+    assert "%252Fapp%252Fsrc" not in message
+    assert "%25252Fapp%25252Fsecret" not in message
+    assert "%252525252Fapp%252525252Fsecret" not in message
+    assert "https://logs.example/open/%252Fapp.css." in message
 
 
 def test_render_sarif_redacts_encoded_windows_root_and_drive_relative_url_queries() -> None:

@@ -2,9 +2,18 @@ from collections import Counter
 from shlex import quote
 from typing import Literal
 
+from apex_ray.findings import (
+    active_verifications,
+    reviewer_origin_pack_ids,
+    reviewer_origins_are_explicit,
+    unresolved_verification_candidate_pack_ids,
+    verification_candidates_by_reviewer_pack,
+)
 from apex_ray.llm.usage import aggregate_actual_usage
 from apex_ray.models import (
     ContextPack,
+    Finding,
+    FindingVerification,
     LLMContextSelection,
     LLMCoverageSummary,
     LLMCoverageTodo,
@@ -46,26 +55,95 @@ def _build_llm_coverage(
     llm_runs: list[LLMRun],
     llm_selection: LLMContextSelection | None = None,
     reviewer_selections: dict[str, LLMContextSelection] | None = None,
+    *,
+    reviewer_scope_ids: list[str] | None = None,
+    findings: list[Finding] | None = None,
+    verifications: list[FindingVerification] | None = None,
 ) -> LLMCoverageSummary:
+    all_context_packs = list(context_packs)
+    all_context_pack_ids = {pack.id for pack in context_packs}
     if llm_selection is not None:
         scoped_pack_ids = set(llm_selection.total_context_pack_ids)
         context_packs = [pack for pack in context_packs if pack.id in scoped_pack_ids]
     review_runs = [run for run in llm_runs if run.kind in {"review", "review_shallow"}]
     verify_runs = [run for run in llm_runs if run.kind == "verify"]
+    execution_runs = [
+        run
+        for run in llm_runs
+        if run.kind
+        in {
+            "review",
+            "review_shallow",
+            "verify",
+        }
+    ]
     failed_review_runs = [run for run in review_runs if run.status != "ok"]
     failed_verify_runs = [run for run in verify_runs if run.status != "ok"]
     effective_run_states = reduce_llm_pack_run_states(llm_runs)
-    current_reviewer_selections = reviewer_selections or {}
+    reviewer_scope = set(reviewer_scope_ids) if reviewer_scope_ids is not None else None
+    current_reviewer_selections = {
+        reviewer_id: selection
+        for reviewer_id, selection in (reviewer_selections or {}).items()
+        if reviewer_scope is None or reviewer_id in reviewer_scope
+    }
     configured_reviewer_pack_ids = (
         {
-            reviewer.id: {pack.id for pack in context_packs if reviewer_matches_pack(reviewer, pack)}
+            reviewer.id: (
+                {pack.id for pack in context_packs if reviewer_matches_pack(reviewer, pack)}
+                if reviewer.enabled
+                else set()
+            )
             for reviewer in config.reviewers
-            if reviewer.enabled
+            if reviewer_scope is None or reviewer.id in reviewer_scope
         }
         if config.reviewers
         else None
     )
     scoped_context_pack_ids = {pack.id for pack in context_packs}
+    historical_review_keys = {
+        (run.reviewer_id, run.context_pack_id) for run in llm_runs if run.kind in {"review", "review_shallow"}
+    }
+
+    def verification_key_in_scope(
+        key: tuple[str, str],
+        candidates: list[Finding],
+    ) -> bool:
+        reviewer_id, context_pack_id = key
+        verifier_only_or_unattempted = key not in historical_review_keys
+        selection = current_reviewer_selections.get(reviewer_id)
+        if selection is not None:
+            reviewer_pack_ids = set(selection.total_context_pack_ids)
+        elif configured_reviewer_pack_ids is not None:
+            if reviewer_id not in configured_reviewer_pack_ids:
+                return False
+            reviewer_pack_ids = configured_reviewer_pack_ids[reviewer_id]
+        elif current_reviewer_selections:
+            return False
+        elif reviewer_id == "general":
+            reviewer_pack_ids = scoped_context_pack_ids
+        else:
+            return False
+        if context_pack_id in reviewer_pack_ids:
+            return True
+        explicit_candidates = [
+            candidate for candidate in candidates if reviewer_origins_are_explicit(candidate, reviewer_id)
+        ]
+        if any(
+            reviewer_origin_pack_ids(candidate, reviewer_id).intersection(reviewer_pack_ids)
+            for candidate in explicit_candidates
+        ):
+            return True
+        return len(explicit_candidates) != len(candidates) and verifier_only_or_unattempted
+
+    candidate_findings = verification_candidates_by_reviewer_pack(
+        findings or [],
+        verifications or [],
+    )
+    verification_candidates = {
+        key: len(candidates)
+        for key, candidates in candidate_findings.items()
+        if key[1] in all_context_pack_ids and verification_key_in_scope(key, candidates)
+    }
     scoped_effective_run_states = {
         key: state
         for key, state in effective_run_states.items()
@@ -74,7 +152,21 @@ def _build_llm_coverage(
             current_reviewer_selections,
             configured_reviewer_pack_ids,
             scoped_context_pack_ids,
+            verification_candidate_keys=set(verification_candidates),
         )
+    }
+    active_verification_counts: dict[tuple[str, str], int] = {}
+    for verification in active_verifications(verifications or []):
+        key = (verification.reviewer_id, verification.finding.context_pack_id)
+        if key in verification_candidates:
+            active_verification_counts[key] = active_verification_counts.get(key, 0) + 1
+    unresolved_verification_pack_ids = {
+        key
+        for key in unresolved_verification_candidate_pack_ids(
+            findings or [],
+            verifications or [],
+        )
+        if key in verification_candidates
     }
     effective_review_runs = [state.review for state in scoped_effective_run_states.values() if state.review is not None]
     effective_verify_runs = [
@@ -90,8 +182,11 @@ def _build_llm_coverage(
         config,
         context_packs,
         current_reviewer_selections,
-        llm_runs,
         scoped_effective_run_states,
+        reviewer_scope=reviewer_scope,
+        active_verification_counts=active_verification_counts,
+        verification_candidate_counts=verification_candidates,
+        unresolved_verification_pack_ids=unresolved_verification_pack_ids,
     )
     effective_verify_enabled = (
         any(reviewer.verify_enabled for reviewer in reviewer_coverage) if reviewer_coverage else config.llm.verify
@@ -190,6 +285,23 @@ def _build_llm_coverage(
         quality_gate_reasons = [*quality_gate_reasons, *required_reviewer_failures]
         partial_severity = "critical"
         partial_reasons = [*partial_reasons, *required_reviewer_failures]
+    unresolved_general_pack_ids = {
+        pack_id for reviewer_id, pack_id in unresolved_verification_pack_ids if reviewer_id == "general"
+    }
+    if (
+        config.llm.enabled
+        and not config.reviewers
+        and _reviewer_verify_enabled(config, "general")
+        and unresolved_general_pack_ids
+    ):
+        unresolved_general_reason = (
+            "General review has unresolved verification subjects in "
+            f"{len(unresolved_general_pack_ids)} context pack(s)."
+        )
+        quality_gate_status = "fail"
+        quality_gate_reasons = [*quality_gate_reasons, unresolved_general_reason]
+        partial_severity = "critical"
+        partial_reasons = [*partial_reasons, unresolved_general_reason]
     pack_statuses = _build_pack_statuses(
         context_packs,
         reviewed_ids,
@@ -201,8 +313,11 @@ def _build_llm_coverage(
     )
     reviewer_coverage_todos = _build_reviewer_coverage_todos(
         reviewer_coverage,
-        context_packs,
+        all_context_packs,
         scoped_effective_run_states,
+        active_verification_counts,
+        verification_candidates,
+        unresolved_verification_pack_ids,
     )
     reviewer_debt_pack_ids = {todo.context_pack_id for todo in reviewer_coverage_todos}
     coverage_todos = [
@@ -223,7 +338,7 @@ def _build_llm_coverage(
     )
 
     routes: dict[tuple[str, str, str, str | None, str | None, str | None, str | None, str], LLMRouteSummary] = {}
-    for run in llm_runs:
+    for run in execution_runs:
         cache_hits = _run_cache_hits(run)
         cache_misses = _run_cache_misses(run)
         key = (
@@ -270,7 +385,7 @@ def _build_llm_coverage(
         route.cache_misses += cache_misses
         route.errors += 1 if run.error else 0
 
-    usage_totals = aggregate_actual_usage(llm_runs)
+    usage_totals = aggregate_actual_usage(execution_runs)
     return LLMCoverageSummary(
         enabled=config.llm.enabled,
         verify_enabled=effective_verify_enabled,
@@ -324,13 +439,13 @@ def _build_llm_coverage(
         verify_runs=len(verify_runs),
         failed_review_runs=len(failed_review_runs),
         failed_verify_runs=len(failed_verify_runs),
-        run_status_counts=dict(sorted(Counter(run.status for run in llm_runs).items())),
-        total_duration_ms=sum(run.duration_ms for run in llm_runs),
-        input_chars=sum(run.input_chars for run in llm_runs),
-        estimated_input_tokens=sum(run.estimated_input_tokens for run in llm_runs),
+        run_status_counts=dict(sorted(Counter(run.status for run in execution_runs).items())),
+        total_duration_ms=sum(run.duration_ms for run in execution_runs),
+        input_chars=sum(run.input_chars for run in execution_runs),
+        estimated_input_tokens=sum(run.estimated_input_tokens for run in execution_runs),
         **usage_totals,
-        cache_hits=sum(_run_cache_hits(run) for run in llm_runs),
-        cache_misses=sum(_run_cache_misses(run) for run in llm_runs),
+        cache_hits=sum(_run_cache_hits(run) for run in execution_runs),
+        cache_misses=sum(_run_cache_misses(run) for run in execution_runs),
         routes=sorted(
             routes.values(),
             key=lambda route: (
@@ -349,23 +464,30 @@ def _build_reviewer_coverage(
     config: ReviewConfig,
     context_packs: list[ContextPack],
     reviewer_selections: dict[str, LLMContextSelection],
-    llm_runs: list[LLMRun],
     effective_run_states: dict[tuple[str, str], EffectiveLLMPackRunState],
+    *,
+    reviewer_scope: set[str] | None = None,
+    active_verification_counts: dict[tuple[str, str], int] | None = None,
+    verification_candidate_counts: dict[tuple[str, str], int] | None = None,
+    unresolved_verification_pack_ids: set[tuple[str, str]] | None = None,
 ) -> list[LLMReviewerCoverageSummary]:
+    active_verification_counts = active_verification_counts or {}
+    verification_candidate_counts = verification_candidate_counts or {}
+    unresolved_verification_pack_ids = unresolved_verification_pack_ids or set()
     configured = {reviewer.id: reviewer for reviewer in config.reviewers}
-    enabled_configured_ids = {reviewer.id for reviewer in config.reviewers if reviewer.enabled}
+    enabled_configured_ids = {
+        reviewer.id
+        for reviewer in config.reviewers
+        if reviewer.enabled and (reviewer_scope is None or reviewer.id in reviewer_scope)
+    }
     reviewer_ids = set(reviewer_selections) | {reviewer_id for reviewer_id, _pack_id in effective_run_states}
-    if not reviewer_selections:
-        reviewer_ids.update(enabled_configured_ids)
+    reviewer_ids.update(enabled_configured_ids)
     summaries: list[LLMReviewerCoverageSummary] = []
     for reviewer_id in sorted(reviewer_ids):
         selection = reviewer_selections.get(reviewer_id)
         reviewer = configured.get(reviewer_id)
         required = reviewer.required if reviewer is not None and reviewer.enabled else False
         verify_enabled = reviewer.verify if reviewer is not None and reviewer.verify is not None else config.llm.verify
-        runs = [run for run in llm_runs if run.reviewer_id == reviewer_id]
-        review_runs = [run for run in runs if run.kind in {"review", "review_shallow"}]
-        verify_runs = [run for run in runs if run.kind == "verify"]
         reviewer_states = [
             state
             for (state_reviewer_id, _pack_id), state in effective_run_states.items()
@@ -393,9 +515,34 @@ def _build_reviewer_coverage(
                 selected_ids = list(matching_ids)
         reviewed_ids = [pack_id for pack_id in matching_ids if pack_id in reviewed]
         missing_ids = [pack_id for pack_id in selected_ids if pack_id not in reviewed]
+        reviewer_candidate_total = sum(
+            count
+            for (candidate_reviewer_id, _pack_id), count in verification_candidate_counts.items()
+            if candidate_reviewer_id == reviewer_id
+        )
+        missing_verification_ids = sorted(
+            {
+                *(
+                    pack_id
+                    for candidate_reviewer_id, pack_id in unresolved_verification_pack_ids
+                    if verify_enabled and candidate_reviewer_id == reviewer_id
+                ),
+                *(
+                    state.context_pack_id
+                    for state in reviewer_states
+                    if verify_enabled
+                    and state.context_pack_id in matching_ids
+                    and state.review is not None
+                    and state.review.status == "ok"
+                    and state.review.findings_count > 0
+                    and not any(run.status == "ok" for run in state.verify_runs)
+                    and reviewer_candidate_total == 0
+                ),
+            }
+        )
+        active_failed_review_runs = [run for run in effective_review_runs if run.status != "ok"]
         active_failed_verify_runs = [run for run in effective_verify_runs if run.status != "ok"]
-        failed_review_runs = [run for run in review_runs if run.status != "ok"]
-        failed_verify_runs = [run for run in verify_runs if run.status != "ok"]
+        effective_runs = [*effective_review_runs, *effective_verify_runs]
         reasons: list[str] = []
         if matching_ids and not selected_ids:
             reasons.append(
@@ -412,6 +559,11 @@ def _build_reviewer_coverage(
                 f"{'Required reviewer' if required else 'Reviewer'} {reviewer_id} had "
                 f"{len(active_failed_verify_runs)} failed verification run(s)."
             )
+        if missing_verification_ids:
+            reasons.append(
+                f"{'Required reviewer' if required else 'Reviewer'} {reviewer_id} has "
+                f"{len(missing_verification_ids)} reviewed pack(s) with unresolved verification subjects."
+            )
         status: Literal["not_applicable", "pass", "warn", "fail"]
         if not config.llm.enabled:
             reasons = []
@@ -422,7 +574,7 @@ def _build_reviewer_coverage(
             status = "fail" if required else "warn"
         else:
             status = "pass"
-        usage = aggregate_actual_usage(runs)
+        usage = aggregate_actual_usage(effective_runs)
         summaries.append(
             LLMReviewerCoverageSummary(
                 reviewer_id=reviewer_id,
@@ -433,12 +585,12 @@ def _build_reviewer_coverage(
                 matching_context_packs=len(matching_ids),
                 selected_context_packs=len(selected_ids),
                 reviewed_context_packs=len(reviewed_ids),
-                failed_review_runs=len(failed_review_runs),
-                failed_verify_runs=len(failed_verify_runs),
+                failed_review_runs=len(active_failed_review_runs),
+                failed_verify_runs=len(active_failed_verify_runs),
                 matching_context_pack_ids=matching_ids,
                 selected_context_pack_ids=selected_ids,
                 reviewed_context_pack_ids=reviewed_ids,
-                estimated_input_tokens=sum(run.estimated_input_tokens for run in runs),
+                estimated_input_tokens=sum(run.estimated_input_tokens for run in effective_runs),
                 actual_total_tokens=usage["actual_total_tokens"],
                 estimated_cost_usd=usage["estimated_cost_usd"],
             )
@@ -461,19 +613,24 @@ def _run_state_in_reviewer_scope(
     reviewer_selections: dict[str, LLMContextSelection],
     configured_reviewer_pack_ids: dict[str, set[str]] | None,
     scoped_context_pack_ids: set[str],
+    *,
+    verification_candidate_keys: set[tuple[str, str]],
 ) -> bool:
-    if state.context_pack_id not in scoped_context_pack_ids:
+    verification_candidate_state = (
+        bool(state.verify_runs) and (state.reviewer_id, state.context_pack_id) in verification_candidate_keys
+    )
+    if state.context_pack_id not in scoped_context_pack_ids and not verification_candidate_state:
         return False
     selection = reviewer_selections.get(state.reviewer_id)
     if selection is not None:
-        return state.context_pack_id in selection.total_context_pack_ids
-    if reviewer_selections:
-        return False
+        return state.context_pack_id in selection.total_context_pack_ids or verification_candidate_state
     if configured_reviewer_pack_ids is not None:
         return state.context_pack_id in configured_reviewer_pack_ids.get(
             state.reviewer_id,
             set(),
-        )
+        ) or (state.reviewer_id in configured_reviewer_pack_ids and verification_candidate_state)
+    if reviewer_selections:
+        return False
     return True
 
 
@@ -734,6 +891,9 @@ def _build_reviewer_coverage_todos(
     reviewer_coverage: list[LLMReviewerCoverageSummary],
     context_packs: list[ContextPack],
     effective_run_states: dict[tuple[str, str], EffectiveLLMPackRunState],
+    active_verification_counts: dict[tuple[str, str], int],
+    verification_candidate_counts: dict[tuple[str, str], int],
+    unresolved_verification_pack_ids: set[tuple[str, str]],
 ) -> list[LLMCoverageTodo]:
     packs_by_id = {pack.id: pack for pack in context_packs}
     priority_rank = {"p0": 0, "p1": 1, "p2": 2}
@@ -746,15 +906,40 @@ def _build_reviewer_coverage_todos(
             for (reviewer_id, pack_id), state in effective_run_states.items()
             if reviewer_id == reviewer.reviewer_id
         }
+        reviewer_candidate_total = sum(
+            count
+            for (candidate_reviewer_id, _pack_id), count in verification_candidate_counts.items()
+            if candidate_reviewer_id == reviewer.reviewer_id
+        )
         failed_verify_ids = {
             pack_id
             for pack_id, state in reviewer_states.items()
             if reviewer.verify_enabled and any(run.status != "ok" for run in state.verify_runs)
         }
+        missing_verify_ids = {
+            pack_id
+            for candidate_reviewer_id, pack_id in unresolved_verification_pack_ids
+            if reviewer.verify_enabled and candidate_reviewer_id == reviewer.reviewer_id
+        }
+        missing_verify_ids.update(
+            {
+                pack_id
+                for pack_id, state in reviewer_states.items()
+                if reviewer.verify_enabled
+                and state.review is not None
+                and state.review.status == "ok"
+                and state.review.findings_count > 0
+                and (
+                    (reviewer.reviewer_id, pack_id) in unresolved_verification_pack_ids
+                    or (not any(run.status == "ok" for run in state.verify_runs) and reviewer_candidate_total == 0)
+                )
+            }
+        )
         debt_ids = set(reviewer.selected_context_pack_ids).difference(reviewer.reviewed_context_pack_ids)
         if reviewer.matching_context_pack_ids and not reviewer.selected_context_pack_ids:
             debt_ids.update(reviewer.matching_context_pack_ids)
         debt_ids.update(failed_verify_ids)
+        debt_ids.update(missing_verify_ids)
         for pack_id in debt_ids:
             pack = packs_by_id.get(pack_id)
             if pack is None:
@@ -762,7 +947,11 @@ def _build_reviewer_coverage_todos(
             reason = (
                 f"Reviewer {reviewer.reviewer_id} has an active failed verification run."
                 if pack_id in failed_verify_ids
-                else f"Reviewer {reviewer.reviewer_id} did not complete its selected review."
+                else (
+                    f"Reviewer {reviewer.reviewer_id} has unresolved verification subjects."
+                    if pack_id in missing_verify_ids
+                    else f"Reviewer {reviewer.reviewer_id} did not complete its selected review."
+                )
             )
             todos.append(
                 LLMCoverageTodo(

@@ -179,7 +179,12 @@ def _pack_risk_by_severity(pack: ContextPack) -> Counter[str]:
     return Counter(str(signal.severity) for signal in pack.risk_signals)
 
 
-def pack_residual_priority(pack: ContextPack) -> str:
+def pack_residual_priority(
+    pack: ContextPack,
+    archived_priority: str | None = None,
+) -> str:
+    if archived_priority in {"p0", "p1", "p2"}:
+        return archived_priority
     risk_by_severity = _pack_risk_by_severity(pack)
     rule_modes = Counter(str(rule.mode) for rule in pack.rule_matches)
     rule_severities = Counter(str(rule.severity) for rule in pack.rule_matches)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from collections.abc import Iterable
@@ -24,6 +25,7 @@ _URL = re.compile(
     r"\b[A-Za-z][A-Za-z0-9+.-]*://[^ \t\r\n`\"'<>]+",
     flags=re.IGNORECASE,
 )
+_MAX_URL_COMPONENT_DECODE_ROUNDS = 3
 _LOCAL_URL_SCHEMES = frozenset(
     {
         "atom",
@@ -36,20 +38,6 @@ _LOCAL_URL_SCHEMES = frozenset(
         "subl",
         "vscode",
         "vscode-insiders",
-    }
-)
-_LOCAL_PATH_QUERY_KEYS = frozenset(
-    {
-        "cwd",
-        "dir",
-        "directory",
-        "file",
-        "folder",
-        "path",
-        "repo",
-        "repository",
-        "root",
-        "workspace",
     }
 )
 _UNC_ABSOLUTE_PATH = re.compile(r"(?<![\\A-Za-z0-9_])\\\\[^ \t\r\n`\"'<>|]+")
@@ -222,7 +210,11 @@ def _risk_signal_properties(signal: RiskSignal, root: str) -> dict[str, Any]:
 
 def _sarif_fingerprint(finding: Finding, root: str) -> str:
     relative_path = _repo_relative_path(finding.file, root)
-    canonical_finding = finding.model_copy(update={"file": relative_path or "<outside-repository>"})
+    if relative_path is None:
+        identity = f"{finding.context_pack_id.strip()}\0{finding.file.strip()}"
+        discriminator = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:20]
+        relative_path = f"<outside-repository:{discriminator}>"
+    canonical_finding = finding.model_copy(update={"file": relative_path})
     return finding_fingerprint(canonical_finding)
 
 
@@ -305,22 +297,76 @@ def _sanitize_url(value: str, root: str) -> str:
 
 def _url_exposes_local_path(value: str, root: str) -> bool:
     decoded = unquote(value)
-    folded = decoded.casefold()
-    if any(variant.casefold() in folded for variant in _root_path_variants(root) if len(variant) > 1):
-        return True
-
     try:
         parsed = urlsplit(decoded)
     except ValueError:
         return True
-    if any(_contains_windows_local_path(component) for component in (parsed.netloc, parsed.path, parsed.fragment)):
+    if any(
+        _url_component_exposes_local_path(component, root)
+        for component in (parsed.netloc, parsed.path, parsed.fragment)
+    ):
         return True
-    for key, query_value in parse_qsl(parsed.query, keep_blank_values=True):
-        if _contains_windows_local_path(query_value) or (
-            key.casefold() in _LOCAL_PATH_QUERY_KEYS and _is_absolute_path(query_value)
-        ):
-            return True
+    for query_key, query_value in parse_qsl(parsed.query, keep_blank_values=True):
+        for component in (query_key, query_value):
+            if _url_component_exposes_local_path(
+                component,
+                root,
+                include_absolute=True,
+            ):
+                return True
     return False
+
+
+def _url_component_exposes_local_path(
+    value: str,
+    root: str,
+    *,
+    include_absolute: bool = False,
+) -> bool:
+    candidates = tuple(_decoded_url_component_variants(value))
+    if any(
+        _contains_windows_local_path(candidate)
+        or _contains_repo_root_path(candidate, root)
+        or (include_absolute and _is_absolute_path(candidate))
+        for candidate in candidates
+    ):
+        return True
+    return unquote(candidates[-1]) != candidates[-1]
+
+
+def _decoded_url_component_variants(value: str) -> Iterable[str]:
+    yield value
+    for _ in range(_MAX_URL_COMPONENT_DECODE_ROUNDS):
+        decoded = unquote(value)
+        if decoded == value:
+            return
+        yield decoded
+        value = decoded
+
+
+def _contains_repo_root_path(value: str, root: str) -> bool:
+    folded = value.replace("\\", "/").casefold()
+    for raw_variant in _root_path_variants(root):
+        variant = raw_variant.replace("\\", "/").casefold()
+        if len(variant) <= 1:
+            continue
+        start = 0
+        while (index := folded.find(variant, start)) >= 0:
+            end = index + len(variant)
+            before_is_boundary = (
+                variant.startswith("/") or index == 0 or not (folded[index - 1].isalnum() or folded[index - 1] in "_.-")
+            )
+            after_is_boundary = (
+                end == len(folded) or folded[end] in "/\\" or _is_terminal_local_path_suffix(folded[end:])
+            )
+            if before_is_boundary and after_is_boundary:
+                return True
+            start = index + 1
+    return False
+
+
+def _is_terminal_local_path_suffix(value: str) -> bool:
+    return re.fullmatch(r"(?::\d+(?::\d+)?)?[.,;!?)}\]]*", value) is not None
 
 
 def _contains_windows_local_path(value: str) -> bool:

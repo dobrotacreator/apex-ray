@@ -2,7 +2,13 @@ from collections import Counter
 from datetime import UTC, datetime
 
 from apex_ray import __version__
-from apex_ray.findings import finding_fingerprint, finding_matches_any
+from apex_ray.findings import (
+    active_verifications,
+    finding_fingerprint,
+    historical_verifications,
+    unresolved_verifications,
+    verified_report_findings,
+)
 from apex_ray.models import (
     AnalyzerResult,
     ContextPack,
@@ -40,6 +46,7 @@ def build_report(
     llm_selection: LLMContextSelection | None = None,
     reviewer_selections: dict[str, LLMContextSelection] | None = None,
     stage_durations_ms: dict[str, int] | None = None,
+    reviewer_scope_ids: list[str] | None = None,
 ) -> ReviewReport:
     files_by_kind = Counter(file.file_kind for file in diff.files)
     files_by_language = Counter(file.language for file in diff.files)
@@ -48,6 +55,7 @@ def build_report(
     )
     actual_context_packs = context_packs or []
     actual_llm_runs = llm_runs or []
+    actual_verifications = verifications or []
     return ReviewReport(
         project=project,
         config=config,
@@ -60,6 +68,7 @@ def build_report(
         ),
         llm_selection=llm_selection,
         reviewer_selections=reviewer_selections or {},
+        reviewer_scope_ids=reviewer_scope_ids,
         stage_durations_ms=stage_durations_ms or {},
         llm_coverage=_build_llm_coverage(
             config,
@@ -67,6 +76,9 @@ def build_report(
             actual_llm_runs,
             llm_selection,
             reviewer_selections,
+            reviewer_scope_ids=reviewer_scope_ids,
+            findings=findings or [],
+            verifications=actual_verifications,
         ),
         memory_summary=_build_memory_summary(config, actual_context_packs),
         rules=[
@@ -76,7 +88,7 @@ def build_report(
         analyzer_results=analyzer_results or [],
         context_packs=actual_context_packs,
         findings=findings or [],
-        verifications=verifications or [],
+        verifications=actual_verifications,
         llm_runs=actual_llm_runs,
         generated_at=datetime.now(UTC),
         version=__version__,
@@ -362,18 +374,33 @@ def render_markdown(report: ReviewReport) -> str:
         lines.append("Verifier was not run.")
         lines.append("")
     else:
-        approved = [verification for verification in report.verifications if verification.approved]
-        rejected = [verification for verification in report.verifications if not verification.approved]
-        approved_findings = [verification.finding for verification in approved]
-        verified_findings = [finding for finding in report.findings if finding_matches_any(finding, approved_findings)]
+        current_verifications = active_verifications(report.verifications)
+        approved = [verification for verification in current_verifications if verification.approved]
+        rejected = [verification for verification in current_verifications if not verification.approved]
+        unresolved = unresolved_verifications(report.verifications)
+        superseded = historical_verifications(report.verifications)
+        verified_findings = verified_report_findings(report.findings, report.verifications)
         lines.append(f"- Unique verified findings: `{len(verified_findings)}`")
         lines.append(f"- Approved: `{len(approved)}`")
         lines.append(f"- Rejected: `{len(rejected)}`")
+        if unresolved:
+            lines.append(f"- Unresolved verification decisions: `{len(unresolved)}`")
+        if superseded:
+            lines.append(f"- Superseded historical decisions: `{len(superseded)}`")
         if rejected:
             lines.append("")
             lines.append("### Rejected")
             lines.append("")
             for verification in rejected:
+                lines.append(f"- {verification.finding.title} (`{verification.confidence}` confidence)")
+                if verification.reviewer_id != "general":
+                    lines.append(f"  - Reviewer: `{verification.reviewer_id}`")
+                lines.append(f"  - Reason: {verification.reason}")
+        if unresolved:
+            lines.append("")
+            lines.append("### Unresolved")
+            lines.append("")
+            for verification in unresolved:
                 lines.append(f"- {verification.finding.title} (`{verification.confidence}` confidence)")
                 if verification.reviewer_id != "general":
                     lines.append(f"  - Reviewer: `{verification.reviewer_id}`")
@@ -460,24 +487,60 @@ def _append_findings_section(lines: list[str], report: ReviewReport) -> None:
 def _append_focused_reviewers_section(lines: list[str], report: ReviewReport) -> None:
     lines.extend(["## Focused Reviewers", ""])
     if not report.reviewer_selections:
-        lines.append("No focused reviewer passes configured.")
+        reviewer_scope = set(report.reviewer_scope_ids) if report.reviewer_scope_ids is not None else None
+        configured_reviewers = [
+            reviewer
+            for reviewer in report.config.reviewers
+            if reviewer.enabled and (reviewer_scope is None or reviewer.id in reviewer_scope)
+        ]
+        if not configured_reviewers:
+            lines.append("No focused reviewer passes configured.")
+            lines.append("")
+            return
+        lines.append("Focused reviewers were configured, but selection data was not recorded in this report.")
+        for reviewer in configured_reviewers:
+            name = reviewer.name or reviewer.id
+            focus = f" - {reviewer.focus}" if reviewer.focus else ""
+            lines.append(f"- `{reviewer.id}` ({name}){focus}")
+            lines.append("  - Selection status: `unknown`")
         lines.append("")
         return
     configured = {reviewer.id: reviewer for reviewer in report.config.reviewers}
     coverage_by_reviewer = {reviewer.reviewer_id: reviewer for reviewer in report.llm_coverage.reviewers}
-    for reviewer_id, selection in report.reviewer_selections.items():
+    reviewer_ids = list(
+        dict.fromkeys(
+            [
+                *(reviewer.reviewer_id for reviewer in report.llm_coverage.reviewers),
+                *report.reviewer_selections,
+            ]
+        )
+    )
+    for reviewer_id in reviewer_ids:
+        selection = report.reviewer_selections.get(reviewer_id)
         reviewer = configured.get(reviewer_id)
         reviewer_coverage = coverage_by_reviewer.get(reviewer_id)
         name = reviewer.name if reviewer and reviewer.name else reviewer_id
         focus = f" - {reviewer.focus}" if reviewer and reviewer.focus else ""
-        reviewer_runs = [run for run in report.llm_runs if run.reviewer_id == reviewer_id]
-        successful_packs = {
-            run.context_pack_id
-            for run in reviewer_runs
-            if run.kind in {"review", "review_shallow"} and run.status == "ok"
-        }
-        findings_count = sum(reviewer_id in finding.reviewer_ids for finding in report.findings)
-        failed_runs = sum(run.status != "ok" for run in reviewer_runs)
+        reviewer_runs = [
+            run
+            for run in report.llm_runs
+            if run.reviewer_id == reviewer_id and run.kind in {"review", "review_shallow", "verify"}
+        ]
+        successful_packs = (
+            set(reviewer_coverage.reviewed_context_pack_ids)
+            if reviewer_coverage is not None
+            else {
+                run.context_pack_id
+                for run in reviewer_runs
+                if run.kind in {"review", "review_shallow"} and run.status == "ok"
+            }
+        )
+        findings_count = sum(reviewer_id in (finding.reviewer_ids or ["general"]) for finding in report.findings)
+        failed_runs = (
+            reviewer_coverage.failed_review_runs + reviewer_coverage.failed_verify_runs
+            if reviewer_coverage is not None
+            else sum(run.status != "ok" for run in reviewer_runs)
+        )
         lines.append(f"- `{reviewer_id}` ({name}){focus}")
         if reviewer_coverage is not None:
             requirement = ", required" if reviewer_coverage.required else ""
@@ -485,13 +548,30 @@ def _append_focused_reviewers_section(lines: list[str], report: ReviewReport) ->
             lines.append(f"  - Verification: `{'enabled' if reviewer_coverage.verify_enabled else 'disabled'}`")
             for reason in reviewer_coverage.reasons:
                 lines.append(f"    - {reason}")
-        lines.append(
-            f"  - Selected/reviewed: `{len(selection.selected_context_pack_ids)}`/"
-            f"`{len(successful_packs)}` of `{len(selection.total_context_pack_ids)}` matching packs"
+        if selection is None:
+            lines.append("  - Selection data: `missing`")
+        selected_count = (
+            len(selection.selected_context_pack_ids)
+            if selection is not None
+            else reviewer_coverage.selected_context_packs
+            if reviewer_coverage is not None
+            else 0
+        )
+        total_count = (
+            len(selection.total_context_pack_ids)
+            if selection is not None
+            else reviewer_coverage.matching_context_packs
+            if reviewer_coverage is not None
+            else 0
         )
         lines.append(
-            f"  - Deep/shallow selected: `{len(selection.deep_selected_context_pack_ids)}`/"
-            f"`{len(selection.shallow_selected_context_pack_ids)}`; findings: `{findings_count}`; "
+            f"  - Selected/reviewed: `{selected_count}`/`{len(successful_packs)}` of `{total_count}` matching packs"
+        )
+        deep_selected_count = len(selection.deep_selected_context_pack_ids) if selection is not None else 0
+        shallow_selected_count = len(selection.shallow_selected_context_pack_ids) if selection is not None else 0
+        lines.append(
+            f"  - Deep/shallow selected: `{deep_selected_count}`/"
+            f"`{shallow_selected_count}`; findings: `{findings_count}`; "
             f"failed runs: `{failed_runs}`"
         )
     lines.append("")

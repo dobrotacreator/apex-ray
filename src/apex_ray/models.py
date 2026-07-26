@@ -1,7 +1,7 @@
 import re
 from datetime import datetime
 from enum import StrEnum
-from typing import Literal
+from typing import Literal, Self
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -266,7 +266,7 @@ class LLMAPIConfig(StrictApexModel):
     use_system_proxy: bool = True
 
     @model_validator(mode="after")
-    def validate_endpoint_and_headers(self) -> LLMAPIConfig:
+    def validate_endpoint_and_headers(self) -> Self:
         if self.base_url and self.base_url_env:
             raise ValueError("Use only one of base_url or base_url_env")
         if self.base_url:
@@ -898,6 +898,7 @@ class Finding(ApexModel):
     suggested_test: str
     context_pack_id: str = ""
     reviewer_ids: list[str] = Field(default_factory=list)
+    reviewer_context_pack_ids: dict[str, list[str]] = Field(default_factory=dict)
 
 
 class FindingResponse(ApexModel):
@@ -927,6 +928,9 @@ class FindingVerification(ApexModel):
     approved: bool
     confidence: FindingConfidence
     reason: str
+    review_snapshot_id: str | None = None
+    superseded: bool = False
+    superseded_reason: str | None = None
 
 
 class FindingResolutionStatus(StrEnum):
@@ -1014,6 +1018,7 @@ class ReviewReport(ApexModel):
     summary: ReportSummary
     llm_selection: LLMContextSelection | None = None
     reviewer_selections: dict[str, LLMContextSelection] = Field(default_factory=dict)
+    reviewer_scope_ids: list[str] | None = None
     stage_durations_ms: dict[str, int] = Field(default_factory=dict)
     llm_coverage: LLMCoverageSummary = Field(default_factory=LLMCoverageSummary)
     memory_summary: MemorySummary = Field(default_factory=MemorySummary)

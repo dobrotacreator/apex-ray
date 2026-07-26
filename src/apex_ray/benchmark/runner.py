@@ -17,6 +17,7 @@ from apex_ray.benchmark.models import (
 from apex_ray.benchmark.reporting import (
     format_llm_route_summary as _format_llm_route_summary,
 )
+from apex_ray.findings import active_verifications
 from apex_ray.invocation import ReviewOverrides, apply_review_overrides
 from apex_ray.llm import FakeLLMProvider, LLMProvider
 from apex_ray.models import (
@@ -167,6 +168,7 @@ def run_benchmark_case(
         and not extra_findings
     )
 
+    current_verifications = active_verifications(report.verifications)
     return BenchmarkCaseResult(
         name=case.name,
         passed=passed,
@@ -185,8 +187,8 @@ def run_benchmark_case(
         llm_profiles=sorted({run.profile for run in report.llm_runs if run.profile}),
         llm_routes=[_format_llm_route_summary(route) for route in report.llm_coverage.routes],
         verifications_count=len(report.verifications),
-        verifier_approved_count=sum(1 for verification in report.verifications if verification.approved),
-        verifier_rejected_count=sum(1 for verification in report.verifications if not verification.approved),
+        verifier_approved_count=sum(1 for verification in current_verifications if verification.approved),
+        verifier_rejected_count=sum(1 for verification in current_verifications if not verification.approved),
         expected_results=expected_results,
         expected_context_results=expected_context_results,
         extra_findings=extra_findings,

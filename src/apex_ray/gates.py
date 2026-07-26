@@ -2,8 +2,15 @@ from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
-from apex_ray.findings import finding_fingerprint, finding_matches_any
+from apex_ray.findings import (
+    finding_fingerprint,
+    reviewer_origin_pack_ids,
+    reviewer_origins_are_explicit,
+    verified_report_findings,
+)
 from apex_ray.models import Finding, PrePushGateConfig, ReviewReport
+from apex_ray.report.run_state import reduce_llm_pack_run_states
+from apex_ray.reviewers import effective_reviewers, reviewer_matches_pack
 from apex_ray.triage import StaleSuppression, SuppressedFinding
 
 _FINDING_SEVERITY_RANK = {
@@ -151,11 +158,49 @@ def _blocking_findings(report: ReviewReport, config: PrePushGateConfig) -> list[
 
 def _eligible_findings(report: ReviewReport, config: PrePushGateConfig) -> list[Finding]:
     if not config.require_verified_findings:
-        return report.findings
-    approved = [verification.finding for verification in report.verifications if verification.approved]
-    if not approved:
-        return []
-    return [finding for finding in report.findings if finding_matches_any(finding, approved)]
+        return [finding for finding in report.findings if _legacy_finding_is_in_current_reviewer_scope(report, finding)]
+    return verified_report_findings(report.findings, report.verifications)
+
+
+def _legacy_finding_is_in_current_reviewer_scope(
+    report: ReviewReport,
+    finding: Finding,
+) -> bool:
+    provenance = finding.reviewer_ids or ["general"]
+    pack = next(
+        (pack for pack in report.context_packs if pack.id == finding.context_pack_id),
+        None,
+    )
+    reviewers_by_id = {reviewer.id: reviewer for reviewer in effective_reviewers(report.config.reviewers)}
+    states = reduce_llm_pack_run_states(report.llm_runs)
+    reviewer_scope = set(report.reviewer_scope_ids) if report.reviewer_scope_ids is not None else None
+    for reviewer_id in provenance:
+        if reviewer_scope is not None and reviewer_id not in reviewer_scope:
+            continue
+        reviewer = reviewers_by_id.get(reviewer_id)
+        if reviewer is None:
+            continue
+        matching_pack_ids = {
+            candidate.id for candidate in report.context_packs if reviewer_matches_pack(reviewer, candidate)
+        }
+        if reviewer_origins_are_explicit(finding, reviewer_id):
+            if reviewer_origin_pack_ids(finding, reviewer_id).intersection(matching_pack_ids):
+                return True
+            continue
+        if pack is not None and reviewer_matches_pack(reviewer, pack):
+            return True
+        if not matching_pack_ids:
+            continue
+        scope_was_reviewed_clean = all(
+            (state := states.get((reviewer_id, context_pack_id))) is not None
+            and state.review is not None
+            and state.review.status == "ok"
+            and state.review.findings_count == 0
+            for context_pack_id in matching_pack_ids
+        )
+        if not scope_was_reviewed_clean:
+            return True
+    return False
 
 
 def _partial_severity_blocks(

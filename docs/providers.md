@@ -77,7 +77,11 @@ The built-in API providers pin their documented service hosts, use native
 structured output where the provider supports it, normalize usage metadata,
 honor `Retry-After`, and retry only transient network/rate-limit/server
 failures. Authentication, quota, refusal, truncation, and malformed-output
-failures remain distinct in reports and gates.
+failures remain distinct in reports and gates. Presets are limited to
+protocols implemented by their official service: OpenAI supports both the
+Responses and Chat Completions protocols, while the other presets use their
+native protocol. Use `openai_compatible` when a gateway for the same model
+requires a different wire protocol.
 
 The Chinese flagship presets use OpenAI-compatible transports with their
 provider-specific endpoint, key variable, structured-output capability, and
@@ -136,7 +140,6 @@ review:
       structured_output: json_schema
       base_url_env: COMPANY_LLM_BASE_URL
       api_key_env: COMPANY_LLM_API_KEY
-      allowed_hosts_env: APEX_RAY_API_ALLOWED_HOSTS
       headers_from_env:
         X-Tenant-ID: COMPANY_LLM_TENANT
 ```
@@ -147,15 +150,35 @@ Supported protocols are `openai_responses`, `anthropic_messages`, and
 
 HTTPS is mandatory except for loopback integration tests. Redirects are not
 followed, credentials cannot appear in the URL, reserved authentication
-headers cannot be overridden, and response bodies are size-limited. In CI, a
-custom endpoint must come from `base_url_env` and its normalized hostname must
-also appear in the CI-controlled allowlist variable. For example:
+headers cannot be overridden, and response bodies are size-limited.
+
+In CI, Apex Ray uses two fixed, trusted policy variables whose names cannot be
+changed by repository configuration:
+
+- `APEX_RAY_API_ALLOWED_HOSTS` lists normalized custom endpoint hostnames;
+- `APEX_RAY_API_ALLOWED_ENV_VARS` lists the environment-variable names that
+  repository configuration may select for `base_url_env`, `api_key_env`, and
+  `headers_from_env`.
+
+For example:
 
 ```yaml
 env:
   COMPANY_LLM_BASE_URL: https://llm.example.internal/v1
+  COMPANY_LLM_API_KEY: ${{ secrets.COMPANY_LLM_API_KEY }}
+  COMPANY_LLM_TENANT: apex-ray
   APEX_RAY_API_ALLOWED_HOSTS: llm.example.internal
+  APEX_RAY_API_ALLOWED_ENV_VARS: >-
+    COMPANY_LLM_BASE_URL,COMPANY_LLM_API_KEY,COMPANY_LLM_TENANT
 ```
+
+Define both policy variables in trusted CI or a protected environment, not
+from checked-in Apex Ray configuration or pull-request input. Built-in presets
+always use their preset API-key variable in CI. Preset endpoint/header
+selectors and all custom-provider selectors must appear in
+`APEX_RAY_API_ALLOWED_ENV_VARS`. Outside CI, custom endpoints, selector names,
+and loopback HTTP remain configurable for local gateways and integration
+tests.
 
 ## Provider Setup Checklist
 

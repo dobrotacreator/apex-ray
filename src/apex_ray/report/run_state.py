@@ -17,9 +17,21 @@ def reduce_llm_pack_run_states(
 ) -> dict[tuple[str, str], EffectiveLLMPackRunState]:
     states: dict[tuple[str, str], EffectiveLLMPackRunState] = {}
     for run in runs:
+        key = (run.reviewer_id, run.context_pack_id)
+        if run.kind == "review_reset":
+            states.pop(key, None)
+            continue
+        if run.kind == "verify_reset":
+            prior = states.get(key)
+            if prior is not None:
+                states[key] = EffectiveLLMPackRunState(
+                    reviewer_id=run.reviewer_id,
+                    context_pack_id=run.context_pack_id,
+                    review=prior.review,
+                )
+            continue
         if run.kind not in {"review", "review_shallow", "verify"}:
             continue
-        key = (run.reviewer_id, run.context_pack_id)
         prior = states.get(key)
         if run.kind in {"review", "review_shallow"}:
             states[key] = EffectiveLLMPackRunState(

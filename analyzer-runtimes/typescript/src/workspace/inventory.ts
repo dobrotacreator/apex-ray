@@ -159,7 +159,10 @@ function loadManifestRepoFileInventory(
     (parsed.package_files !== undefined &&
       !Array.isArray(parsed.package_files)) ||
     (parsed.config_files !== undefined &&
-      !Array.isArray(parsed.config_files))
+      !Array.isArray(parsed.config_files)) ||
+    (parsed.partial_reason !== undefined &&
+      (typeof parsed.partial_reason !== "string" ||
+        parsed.partial_reason.trim().length === 0))
   ) {
     throw new Error(`Invalid TypeScript file manifest: ${manifestPath}`);
   }
@@ -170,6 +173,14 @@ function loadManifestRepoFileInventory(
   const packagePathsByKey = new Map<string, string>();
   const configPathsByKey = new Map<string, string>();
   let partialReason: string | null = changed.partialReason;
+  // Version-two producers may truncate before launching Node so the manifest
+  // itself stays within this consumer's entry and byte safety bounds.
+  if (typeof parsed.partial_reason === "string") {
+    partialReason = combinePartialReasons(
+      partialReason,
+      parsed.partial_reason,
+    );
+  }
   for (const value of parsed.files) {
     if (shouldStop()) {
       partialReason =

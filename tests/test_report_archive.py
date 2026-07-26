@@ -1,19 +1,50 @@
 import gzip
 import json
 import unicodedata
+import zlib
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
 import pytest
 
-from apex_ray.models import DiffSummary, ProjectProfile, ReportsConfig, ReviewConfig, TargetMode
+import apex_ray.report.loading as report_loading_module
+from apex_ray.findings import active_verifications, unresolved_verifications
+from apex_ray.models import (
+    ContextPack,
+    DiffSummary,
+    Finding,
+    FindingConfidence,
+    FindingSeverity,
+    FindingVerification,
+    LLMRun,
+    ProjectProfile,
+    ReportsConfig,
+    ReviewConfig,
+    TargetMode,
+)
 from apex_ray.report import (
     ReportArtifact,
+    ReviewReportLoadError,
     archive_report_artifacts,
     build_report,
     load_review_report,
 )
+
+
+def _gzip_with_optional_headers(payload: bytes) -> bytes:
+    header = bytearray(b"\x1f\x8b\x08\x1e" + b"\0" * 4 + b"\0\xff")
+    extra = b"ARAY"
+    header.extend(len(extra).to_bytes(2, "little"))
+    header.extend(extra)
+    header.extend(b"review.json\0")
+    header.extend(b"Apex Ray archive\0")
+    header.extend((zlib.crc32(header) & 0xFFFF).to_bytes(2, "little"))
+    compressor = zlib.compressobj(wbits=-zlib.MAX_WBITS)
+    body = compressor.compress(payload) + compressor.flush()
+    trailer = (zlib.crc32(payload) & 0xFFFFFFFF).to_bytes(4, "little")
+    trailer += (len(payload) & 0xFFFFFFFF).to_bytes(4, "little")
+    return bytes(header) + body + trailer
 
 
 def test_archive_report_artifacts_writes_run_directory(tmp_path: Path) -> None:
@@ -36,6 +67,31 @@ def test_archive_report_artifacts_writes_run_directory(tmp_path: Path) -> None:
     assert (run_dir / "review.md").read_text(encoding="utf-8") == "# report\n"
     assert (run_dir / "review.json").read_text(encoding="utf-8") == '{"ok": true}\n'
     assert "review.md" in (run_dir / "manifest.json").read_text(encoding="utf-8")
+
+
+def test_archive_report_artifacts_resolves_relative_source_paths_from_repository_root(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+
+    run_dir = archive_report_artifacts(
+        root,
+        ReportsConfig(archive=True, archive_dir=".apex-ray/reports/runs"),
+        [
+            ReportArtifact(
+                Path(".apex-ray/reports/review.json"),
+                "{}",
+            )
+        ],
+        run_id="relative-source",
+    )
+
+    assert run_dir is not None
+    manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["files"][0]["source_path"] == ".apex-ray/reports/review.json"
+    assert manifest["files"][0]["source_scope"] == "repository"
+    assert manifest["files"][0]["source_id"] == "repository:.apex-ray/reports/review.json"
 
 
 def test_archive_report_artifacts_prunes_old_runs(tmp_path: Path) -> None:
@@ -244,3 +300,176 @@ def test_load_review_report_reads_gzip_archive_artifact(tmp_path: Path) -> None:
 
     assert loaded.project == report.project
     assert loaded.diff == report.diff
+
+
+@pytest.mark.parametrize(
+    ("reason", "include_failed_run", "expected_status"),
+    [
+        ("Verifier failed for this finding: temporary outage", True, "failed_provider"),
+        ("Missing context pack: src/auth.ts#authorize:1", False, "missing_context_pack"),
+    ],
+)
+def test_load_review_report_migrates_legacy_verifier_outages_to_unresolved(
+    tmp_path: Path,
+    reason: str,
+    include_failed_run: bool,
+    expected_status: str,
+) -> None:
+    pack = ContextPack(id="src/auth.ts#authorize:1", file="src/auth.ts")
+    finding = Finding(
+        title="Authorization bypass",
+        severity=FindingSeverity.HIGH,
+        confidence=FindingConfidence.HIGH,
+        file=pack.file,
+        failure_mode="A transfer bypasses account ownership authorization.",
+        evidence="The changed branch dispatches before the ownership check.",
+        suggested_fix="Check ownership before dispatch.",
+        suggested_test="Reject a cross-account transfer.",
+        context_pack_id=pack.id,
+    )
+    report = build_report(
+        ProjectProfile(root="/repo", is_git_repo=True),
+        ReviewConfig(),
+        DiffSummary(target_mode=TargetMode.PATCH),
+        context_packs=[pack],
+        findings=[finding],
+        verifications=[
+            FindingVerification(
+                finding=finding,
+                approved=False,
+                confidence=FindingConfidence.LOW,
+                reason=reason,
+            )
+        ],
+        llm_runs=(
+            [
+                LLMRun(
+                    kind="verify",
+                    provider="fake",
+                    context_pack_id=pack.id,
+                    status="failed_provider",
+                    duration_ms=1,
+                )
+            ]
+            if include_failed_run
+            else []
+        ),
+    )
+    payload = report.model_dump(mode="json")
+    payload["verifications"][0].pop("superseded")
+    payload["verifications"][0].pop("superseded_reason")
+    path = tmp_path / "legacy-review.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = load_review_report(path)
+
+    assert active_verifications(loaded.verifications) == []
+    assert unresolved_verifications(loaded.verifications) == loaded.verifications
+    assert loaded.verifications[0].superseded_reason == (
+        f"Verification run did not complete successfully ({expected_status})."
+    )
+
+
+def test_load_review_report_accepts_bounded_optional_gzip_headers(tmp_path: Path) -> None:
+    report = build_report(
+        ProjectProfile(root="/repo", is_git_repo=True),
+        ReviewConfig(),
+        DiffSummary(target_mode=TargetMode.PATCH),
+    )
+    path = tmp_path / "review.json.gz"
+    path.write_bytes(_gzip_with_optional_headers(report.model_dump_json().encode()))
+
+    loaded = load_review_report(path)
+
+    assert loaded.project == report.project
+    assert loaded.diff == report.diff
+
+
+@pytest.mark.parametrize("compressed", [False, True])
+def test_load_review_report_rejects_payloads_over_the_bounded_size(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    compressed: bool,
+) -> None:
+    path = tmp_path / ("review.json.gz" if compressed else "review.json")
+    payload = b'{"padding":"' + (b"x" * 512) + b'"}'
+    path.write_bytes(gzip.compress(payload, mtime=0) if compressed else payload)
+    monkeypatch.setattr(report_loading_module, "_MAX_REPORT_BYTES", 128)
+
+    with pytest.raises(ReviewReportLoadError, match="exceeds 128 bytes"):
+        load_review_report(path)
+
+
+def test_load_review_report_bounds_concatenated_gzip_members(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "review.json.gz"
+    path.write_bytes(b"".join(gzip.compress(b"", mtime=0) for _ in range(128)) + gzip.compress(b"{}", mtime=0))
+    monkeypatch.setattr(report_loading_module, "_MAX_REPORT_BYTES", 128)
+
+    with pytest.raises(
+        ReviewReportLoadError,
+        match=r"compressed Apex Ray report .* exceeds 1152 bytes",
+    ):
+        load_review_report(path)
+
+
+def test_load_review_report_rejects_multiple_gzip_members(tmp_path: Path) -> None:
+    path = tmp_path / "review.json.gz"
+    path.write_bytes(gzip.compress(b"{}") + gzip.compress(b""))
+
+    with pytest.raises(
+        ReviewReportLoadError,
+        match=r"gzip Apex Ray report .* contains trailing data",
+    ):
+        load_review_report(path)
+
+
+def test_load_review_report_rejects_oversized_gzip_header(tmp_path: Path) -> None:
+    path = tmp_path / "review.json.gz"
+    path.write_bytes(b"\x1f\x8b\x08\x08" + b"\0" * 6 + b"a" * (64 * 1024) + b"\0")
+
+    with pytest.raises(
+        ReviewReportLoadError,
+        match=r"gzip header .* exceeds 65536 bytes",
+    ):
+        load_review_report(path)
+
+
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        (b"\x1f\x8b\x08\xe0" + b"\0" * 6, "reserved header flags"),
+        (b"\x1f\x8b\x08\x04" + b"\0" * 6 + b"\x04\0ab", "truncated header"),
+        (b"\x1f\x8b\x08\x08" + b"\0" * 6 + b"name", "truncated header"),
+    ],
+)
+def test_load_review_report_rejects_malformed_gzip_headers(
+    tmp_path: Path,
+    payload: bytes,
+    message: str,
+) -> None:
+    path = tmp_path / "review.json.gz"
+    path.write_bytes(payload)
+
+    with pytest.raises(ReviewReportLoadError, match=message):
+        load_review_report(path)
+
+
+def test_load_review_report_rejects_corrupt_gzip_checksum(tmp_path: Path) -> None:
+    path = tmp_path / "review.json.gz"
+    payload = bytearray(gzip.compress(b"{}", mtime=0))
+    payload[-8] ^= 0xFF
+    path.write_bytes(payload)
+
+    with pytest.raises(ReviewReportLoadError, match="Invalid gzip Apex Ray report"):
+        load_review_report(path)
+
+
+def test_load_review_report_rejects_pathologically_nested_json(tmp_path: Path) -> None:
+    path = tmp_path / "review.json"
+    path.write_text("[" * 1_000_000 + "0" + "]" * 1_000_000, encoding="utf-8")
+
+    with pytest.raises(ReviewReportLoadError, match="Invalid JSON in Apex Ray report"):
+        load_review_report(path)

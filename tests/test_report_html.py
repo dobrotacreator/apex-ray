@@ -126,3 +126,88 @@ def test_render_html_attributes_findings_routes_and_coverage_to_reviewers() -> N
     assert "<unsafe&reviewer>" not in html
     assert "<Lead>" not in html
     assert "<manual>" not in html
+
+
+def test_render_html_counts_empty_reviewer_ids_as_general() -> None:
+    pack_id = "src/auth.ts#authorize:1"
+    config = ReviewConfig()
+    config.llm.enabled = True
+    selection = LLMContextSelection(
+        total_context_pack_ids=[pack_id],
+        selected_context_pack_ids=[pack_id],
+        deep_selected_context_pack_ids=[pack_id],
+    )
+    report = build_report(
+        ProjectProfile(root="/repo", is_git_repo=True),
+        config,
+        DiffSummary(target_mode=TargetMode.PATCH),
+        context_packs=[ContextPack(id=pack_id, file="src/auth.ts")],
+        findings=[
+            Finding(
+                title="Authorization bypass",
+                severity=FindingSeverity.HIGH,
+                confidence=FindingConfidence.HIGH,
+                file="src/auth.ts",
+                failure_mode="A request can bypass authorization.",
+                evidence="The changed branch returns before the guard.",
+                suggested_fix="Run the guard first.",
+                suggested_test="Reject an unauthorized request.",
+                context_pack_id=pack_id,
+                reviewer_context_pack_ids={"general": [pack_id]},
+            )
+        ],
+        llm_runs=[
+            LLMRun(
+                provider="fake",
+                reviewer_id="general",
+                context_pack_id=pack_id,
+                status="ok",
+                duration_ms=1,
+                findings_count=1,
+            )
+        ],
+        reviewer_selections={"general": selection},
+    )
+
+    html = render_html(report)
+
+    assert "<code>general</code> - general" in html
+    assert "findings: 1" in html
+
+
+def test_render_html_distinguishes_unresolved_verification_from_rejection() -> None:
+    finding = Finding(
+        title="Authorization bypass",
+        severity=FindingSeverity.HIGH,
+        confidence=FindingConfidence.HIGH,
+        file="src/auth.ts",
+        line=42,
+        failure_mode="A transfer can bypass its tenant guard.",
+        evidence="The changed branch runs before tenant authorization.",
+        suggested_fix="Run the tenant guard before dispatch.",
+        suggested_test="Reject a cross-tenant transfer.",
+        context_pack_id="src/auth.ts#authorize:1",
+    )
+    report = build_report(
+        ProjectProfile(root="/repo", is_git_repo=True),
+        ReviewConfig(),
+        DiffSummary(target_mode=TargetMode.PATCH),
+        verifications=[
+            FindingVerification(
+                finding=finding,
+                approved=False,
+                confidence=FindingConfidence.LOW,
+                reason="The verifier was unavailable.",
+                superseded=True,
+                superseded_reason="Verification run did not complete successfully (failed_provider).",
+            )
+        ],
+    )
+
+    html = render_html(report)
+
+    assert "Unresolved verification decisions: 1" in html
+    assert "Superseded historical decisions" not in html
+    assert "<td><code>unresolved</code></td>" in html
+    assert "<td><code>pending</code></td>" in html
+    assert "<td><code>rejected</code></td>" not in html

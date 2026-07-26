@@ -21,6 +21,8 @@ _VERSION_RE = re.compile(r"^[0-9A-Za-z][0-9A-Za-z.+_-]*$")
 _CLI_LLM_PROVIDERS = {"codex_cli", "claude_code_cli"}
 _QUALITY_GATE_STATUSES = {"disabled", "pass", "warn", "fail"}
 _ZERO_SHA = "0" * 40
+_MAX_ANNOTATIONS = 50
+_MAX_ANNOTATION_CHARS = 4_000
 
 
 class PlanOptions(NamedTuple):
@@ -97,7 +99,8 @@ def create_plan(options: PlanOptions) -> dict[str, Any]:
             )
             raw_config = head_config.read_text(encoding="utf-8") if head_config.is_file() else None
         else:
-            raw_config = _read_git_file(workspace, base_sha, requested_config) if base_sha else None
+            config_base_sha = _resolve_pull_request_config_base(workspace, pr_data)
+            raw_config = _read_git_file(workspace, config_base_sha, requested_config)
         config_document = _load_config_document(raw_config)
         safe_config = _sanitize_config(config_document, runner_temp)
         if not untrusted_pr and llm != "false":
@@ -265,6 +268,19 @@ def _event_base_ref(event: dict[str, Any]) -> str:
     if isinstance(before, str) and before and before != _ZERO_SHA:
         return before
     return ""
+
+
+def _resolve_pull_request_config_base(
+    workspace: Path,
+    pull_request: dict[str, Any],
+) -> str:
+    base_sha = _nested_string(pull_request, "base", "sha")
+    if not re.fullmatch(r"[0-9a-f]{40,64}", base_sha):
+        raise ValueError("Pull-request event must include a valid base commit SHA to load restricted configuration.")
+    try:
+        return _resolve_commit(workspace, base_sha)
+    except ValueError as exc:
+        raise ValueError("Unable to resolve the pull-request base commit SHA for restricted configuration.") from exc
 
 
 def _is_untrusted_pull_request(
@@ -478,6 +494,58 @@ def _write_step_summary(lines: list[str]) -> None:
         stream.write("\n")
 
 
+def _workflow_command_escape(value: str, *, property_value: bool = False) -> str:
+    sanitized = "".join(
+        character if character in {"\r", "\n", "\t"} or ord(character) >= 32 else "\N{REPLACEMENT CHARACTER}"
+        for character in value
+    )
+    escaped = sanitized.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+    if property_value:
+        escaped = escaped.replace(":", "%3A").replace(",", "%2C")
+    return escaped
+
+
+def _safe_annotation_file(value: str) -> str | None:
+    normalized = value.replace("\\", "/")
+    if any(ord(character) < 32 for character in normalized):
+        return None
+    path = PurePosixPath(normalized)
+    if not normalized or path.is_absolute() or ".." in path.parts:
+        return None
+    return path.as_posix()
+
+
+def _emit_finding_annotations(findings: list[Any]) -> None:
+    command_by_severity = {
+        "critical": "error",
+        "high": "error",
+        "medium": "warning",
+        "low": "notice",
+    }
+    emitted = 0
+    for finding in findings:
+        if emitted >= _MAX_ANNOTATIONS:
+            break
+        line = finding.line
+        file = _safe_annotation_file(str(finding.file))
+        if file is None or not isinstance(line, int) or isinstance(line, bool) or line < 1:
+            continue
+        severity = str(finding.severity)
+        command = command_by_severity.get(severity, "warning")
+        title = _workflow_command_escape(
+            f"Apex Ray {severity} finding",
+            property_value=True,
+        )
+        message = f"{finding.title}: {finding.failure_mode}"[:_MAX_ANNOTATION_CHARS]
+        print(
+            f"::{command} "
+            f"file={_workflow_command_escape(file, property_value=True)},"
+            f"line={line},title={title}::"
+            f"{_workflow_command_escape(message)}"
+        )
+        emitted += 1
+
+
 def _write_plan_outputs(plan: dict[str, Any], plan_path: Path) -> None:
     outputs = {
         "plan": str(plan_path),
@@ -654,6 +722,12 @@ def _finalize(plan_path: Path) -> int:
     if not isinstance(fail_on_quality_gate, bool):
         raise ValueError("Invalid Apex Ray Action quality gate policy.")
     quality_gate_failed = fail_on_quality_gate and quality_gate_status == "fail"
+    reviewer_statuses = {
+        reviewer.reviewer_id: reviewer.status
+        for reviewer in sorted(coverage.reviewers, key=lambda reviewer: reviewer.reviewer_id)
+    }
+    partial_coverage = coverage.partial_severity != "none"
+    _emit_finding_annotations(report.findings)
     _write_step_summary(
         [
             "## Apex Ray review",
@@ -670,8 +744,25 @@ def _finalize(plan_path: Path) -> int:
             "",
         ]
     )
-    _write_output("quality-gate-status", quality_gate_status)
-    _write_output("sarif-ready", "true")
+    outputs = {
+        "findings-count": str(len(report.findings)),
+        "critical-findings-count": str(counts["critical"]),
+        "high-findings-count": str(counts["high"]),
+        "medium-findings-count": str(counts["medium"]),
+        "low-findings-count": str(counts["low"]),
+        "partial-coverage": str(partial_coverage).lower(),
+        "partial-coverage-severity": str(coverage.partial_severity),
+        "reviewer-statuses": json.dumps(
+            reviewer_statuses,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        "quality-gate-status": quality_gate_status,
+        "gate-outcome": "fail" if quality_gate_failed else "pass",
+        "sarif-ready": "true",
+    }
+    for name, value in outputs.items():
+        _write_output(name, value)
     return 1 if quality_gate_failed else 0
 
 

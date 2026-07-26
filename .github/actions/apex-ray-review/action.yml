@@ -19,7 +19,7 @@ inputs:
     required: false
     default: "true"
   base:
-    description: Optional base ref override. Pull requests use the immutable base SHA by default.
+    description: Optional analysis base ref override. Base-sourced PR config still uses the event base SHA.
     required: false
     default: ""
   trust-pr-config:
@@ -94,6 +94,33 @@ outputs:
   quality-gate-status:
     description: Coverage quality gate status from the JSON report.
     value: ${{ steps.finalize.outputs.quality-gate-status }}
+  gate-outcome:
+    description: Enforced gate outcome after applying fail-on-quality-gate.
+    value: ${{ steps.finalize.outputs.gate-outcome }}
+  findings-count:
+    description: Total findings in the JSON report.
+    value: ${{ steps.finalize.outputs.findings-count }}
+  critical-findings-count:
+    description: Critical findings in the JSON report.
+    value: ${{ steps.finalize.outputs.critical-findings-count }}
+  high-findings-count:
+    description: High-severity findings in the JSON report.
+    value: ${{ steps.finalize.outputs.high-findings-count }}
+  medium-findings-count:
+    description: Medium-severity findings in the JSON report.
+    value: ${{ steps.finalize.outputs.medium-findings-count }}
+  low-findings-count:
+    description: Low-severity findings in the JSON report.
+    value: ${{ steps.finalize.outputs.low-findings-count }}
+  partial-coverage:
+    description: Whether the report has partial LLM coverage.
+    value: ${{ steps.finalize.outputs.partial-coverage }}
+  partial-coverage-severity:
+    description: Partial LLM coverage severity.
+    value: ${{ steps.finalize.outputs.partial-coverage-severity }}
+  reviewer-statuses:
+    description: Stable JSON object mapping reviewer ids to coverage statuses.
+    value: ${{ steps.finalize.outputs.reviewer-statuses }}
   sarif-upload-outcome:
     description: Outcome of the optional, non-blocking code-scanning upload.
     value: ${{ steps.upload-sarif.outcome }}
@@ -111,6 +138,20 @@ runs:
           echo "::error title=Untrusted Apex Ray action source::Use the remote Apex Ray action pinned to a full 40-character commit SHA; local paths and mutable tags are not supported."
           exit 1
         fi
+
+    - name: Validate action inputs
+      id: validate-inputs
+      shell: bash
+      env:
+        INPUT_CHECKOUT: ${{ inputs.checkout }}
+      run: |
+        case "$INPUT_CHECKOUT" in
+          true|false) ;;
+          *)
+            echo "::error title=Invalid Apex Ray action input::checkout must be exactly 'true' or 'false'."
+            exit 2
+            ;;
+        esac
 
     - name: Checkout exact review head
       id: checkout
@@ -204,7 +245,7 @@ runs:
     - name: Upload review artifact
       id: upload-artifact
       if: ${{ always() && steps.prepare.outcome == 'success' && steps.review.outcome == 'success' && inputs.upload-artifact == 'true' }}
-      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
       with:
         name: ${{ steps.prepare.outputs.artifact-name }}
         path: |

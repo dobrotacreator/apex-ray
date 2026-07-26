@@ -2,6 +2,7 @@ import json
 import shutil
 import subprocess
 import tracemalloc
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -643,9 +644,18 @@ def test_typescript_manifest_does_not_read_packages_for_relative_extends(
     original_read = typescript_analyzer_module._read_inventory_config
     reads: list[Path] = []
 
-    def record_read(repo_root: Path, relative_path: Path) -> str | None:
+    def record_read(
+        repo_root: Path,
+        relative_path: Path,
+        *,
+        check_deadline: Callable[[], None] = lambda: None,
+    ) -> str | None:
         reads.append(relative_path)
-        return original_read(repo_root, relative_path)
+        return original_read(
+            repo_root,
+            relative_path,
+            check_deadline=check_deadline,
+        )
 
     monkeypatch.setattr(typescript_analyzer_module, "_read_inventory_config", record_read)
 
@@ -724,6 +734,76 @@ def test_typescript_manifest_streams_large_inventory_with_bounded_memory(tmp_pat
     assert len(payload["files"]) == len(inventory)
 
 
+def test_typescript_manifest_marks_entry_limit_truncation_without_exceeding_consumer_limit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert typescript_analyzer_module.TS_FILE_MANIFEST_ENTRY_LIMIT == 50_000
+    monkeypatch.setattr(typescript_analyzer_module, "TS_FILE_MANIFEST_ENTRY_LIMIT", 3)
+    inventory = [Path(f"src/file-{index}.ts") for index in range(4)]
+    manifest_path = tmp_path / "files.json"
+
+    typescript_analyzer_module._write_typescript_file_manifest(
+        tmp_path,
+        manifest_path,
+        project_files=inventory[:3],
+    )
+    exact_payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert exact_payload["files"] == [path.as_posix() for path in inventory[:3]]
+    assert "partial_reason" not in exact_payload
+
+    typescript_analyzer_module._write_typescript_file_manifest(
+        tmp_path,
+        manifest_path,
+        project_files=inventory,
+    )
+
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert payload["files"] == [path.as_posix() for path in inventory[:3]]
+    assert "producer reached the 3-entry safety limit" in payload["partial_reason"]
+
+
+def test_typescript_manifest_byte_limit_includes_partial_marker_and_closing_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert typescript_analyzer_module.TS_FILE_MANIFEST_BYTE_LIMIT == 16 * 1024 * 1024
+    inventory = [
+        Path("src/short.ts"),
+        Path(f"src/{'x' * 220}.ts"),
+        Path("src/tail.ts"),
+    ]
+    manifest_path = tmp_path / "files.json"
+
+    typescript_analyzer_module._write_typescript_file_manifest(
+        tmp_path,
+        manifest_path,
+        project_files=inventory,
+    )
+    exact_size = manifest_path.stat().st_size
+    monkeypatch.setattr(typescript_analyzer_module, "TS_FILE_MANIFEST_BYTE_LIMIT", exact_size)
+    typescript_analyzer_module._write_typescript_file_manifest(
+        tmp_path,
+        manifest_path,
+        project_files=inventory,
+    )
+    exact_payload = json.loads(manifest_path.read_bytes())
+    assert manifest_path.stat().st_size == exact_size
+    assert "partial_reason" not in exact_payload
+
+    monkeypatch.setattr(typescript_analyzer_module, "TS_FILE_MANIFEST_BYTE_LIMIT", exact_size - 1)
+    typescript_analyzer_module._write_typescript_file_manifest(
+        tmp_path,
+        manifest_path,
+        project_files=inventory,
+    )
+    raw = manifest_path.read_bytes()
+    payload = json.loads(raw)
+    assert len(raw) <= exact_size - 1
+    assert payload["files"] == ["src/short.ts", "src/tail.ts"]
+    assert f"producer reached the {exact_size - 1}-byte safety limit" in payload["partial_reason"]
+
+
 def test_typescript_manifest_atomic_write_preserves_existing_target_on_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -748,6 +828,36 @@ def test_typescript_manifest_atomic_write_preserves_existing_target_on_failure(
             tmp_path,
             manifest_path,
             project_files=[Path("src/first.ts"), Path("src/second.ts")],
+        )
+
+    assert json.loads(manifest_path.read_text(encoding="utf-8")) == {
+        "version": 1,
+        "files": ["original.ts"],
+    }
+    assert list(tmp_path.glob(".files.json.*.tmp")) == []
+
+
+def test_typescript_manifest_generation_stops_at_the_total_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest_path = tmp_path / "files.json"
+    manifest_path.write_text('{"version":1,"files":["original.ts"]}', encoding="utf-8")
+    clock = [0.0]
+
+    def advancing_clock() -> float:
+        clock[0] += 0.2
+        return clock[0]
+
+    monkeypatch.setattr("apex_ray.analyzers.typescript.time.monotonic", advancing_clock)
+
+    with pytest.raises(AnalyzerError, match="total timeout after 1s while building repository inventory"):
+        typescript_analyzer_module._write_typescript_file_manifest(
+            tmp_path,
+            manifest_path,
+            project_files=[Path(f"src/file-{index:04d}.ts") for index in range(100)],
+            deadline=1.0,
+            total_timeout_seconds=1.0,
         )
 
     assert json.loads(manifest_path.read_text(encoding="utf-8")) == {
@@ -2583,10 +2693,10 @@ def test_typescript_analyzer_respects_total_timeout_across_shards(
         for index in range(3)
     ]
     seen_shards: list[list[str]] = []
-    monotonic_values = iter([0.0, 0.0, 2.1])
+    clock = [0.0]
 
     monkeypatch.setattr("apex_ray.analyzers.typescript.shutil.which", lambda name: "/usr/bin/node")
-    monkeypatch.setattr("apex_ray.analyzers.typescript.time.monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr("apex_ray.analyzers.typescript.time.monotonic", lambda: clock[0])
 
     def fake_run(
         args: list[str],
@@ -2601,6 +2711,7 @@ def test_typescript_analyzer_respects_total_timeout_across_shards(
         )
         shard_files = args[changed_index:option_index]
         seen_shards.append(shard_files)
+        clock[0] = 2.1
         payload = {
             "language": "typescript",
             "projectRoot": str(tmp_path),
@@ -2651,7 +2762,11 @@ def test_typescript_analyzer_total_timeout_includes_manifest_generation(
         _ignored_patterns: list[str] | None = None,
         *,
         project_files: list[Path] | None = None,
+        deadline: float | None = None,
+        total_timeout_seconds: float | None = None,
     ) -> None:
+        assert deadline == 2.0
+        assert total_timeout_seconds == 2.0
         clock[0] = 2.1
         manifest_path.write_text('{"version":1,"files":[]}', encoding="utf-8")
 
@@ -2705,10 +2820,10 @@ def test_typescript_analyzer_prioritizes_critical_policy_risk_before_medium(
         ],
     )
     seen_shards: list[list[str]] = []
-    monotonic_values = iter([0.0, 0.0, 2.1])
+    clock = [0.0]
 
     monkeypatch.setattr("apex_ray.analyzers.typescript.shutil.which", lambda name: "/usr/bin/node")
-    monkeypatch.setattr("apex_ray.analyzers.typescript.time.monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr("apex_ray.analyzers.typescript.time.monotonic", lambda: clock[0])
 
     def fake_run(
         args: list[str],
@@ -2723,6 +2838,7 @@ def test_typescript_analyzer_prioritizes_critical_policy_risk_before_medium(
         )
         shard_files = args[changed_index:option_index]
         seen_shards.append(shard_files)
+        clock[0] = 2.1
         payload = {
             "language": "typescript",
             "projectRoot": str(tmp_path),
@@ -2763,10 +2879,11 @@ def test_typescript_analyzer_scales_total_timeout_for_large_adaptive_shards(
     ]
     seen_shards: list[list[str]] = []
     seen_timeouts: list[float] = []
-    monotonic_values = iter([0.0, 0.0, 2.1, 4.1])
+    clock = [0.0]
+    shard_durations = iter([2.1, 2.0, 0.0])
 
     monkeypatch.setattr("apex_ray.analyzers.typescript.shutil.which", lambda name: "/usr/bin/node")
-    monkeypatch.setattr("apex_ray.analyzers.typescript.time.monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr("apex_ray.analyzers.typescript.time.monotonic", lambda: clock[0])
 
     def fake_run(
         args: list[str],
@@ -2782,6 +2899,7 @@ def test_typescript_analyzer_scales_total_timeout_for_large_adaptive_shards(
         shard_files = args[changed_index:option_index]
         seen_shards.append(shard_files)
         seen_timeouts.append(timeout)
+        clock[0] += next(shard_durations)
         payload = {
             "language": "typescript",
             "projectRoot": str(tmp_path),
@@ -2835,10 +2953,11 @@ def test_typescript_analyzer_caps_scaled_total_timeout_for_large_adaptive_shards
     ]
     seen_shards: list[list[str]] = []
     seen_timeouts: list[float] = []
-    monotonic_values = iter([0.0, 0.0, 2.1, 4.1, 6.1, 8.1])
+    clock = [0.0]
+    shard_durations = iter([2.1, 2.0, 2.0, 2.0])
 
     monkeypatch.setattr("apex_ray.analyzers.typescript.shutil.which", lambda name: "/usr/bin/node")
-    monkeypatch.setattr("apex_ray.analyzers.typescript.time.monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr("apex_ray.analyzers.typescript.time.monotonic", lambda: clock[0])
 
     def fake_run(
         args: list[str],
@@ -2854,6 +2973,7 @@ def test_typescript_analyzer_caps_scaled_total_timeout_for_large_adaptive_shards
         shard_files = args[changed_index:option_index]
         seen_shards.append(shard_files)
         seen_timeouts.append(timeout)
+        clock[0] += next(shard_durations)
         payload = {
             "language": "typescript",
             "projectRoot": str(tmp_path),

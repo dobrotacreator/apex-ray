@@ -97,7 +97,9 @@ def _validate_run_id(run_id: str) -> str:
 
 
 def _manifest_source(root: Path, source_path: Path) -> tuple[str, str, str]:
-    absolute = source_path.resolve(strict=False)
+    absolute = (
+        source_path.resolve(strict=False) if source_path.is_absolute() else (root / source_path).resolve(strict=False)
+    )
     try:
         relative = absolute.relative_to(root.resolve(strict=False)).as_posix()
         return relative, "repository", f"repository:{relative}"

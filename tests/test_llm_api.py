@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from http.client import HTTPException, HTTPMessage, IncompleteRead
 from io import BytesIO
 from pathlib import Path
-from typing import cast
+from typing import Never, cast
 from urllib.error import HTTPError, URLError
 from urllib.request import Request
 
@@ -288,6 +288,23 @@ def test_stdlib_transport_rejects_unsafe_url_before_building_opener(
 
     assert caught.value.kind == "malformed"
     assert opener_calls == 0
+
+
+def test_stdlib_transport_rejects_remote_http_before_reading_headers() -> None:
+    class UnreadableHeaders(dict[str, str]):
+        def items(self) -> Never:
+            raise AssertionError("unsafe endpoint reached secret headers")
+
+    with pytest.raises(JSONTransportError, match="HTTPS") as caught:
+        UrllibJSONTransport().request(
+            url="http://models.example.test/v1/review",
+            headers=UnreadableHeaders(Authorization="Bearer secret"),
+            payload={},
+            timeout_seconds=7,
+            use_system_proxy=False,
+        )
+
+    assert caught.value.kind == "malformed"
 
 
 def test_stdlib_transport_normalizes_idn_host_before_opening(
@@ -733,13 +750,22 @@ def test_anthropic_api_preserves_documented_xhigh_effort() -> None:
 
 
 @pytest.mark.parametrize(
-    ("provider_name", "key_env", "url", "model", "response_format", "reasoning_fields"),
+    (
+        "provider_name",
+        "key_env",
+        "url",
+        "model",
+        "token_field",
+        "response_format",
+        "reasoning_fields",
+    ),
     [
         (
             LLMProviderName.DEEPSEEK_API,
             "DEEPSEEK_API_KEY",
             "https://api.deepseek.com/chat/completions",
             "deepseek-v4-pro",
+            "max_tokens",
             {"type": "json_object"},
             {"thinking": {"type": "enabled"}, "reasoning_effort": "high"},
         ),
@@ -748,6 +774,7 @@ def test_anthropic_api_preserves_documented_xhigh_effort() -> None:
             "DASHSCOPE_API_KEY",
             "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
             "qwen3.7-max",
+            "max_tokens",
             {"type": "json_object"},
             {"enable_thinking": True},
         ),
@@ -756,6 +783,7 @@ def test_anthropic_api_preserves_documented_xhigh_effort() -> None:
             "MOONSHOT_API_KEY",
             "https://api.moonshot.ai/v1/chat/completions",
             "kimi-k3",
+            "max_completion_tokens",
             {
                 "type": "json_schema",
                 "json_schema": {
@@ -771,6 +799,7 @@ def test_anthropic_api_preserves_documented_xhigh_effort() -> None:
             "ZAI_API_KEY",
             "https://api.z.ai/api/paas/v4/chat/completions",
             "glm-5.2",
+            "max_tokens",
             {"type": "json_object"},
             {"thinking": {"type": "enabled"}, "reasoning_effort": "high"},
         ),
@@ -781,6 +810,7 @@ def test_openai_chat_presets_use_documented_capabilities(
     key_env: str,
     url: str,
     model: str,
+    token_field: str,
     response_format: Mapping[str, object],
     reasoning_fields: Mapping[str, object],
 ) -> None:
@@ -816,7 +846,7 @@ def test_openai_chat_presets_use_documented_capabilities(
     assert call.payload == {
         "model": model,
         "messages": [{"role": "user", "content": messages[0]["content"]}],
-        "max_tokens": 1536,
+        token_field: 1536,
         "response_format": response_format,
         **reasoning_fields,
     }
@@ -978,7 +1008,6 @@ def test_generic_compatible_provider_uses_env_endpoint_headers_and_allowlist_in_
             structured_output=LLMStructuredOutput.JSON_OBJECT,
             base_url_env="COMPANY_LLM_URL",
             api_key_env="COMPANY_LLM_KEY",
-            allowed_hosts_env="COMPANY_LLM_ALLOWED_HOSTS",
             headers_from_env={"X-Project": "COMPANY_LLM_PROJECT"},
         ),
     )
@@ -986,8 +1015,9 @@ def test_generic_compatible_provider_uses_env_endpoint_headers_and_allowlist_in_
         "CI": "true",
         "COMPANY_LLM_URL": "https://llm-gateway.example/v1",
         "COMPANY_LLM_KEY": "company-secret",
-        "COMPANY_LLM_ALLOWED_HOSTS": "llm-gateway.example",
         "COMPANY_LLM_PROJECT": "apex-ray",
+        "APEX_RAY_API_ALLOWED_HOSTS": "llm-gateway.example",
+        "APEX_RAY_API_ALLOWED_ENV_VARS": "COMPANY_LLM_URL,COMPANY_LLM_KEY,COMPANY_LLM_PROJECT",
     }
 
     provider(config, transport, environment).review_context_pack(make_pack(), Path("."))
@@ -1008,7 +1038,6 @@ def test_generic_compatible_provider_uses_normalized_idn_host_for_ci_allowlist()
             structured_output=LLMStructuredOutput.JSON_OBJECT,
             base_url_env="COMPANY_LLM_URL",
             api_key_env="COMPANY_LLM_KEY",
-            allowed_hosts_env="COMPANY_LLM_ALLOWED_HOSTS",
         ),
     )
 
@@ -1019,7 +1048,8 @@ def test_generic_compatible_provider_uses_normalized_idn_host_for_ci_allowlist()
             "CI": "true",
             "COMPANY_LLM_URL": "https://例え.テスト/v1",
             "COMPANY_LLM_KEY": "company-secret",
-            "COMPANY_LLM_ALLOWED_HOSTS": "xn--r8jz45g.xn--zckzah",
+            "APEX_RAY_API_ALLOWED_HOSTS": "xn--r8jz45g.xn--zckzah",
+            "APEX_RAY_API_ALLOWED_ENV_VARS": "COMPANY_LLM_URL,COMPANY_LLM_KEY",
         },
     ).review_context_pack(make_pack(), Path("."))
 
@@ -1136,6 +1166,141 @@ def test_preset_provider_rejects_endpoint_outside_pinned_hosts() -> None:
         provider(config, StubTransport(success_response()), {"OPENAI_API_KEY": "secret"})
 
 
+def test_anthropic_preset_rejects_incompatible_protocol_override() -> None:
+    config = LLMConfig(
+        provider=LLMProviderName.ANTHROPIC_API,
+        model="claude-sonnet-5",
+        api=LLMAPIConfig(protocol=LLMAPIProtocol.OPENAI_CHAT),
+    )
+
+    with pytest.raises(LLMProviderError, match="protocol is fixed"):
+        provider(
+            config,
+            StubTransport(success_response()),
+            {"ANTHROPIC_API_KEY": "secret"},
+        )
+
+
+def test_openai_preset_preserves_chat_completions_protocol_support() -> None:
+    transport = StubTransport(success_response())
+    config = LLMConfig(
+        provider=LLMProviderName.OPENAI_API,
+        model="gpt-5.6",
+        api=LLMAPIConfig(protocol=LLMAPIProtocol.OPENAI_CHAT),
+    )
+
+    provider(
+        config,
+        transport,
+        {"OPENAI_API_KEY": "secret"},
+    ).review_context_pack(make_pack(), Path("."))
+
+    call = transport.calls[0]
+    assert call.url == "https://api.openai.com/v1/chat/completions"
+    assert call.payload["store"] is False
+    assert call.payload["max_completion_tokens"] == 4096
+    assert "max_tokens" not in call.payload
+
+
+def test_ci_preset_api_key_selector_cannot_be_overridden() -> None:
+    config = LLMConfig(
+        provider=LLMProviderName.OPENAI_API,
+        model="gpt-5.6",
+        api=LLMAPIConfig(api_key_env="UNRELATED_CLOUD_SECRET"),
+    )
+    transport = StubTransport(responses_success_response())
+
+    with pytest.raises(LLMProviderError, match="API key environment variable is fixed"):
+        provider(
+            config,
+            transport,
+            {
+                "GITHUB_ACTIONS": "true",
+                "OPENAI_API_KEY": "openai-secret",
+                "UNRELATED_CLOUD_SECRET": "unrelated-secret",
+                "APEX_RAY_API_ALLOWED_ENV_VARS": "UNRELATED_CLOUD_SECRET",
+            },
+        )
+
+    assert transport.calls == []
+
+
+@pytest.mark.parametrize(
+    ("omitted_selector", "message"),
+    [
+        pytest.param("COMPANY_LLM_URL", "base URL", id="base-url"),
+        pytest.param("COMPANY_LLM_KEY", "API key", id="api-key"),
+        pytest.param("COMPANY_LLM_PROJECT", "header", id="header"),
+    ],
+)
+def test_ci_custom_provider_requires_fixed_allowlist_for_each_environment_selector(
+    omitted_selector: str,
+    message: str,
+) -> None:
+    selectors = {
+        "COMPANY_LLM_URL",
+        "COMPANY_LLM_KEY",
+        "COMPANY_LLM_PROJECT",
+    }
+    selectors.remove(omitted_selector)
+    config = LLMConfig(
+        provider=LLMProviderName.OPENAI_COMPATIBLE,
+        model="company-reviewer",
+        api=LLMAPIConfig(
+            protocol=LLMAPIProtocol.OPENAI_CHAT,
+            structured_output=LLMStructuredOutput.JSON_OBJECT,
+            base_url_env="COMPANY_LLM_URL",
+            api_key_env="COMPANY_LLM_KEY",
+            headers_from_env={"X-Project": "COMPANY_LLM_PROJECT"},
+        ),
+    )
+    transport = StubTransport(success_response())
+
+    with pytest.raises(LLMProviderError, match=message):
+        provider(
+            config,
+            transport,
+            {
+                "CI": "true",
+                "COMPANY_LLM_URL": "https://llm-gateway.example/v1",
+                "COMPANY_LLM_KEY": "company-secret",
+                "COMPANY_LLM_PROJECT": "apex-ray",
+                "APEX_RAY_API_ALLOWED_HOSTS": "llm-gateway.example",
+                "APEX_RAY_API_ALLOWED_ENV_VARS": ",".join(sorted(selectors)),
+            },
+        )
+
+    assert transport.calls == []
+
+
+def test_ci_custom_provider_cannot_select_the_host_allowlist_variable() -> None:
+    config = LLMConfig(
+        provider=LLMProviderName.OPENAI_COMPATIBLE,
+        model="company-reviewer",
+        api=LLMAPIConfig(
+            protocol=LLMAPIProtocol.OPENAI_CHAT,
+            structured_output=LLMStructuredOutput.JSON_OBJECT,
+            base_url_env="COMPANY_LLM_URL",
+            api_key_env="COMPANY_LLM_KEY",
+            allowed_hosts_env="REPOSITORY_SELECTED_ALLOWLIST",
+        ),
+    )
+
+    with pytest.raises(LLMProviderError, match="host allowlist environment variable is fixed"):
+        provider(
+            config,
+            StubTransport(success_response()),
+            {
+                "CI": "true",
+                "COMPANY_LLM_URL": "https://attacker.example/v1",
+                "COMPANY_LLM_KEY": "company-secret",
+                "APEX_RAY_API_ALLOWED_ENV_VARS": "COMPANY_LLM_URL,COMPANY_LLM_KEY",
+                "APEX_RAY_API_ALLOWED_HOSTS": "trusted.example",
+                "REPOSITORY_SELECTED_ALLOWLIST": "attacker.example",
+            },
+        )
+
+
 @pytest.mark.parametrize(
     ("config", "environment", "message"),
     [
@@ -1171,6 +1336,21 @@ def test_api_provider_requires_model_and_key_environment(
 ) -> None:
     with pytest.raises(LLMProviderError, match=message):
         provider(config, StubTransport(success_response()), environment)
+
+
+def test_missing_api_key_is_classified_as_terminal_auth_failure() -> None:
+    config = LLMConfig(
+        provider=LLMProviderName.OPENAI_API,
+        model="gpt-5.6",
+        api=LLMAPIConfig(max_retries=3),
+    )
+
+    with pytest.raises(LLMProviderError) as caught:
+        provider(config, StubTransport(success_response()), {})
+
+    assert caught.value.category == "auth"
+    assert caught.value.retryable is False
+    assert classify_llm_provider_error(caught.value) == "failed_auth"
 
 
 def test_transient_rate_limit_retries_and_honors_retry_after() -> None:
@@ -1251,6 +1431,70 @@ def test_quota_error_is_terminal_and_classified_separately() -> None:
 
     assert caught.value.category == "quota"
     assert classify_llm_provider_error(caught.value) == "failed_quota"
+    assert len(transport.calls) == 1
+
+
+def test_http_403_quota_details_are_not_collapsed_into_auth() -> None:
+    transport = StubTransport(
+        JSONHTTPResponse(
+            status_code=403,
+            headers={},
+            data={
+                "error": {
+                    "type": "insufficient_quota",
+                    "code": "insufficient_quota",
+                    "message": "No balance.",
+                }
+            },
+        ),
+        responses_success_response(),
+    )
+    config = LLMConfig(
+        provider=LLMProviderName.OPENAI_API,
+        model="gpt-5.6",
+        api=LLMAPIConfig(max_retries=2),
+    )
+
+    with pytest.raises(LLMProviderError) as caught:
+        provider(
+            config,
+            transport,
+            {"OPENAI_API_KEY": "secret"},
+        ).review_context_pack(make_pack(), Path("."))
+
+    assert caught.value.category == "quota"
+    assert len(transport.calls) == 1
+
+
+def test_http_403_permission_error_is_not_retried_for_rate_limit_message_text() -> None:
+    transport = StubTransport(
+        JSONHTTPResponse(
+            status_code=403,
+            headers={"Retry-After": "2"},
+            data={
+                "error": {
+                    "type": "permission_denied_error",
+                    "message": "This key may not access the rate limit administration policy.",
+                }
+            },
+        ),
+        responses_success_response(),
+    )
+    config = LLMConfig(
+        provider=LLMProviderName.OPENAI_API,
+        model="gpt-5.6",
+        api=LLMAPIConfig(max_retries=1),
+    )
+
+    with pytest.raises(LLMProviderError) as caught:
+        provider(
+            config,
+            transport,
+            {"OPENAI_API_KEY": "secret"},
+        ).review_context_pack(make_pack(), Path("."))
+
+    assert caught.value.category == "auth"
+    assert caught.value.retryable is False
     assert len(transport.calls) == 1
 
 
@@ -1369,6 +1613,111 @@ def test_refusal_and_truncation_are_explicit_terminal_errors() -> None:
         provider(kimi, truncation, {"MOONSHOT_API_KEY": "secret"}).review_context_pack(make_pack(), Path("."))
     assert truncated.value.category == "truncated"
     assert classify_llm_provider_error(truncated.value) == "failed_truncated"
+
+
+@pytest.mark.parametrize(
+    ("provider_name", "model", "key_env", "finish_reason"),
+    [
+        (
+            LLMProviderName.DEEPSEEK_API,
+            "deepseek-reasoner",
+            "DEEPSEEK_API_KEY",
+            "insufficient_system_resource",
+        ),
+        (
+            LLMProviderName.ZAI_API,
+            "glm-5",
+            "ZAI_API_KEY",
+            "network_error",
+        ),
+    ],
+)
+def test_transient_openai_compatible_finish_reason_retries(
+    provider_name: LLMProviderName,
+    model: str,
+    key_env: str,
+    finish_reason: str,
+) -> None:
+    sleeps: list[float] = []
+    transport = StubTransport(
+        JSONHTTPResponse(
+            status_code=200,
+            headers={},
+            data={
+                "choices": [
+                    {
+                        "finish_reason": finish_reason,
+                        "message": {"content": '{"findings":[]}'},
+                    }
+                ]
+            },
+        ),
+        success_response(),
+    )
+    config = LLMConfig(
+        provider=provider_name,
+        model=model,
+        api=LLMAPIConfig(max_retries=1, retry_backoff_seconds=1),
+    )
+
+    result = provider(
+        config,
+        transport,
+        {key_env: "secret"},
+        sleeps=sleeps,
+    ).review_context_pack(make_pack(), Path("."))
+
+    assert result == []
+    assert len(transport.calls) == 2
+    assert sleeps == [1.0]
+
+
+@pytest.mark.parametrize(
+    ("finish_reason", "category", "status"),
+    [
+        ("sensitive", "refusal", "failed_refusal"),
+        (
+            "model_context_window_exceeded",
+            "truncated",
+            "failed_truncated",
+        ),
+    ],
+)
+def test_zai_terminal_finish_reasons_are_classified_before_content_is_used(
+    finish_reason: str,
+    category: str,
+    status: str,
+) -> None:
+    transport = StubTransport(
+        JSONHTTPResponse(
+            status_code=200,
+            headers={},
+            data={
+                "choices": [
+                    {
+                        "finish_reason": finish_reason,
+                        "message": {"content": '{"findings":[]}'},
+                    }
+                ]
+            },
+        )
+    )
+    config = LLMConfig(
+        provider=LLMProviderName.ZAI_API,
+        model="glm-5",
+        api=LLMAPIConfig(max_retries=3),
+    )
+
+    with pytest.raises(LLMProviderError) as caught:
+        provider(
+            config,
+            transport,
+            {"ZAI_API_KEY": "secret"},
+        ).review_context_pack(make_pack(), Path("."))
+
+    assert caught.value.category == category
+    assert classify_llm_provider_error(caught.value) == status
+    assert len(transport.calls) == 1
 
 
 def test_provider_error_redacts_key_and_does_not_retry_auth() -> None:

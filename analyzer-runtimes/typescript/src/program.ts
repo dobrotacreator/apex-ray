@@ -764,39 +764,86 @@ function configRootNamesPermittedByInventory(
   });
 }
 
-function selectSupplementalDeclarationRoots(
+interface DeclarationRootCandidate {
+  fileName: string;
+  priority: number;
+  lowerKey: string;
+  resolvedKey: string;
+}
+
+export function selectSupplementalDeclarationRoots(
   declarationRoots: string[],
   changedRoots: string[],
   warnings: string[],
 ): string[] {
-  const changedKeys = new Set(
-    changedRoots.map(canonicalPathKey),
-  );
-  const supplementalRoots = uniquePaths(declarationRoots)
-    .filter((fileName) => !changedKeys.has(canonicalPathKey(fileName)))
-    .sort(compareDeclarationRoots);
-  if (supplementalRoots.length <= FOCUSED_PROGRAM_DECLARATION_ROOT_LIMIT) {
-    return supplementalRoots;
+  const changedKeys = new Set(changedRoots.map(canonicalPathKey));
+  const seenKeys = new Set<string>();
+  const selected: DeclarationRootCandidate[] = [];
+  let supplementalRootCount = 0;
+  for (const fileName of declarationRoots) {
+    const resolvedKey = normalizeRelPath(path.resolve(fileName));
+    const lowerKey = resolvedKey.toLowerCase();
+    const canonicalKey = ts.sys.useCaseSensitiveFileNames
+      ? resolvedKey
+      : lowerKey;
+    if (changedKeys.has(canonicalKey) || seenKeys.has(canonicalKey)) continue;
+    seenKeys.add(canonicalKey);
+    supplementalRootCount += 1;
+
+    const candidate: DeclarationRootCandidate = {
+      fileName,
+      priority: ambientDeclarationPriority(fileName),
+      lowerKey,
+      resolvedKey,
+    };
+    const lastSelected = selected.at(-1);
+    if (
+      selected.length >= FOCUSED_PROGRAM_DECLARATION_ROOT_LIMIT &&
+      lastSelected &&
+      compareDeclarationRootCandidates(candidate, lastSelected) >= 0
+    ) {
+      continue;
+    }
+    insertDeclarationRootCandidate(selected, candidate);
+    if (selected.length > FOCUSED_PROGRAM_DECLARATION_ROOT_LIMIT) {
+      selected.pop();
+    }
   }
-  warnings.push(
-    `TypeScript declaration roots capped at ${FOCUSED_PROGRAM_DECLARATION_ROOT_LIMIT} of ${supplementalRoots.length}; ambient declaration coverage is partial.`,
-  );
-  return supplementalRoots.slice(0, FOCUSED_PROGRAM_DECLARATION_ROOT_LIMIT);
+
+  if (supplementalRootCount > FOCUSED_PROGRAM_DECLARATION_ROOT_LIMIT) {
+    warnings.push(
+      `TypeScript declaration roots capped at ${FOCUSED_PROGRAM_DECLARATION_ROOT_LIMIT} of ${supplementalRootCount}; ambient declaration coverage is partial.`,
+    );
+  }
+  return selected.map((candidate) => candidate.fileName);
 }
 
-function compareDeclarationRoots(left: string, right: string): number {
-  const leftPriority = ambientDeclarationPriority(left);
-  const rightPriority = ambientDeclarationPriority(right);
-  if (leftPriority !== rightPriority) return leftPriority - rightPriority;
+function insertDeclarationRootCandidate(
+  selected: DeclarationRootCandidate[],
+  candidate: DeclarationRootCandidate,
+): void {
+  let low = 0;
+  let high = selected.length;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    if (compareDeclarationRootCandidates(candidate, selected[middle]) < 0) {
+      high = middle;
+    } else {
+      low = middle + 1;
+    }
+  }
+  selected.splice(low, 0, candidate);
+}
 
-  const leftKey = normalizeRelPath(path.resolve(left)).toLowerCase();
-  const rightKey = normalizeRelPath(path.resolve(right)).toLowerCase();
-  if (leftKey < rightKey) return -1;
-  if (leftKey > rightKey) return 1;
-  const resolvedLeft = normalizeRelPath(path.resolve(left));
-  const resolvedRight = normalizeRelPath(path.resolve(right));
-  if (resolvedLeft < resolvedRight) return -1;
-  if (resolvedLeft > resolvedRight) return 1;
+function compareDeclarationRootCandidates(
+  left: DeclarationRootCandidate,
+  right: DeclarationRootCandidate,
+): number {
+  if (left.priority !== right.priority) return left.priority - right.priority;
+  if (left.lowerKey < right.lowerKey) return -1;
+  if (left.lowerKey > right.lowerKey) return 1;
+  if (left.resolvedKey < right.resolvedKey) return -1;
+  if (left.resolvedKey > right.resolvedKey) return 1;
   return 0;
 }
 

@@ -58,6 +58,7 @@ from apex_ray.models import (
     LLMConfig,
     LLMProfile,
     LLMProviderName,
+    LLMReasoningEffort,
     LLMReviewResult,
     LLMRoutingCondition,
     LLMRoutingConfig,
@@ -148,6 +149,9 @@ def test_fake_provider_returns_findings_with_pack_id() -> None:
 
     assert provider.reviewed_pack_ids == ["src/cart.ts#calculateTotal:1"]
     assert findings[0].context_pack_id == "src/cart.ts#calculateTotal:1"
+    assert findings[0].reviewer_context_pack_ids == {
+        "general": ["src/cart.ts#calculateTotal:1"],
+    }
     assert runs[0].status == "ok"
     assert runs[0].findings_count == 1
     assert runs[0].cache_key is None
@@ -172,7 +176,16 @@ def test_review_context_packs_filters_findings_outside_context() -> None:
 
     findings, runs = review_context_packs([make_pack()], config, Path("."), provider=provider)
 
-    assert findings == [valid.model_copy(update={"context_pack_id": "src/cart.ts#calculateTotal:1"})]
+    assert findings == [
+        valid.model_copy(
+            update={
+                "context_pack_id": "src/cart.ts#calculateTotal:1",
+                "reviewer_context_pack_ids": {
+                    "general": ["src/cart.ts#calculateTotal:1"],
+                },
+            }
+        )
+    ]
     assert runs[0].findings_count == 1
 
 
@@ -500,6 +513,32 @@ def test_route_circuit_treats_profile_aliases_as_the_same_transport() -> None:
     open_failure = circuit.open_failure(config, "finance-alias")
     assert open_failure is not None
     assert open_failure[1] == "failed_auth"
+
+
+def test_route_circuit_isolates_effort_and_timeout_variants() -> None:
+    circuit = LLMRouteCircuitBreaker()
+    first = LLMConfig(
+        provider=LLMProviderName.OPENAI_COMPATIBLE,
+        model="shared-model",
+        effort=LLMReasoningEffort.LOW,
+        timeout_seconds=30,
+        api=LLMAPIConfig(
+            base_url="https://gateway.example/v1",
+            api_key_env="PRIVATE_LLM_API_KEY",
+        ),
+    )
+    circuit.record(
+        first,
+        "security",
+        "failed_timeout",
+        max_consecutive_failures=1,
+    )
+
+    stronger = first.model_copy(update={"effort": LLMReasoningEffort.HIGH})
+    longer = first.model_copy(update={"timeout_seconds": 120})
+
+    assert circuit.open_failure(stronger, "security") is None
+    assert circuit.open_failure(longer, "security") is None
 
 
 def test_route_circuit_isolates_custom_api_tenant_headers() -> None:
@@ -1578,6 +1617,61 @@ def test_verify_findings_records_partial_batch_cache_hits(tmp_path: Path) -> Non
     assert runs[0].cache_hits == 1
     assert runs[0].cache_misses == 1
     assert runs[0].input_chars > 0
+
+
+def test_verify_findings_preserves_cache_hits_when_a_batch_miss_fails(
+    tmp_path: Path,
+) -> None:
+    class FailingVerifier(FakeLLMProvider):
+        def verify_findings(
+            self,
+            findings: list[Finding],
+            pack: ContextPack,
+            repo_root: Path,
+        ) -> list[FindingVerification]:
+            raise LLMProviderError("temporary verifier outage")
+
+    cached = Finding(
+        title="Cached authorization issue",
+        severity=FindingSeverity.HIGH,
+        confidence=FindingConfidence.HIGH,
+        file="src/cart.ts",
+        line=7,
+        failure_mode="An authorization guard is bypassed.",
+        evidence="The guard no longer precedes the write.",
+        suggested_fix="Restore the guard.",
+        suggested_test="Reject an unauthorized write.",
+        context_pack_id="src/cart.ts#calculateTotal:1",
+    )
+    missed = cached.model_copy(update={"title": "Uncached validation issue", "line": 8})
+    config = LLMConfig(
+        provider=LLMProviderName.FAKE,
+        cache_dir=str(tmp_path / "llm-cache"),
+    )
+    verify_findings(
+        [cached],
+        [make_pack()],
+        config,
+        tmp_path,
+        provider=FakeLLMProvider(verification_approvals=[True]),
+    )
+
+    approved, verifications, runs = verify_findings(
+        [cached, missed],
+        [make_pack()],
+        config,
+        tmp_path,
+        provider=FailingVerifier(),
+    )
+
+    assert approved == [cached]
+    assert [(decision.approved, decision.superseded) for decision in verifications] == [
+        (True, False),
+        (False, True),
+    ]
+    assert runs[0].status == "failed_provider"
+    assert runs[0].cache_hits == 1
+    assert runs[0].cache_misses == 1
 
 
 def test_verify_findings_groups_cache_by_per_finding_route(tmp_path: Path) -> None:

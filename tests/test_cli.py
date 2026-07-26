@@ -11,6 +11,7 @@ from typer.testing import CliRunner
 from apex_ray import __version__
 from apex_ray.cli import app
 from apex_ray.diff import parse_unified_diff
+from apex_ray.discovery import DiscoveryError, DiscoveryTimeoutError
 from apex_ray.findings import finding_fingerprint
 from apex_ray.llm.cache import REVIEW_PROMPT_VERSION
 from apex_ray.llm.providers import FakeLLMProvider
@@ -144,6 +145,70 @@ def test_doctor_reports_local_config(tmp_path: Path, monkeypatch) -> None:
     assert "- Go available:" in result.stdout
     assert "- Go analyzer:" in result.stdout
     assert "- Go analyzer available:" in result.stdout
+
+
+def test_doctor_reports_discovery_error_without_traceback(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    def fail_discovery(*_args, **_kwargs):
+        raise DiscoveryError(
+            "Project file discovery failed: Git inventory exceeded its safety limit; "
+            "remove generated or untracked files before retrying."
+        )
+
+    monkeypatch.setattr("apex_ray.cli.main.discover_project", fail_discovery)
+
+    result = runner.invoke(app, ["doctor"], catch_exceptions=False)
+
+    assert result.exit_code == 2
+    plain_output = _plain_cli_output(result.output)
+    assert "Git inventory exceeded its safety limit" in plain_output
+    assert "Traceback" not in plain_output
+
+
+def test_doctor_passes_configured_timeout_to_project_discovery(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".apex-ray").mkdir()
+    (tmp_path / ".apex-ray" / "config.yml").write_text(
+        "review:\n  analyzer:\n    timeout_seconds: 17\n",
+        encoding="utf-8",
+    )
+    seen_timeout: float | None = None
+
+    def capture_discovery(
+        root: Path,
+        ignored_patterns: list[str] | None = None,
+        *,
+        timeout_seconds: float | None = None,
+    ) -> ProjectProfile:
+        del ignored_patterns
+        nonlocal seen_timeout
+        seen_timeout = timeout_seconds
+        return ProjectProfile(root=str(root), is_git_repo=False)
+
+    monkeypatch.setattr("apex_ray.cli.main.discover_project", capture_discovery)
+
+    result = runner.invoke(app, ["doctor"], catch_exceptions=False)
+
+    assert result.exit_code == 0
+    assert seen_timeout == 17
+
+
+def test_doctor_reports_root_probe_timeout_without_traceback(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        "apex_ray.cli.main.discover_repo_root",
+        lambda _cwd: (_ for _ in ()).throw(
+            DiscoveryTimeoutError("Project file discovery timed out while locating the Git repository root.")
+        ),
+    )
+
+    result = runner.invoke(app, ["doctor"], catch_exceptions=False)
+
+    assert result.exit_code == 2
+    plain_output = _plain_cli_output(result.output)
+    assert "timed out while locating the Git repository root" in plain_output
+    assert "Traceback" not in plain_output
 
 
 def test_doctor_reports_outdated_agent_artifacts(tmp_path: Path, monkeypatch) -> None:
@@ -357,6 +422,50 @@ def test_review_patch_defaults_to_apex_reports_dir(tmp_path: Path, monkeypatch) 
     assert not (tmp_path / "review.json").exists()
 
 
+def test_review_reports_discovery_error_without_traceback(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    patch = tmp_path / "sample.diff"
+    patch.write_text((FIXTURE_DIR / "sample.diff").read_text(encoding="utf-8"), encoding="utf-8")
+
+    def fail_discovery(*_args, **_kwargs):
+        raise DiscoveryError(
+            "Project file discovery failed: Git inventory exceeded its safety limit; "
+            "remove generated or untracked files before retrying."
+        )
+
+    monkeypatch.setattr("apex_ray.cli.main.run_review_pipeline", fail_discovery)
+
+    result = runner.invoke(
+        app,
+        ["review", "--diff", str(patch)],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 2
+    plain_output = _plain_cli_output(result.output)
+    assert "Git inventory exceeded its safety limit" in plain_output
+    assert "Traceback" not in plain_output
+    assert not (tmp_path / ".apex-ray" / "reports" / "review.json").exists()
+
+
+def test_review_reports_root_probe_timeout_without_traceback(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        "apex_ray.cli.main.discover_repo_root",
+        lambda _cwd: (_ for _ in ()).throw(
+            DiscoveryTimeoutError("Project file discovery timed out while locating the Git repository root.")
+        ),
+    )
+
+    result = runner.invoke(app, ["review", "--worktree"], catch_exceptions=False)
+
+    assert result.exit_code == 2
+    plain_output = _plain_cli_output(result.output)
+    assert "timed out while locating the Git repository root" in plain_output
+    assert "Traceback" not in plain_output
+    assert not (tmp_path / ".apex-ray" / "reports" / "review.json").exists()
+
+
 def test_review_patch_defaults_to_repo_reports_dir_from_subdir(tmp_path: Path, monkeypatch) -> None:
     subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
     subdir = tmp_path / "src"
@@ -485,7 +594,7 @@ def test_gate_pre_push_blocks_high_verified_finding(tmp_path: Path, monkeypatch)
             ],
         )
 
-    monkeypatch.setattr("apex_ray.cli.gate.git.repo_root", lambda _cwd: tmp_path)
+    monkeypatch.setattr("apex_ray.cli.gate.git.repo_root", lambda _cwd, **_kwargs: tmp_path)
     monkeypatch.setattr("apex_ray.cli.gate.git.is_git_repo", lambda _root: True)
     monkeypatch.setattr(
         "apex_ray.cli.gate.git.diff_base", lambda _root, _base: "diff --git a/src/orders.ts b/src/orders.ts\n"
@@ -500,6 +609,57 @@ def test_gate_pre_push_blocks_high_verified_finding(tmp_path: Path, monkeypatch)
     assert "Missing tenant predicate" in result.stdout
     assert "After fixing, commit the changes and run git push again." in result.stdout
     assert (tmp_path / ".apex-ray" / "reports" / "pre-push.json").exists()
+
+
+def test_gate_pre_push_reports_discovery_error_without_traceback(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    def fail_discovery(*_args, **_kwargs):
+        raise DiscoveryError(
+            "Project discovery timed out while reading the Git inventory; "
+            "increase review.analyzer.timeout_seconds before retrying."
+        )
+
+    monkeypatch.setattr("apex_ray.cli.gate.git.repo_root", lambda _cwd, **_kwargs: tmp_path)
+    monkeypatch.setattr("apex_ray.cli.gate.git.is_git_repo", lambda _root: True)
+    monkeypatch.setattr("apex_ray.cli.gate.git.diff_base", lambda _root, _base: "")
+    monkeypatch.setattr("apex_ray.cli.gate.run_review_pipeline", fail_discovery)
+
+    result = runner.invoke(
+        app,
+        ["gate", "pre-push"],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 2
+    plain_output = _plain_cli_output(result.output)
+    assert "Project discovery timed out" in plain_output
+    assert "Traceback" not in plain_output
+    assert not (tmp_path / ".apex-ray" / "reports" / "pre-push.json").exists()
+
+
+def test_gate_pre_push_reports_root_probe_timeout_without_traceback(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        "apex_ray.cli.gate.discover_repo_root",
+        lambda _cwd: (_ for _ in ()).throw(
+            DiscoveryTimeoutError("Project file discovery timed out while locating the Git repository root.")
+        ),
+    )
+
+    result = runner.invoke(app, ["gate", "pre-push"], catch_exceptions=False)
+
+    assert result.exit_code == 2
+    plain_output = _plain_cli_output(result.output)
+    assert "timed out while locating the Git repository root" in plain_output
+    assert "Traceback" not in plain_output
+    assert not (tmp_path / ".apex-ray" / "reports" / "pre-push.json").exists()
 
 
 def test_findings_suppress_unblocks_matching_pre_push_finding(tmp_path: Path, monkeypatch) -> None:
@@ -572,7 +732,7 @@ def test_findings_suppress_unblocks_matching_pre_push_finding(tmp_path: Path, mo
     def fake_run_review_pipeline(*args, **kwargs):
         return report
 
-    monkeypatch.setattr("apex_ray.cli.gate.git.repo_root", lambda _cwd: tmp_path)
+    monkeypatch.setattr("apex_ray.cli.gate.git.repo_root", lambda _cwd, **_kwargs: tmp_path)
     monkeypatch.setattr("apex_ray.cli.gate.git.is_git_repo", lambda _root: True)
     monkeypatch.setattr(
         "apex_ray.cli.gate.git.diff_base", lambda _root, _base: "diff --git a/src/orders.ts b/src/orders.ts\n"
@@ -674,7 +834,7 @@ def test_gate_pre_push_reports_stale_suppression_details(tmp_path: Path, monkeyp
     def fake_run_review_pipeline(*args, **kwargs):
         return changed_report
 
-    monkeypatch.setattr("apex_ray.cli.gate.git.repo_root", lambda _cwd: tmp_path)
+    monkeypatch.setattr("apex_ray.cli.gate.git.repo_root", lambda _cwd, **_kwargs: tmp_path)
     monkeypatch.setattr("apex_ray.cli.gate.git.is_git_repo", lambda _root: True)
     monkeypatch.setattr(
         "apex_ray.cli.gate.git.diff_base", lambda _root, _base: "diff --git a/src/orders.ts b/src/orders.ts\n"
@@ -717,7 +877,7 @@ def test_gate_pre_push_archives_reports_when_enabled(tmp_path: Path, monkeypatch
             DiffSummary(target_mode=TargetMode.BASE, base="main", stats=DiffStats(files_changed=1)),
         )
 
-    monkeypatch.setattr("apex_ray.cli.gate.git.repo_root", lambda _cwd: tmp_path)
+    monkeypatch.setattr("apex_ray.cli.gate.git.repo_root", lambda _cwd, **_kwargs: tmp_path)
     monkeypatch.setattr("apex_ray.cli.gate.git.is_git_repo", lambda _root: True)
     monkeypatch.setattr(
         "apex_ray.cli.gate.git.diff_base", lambda _root, _base: "diff --git a/src/orders.ts b/src/orders.ts\n"
@@ -755,7 +915,7 @@ def test_gate_pre_push_emits_progress_to_stderr(tmp_path: Path, monkeypatch) -> 
             DiffSummary(target_mode=TargetMode.BASE, base="main", stats=DiffStats(files_changed=1)),
         )
 
-    monkeypatch.setattr("apex_ray.cli.gate.git.repo_root", lambda _cwd: tmp_path)
+    monkeypatch.setattr("apex_ray.cli.gate.git.repo_root", lambda _cwd, **_kwargs: tmp_path)
     monkeypatch.setattr("apex_ray.cli.gate.git.is_git_repo", lambda _root: True)
     monkeypatch.setattr(
         "apex_ray.cli.gate.git.diff_base", lambda _root, _base: "diff --git a/src/orders.ts b/src/orders.ts\n"
@@ -787,7 +947,7 @@ def test_gate_pre_push_warns_for_outdated_agent_artifacts(tmp_path: Path, monkey
             DiffSummary(target_mode=TargetMode.BASE, base="main", stats=DiffStats(files_changed=1)),
         )
 
-    monkeypatch.setattr("apex_ray.cli.gate.git.repo_root", lambda _cwd: tmp_path)
+    monkeypatch.setattr("apex_ray.cli.gate.git.repo_root", lambda _cwd, **_kwargs: tmp_path)
     monkeypatch.setattr("apex_ray.cli.gate.git.is_git_repo", lambda _root: True)
     monkeypatch.setattr(
         "apex_ray.cli.gate.git.diff_base", lambda _root, _base: "diff --git a/src/orders.ts b/src/orders.ts\n"
@@ -825,7 +985,7 @@ def test_gate_pre_push_does_not_block_unverified_finding_by_default(tmp_path: Pa
             findings=[finding],
         )
 
-    monkeypatch.setattr("apex_ray.cli.gate.git.repo_root", lambda _cwd: tmp_path)
+    monkeypatch.setattr("apex_ray.cli.gate.git.repo_root", lambda _cwd, **_kwargs: tmp_path)
     monkeypatch.setattr("apex_ray.cli.gate.git.is_git_repo", lambda _root: True)
     monkeypatch.setattr(
         "apex_ray.cli.gate.git.diff_base", lambda _root, _base: "diff --git a/src/orders.ts b/src/orders.ts\n"
@@ -854,7 +1014,7 @@ def test_gate_pre_push_blocks_critical_partial_coverage(tmp_path: Path, monkeypa
         report.llm_coverage.partial_reasons = ["1 unreviewed P0 context pack(s)"]
         return report
 
-    monkeypatch.setattr("apex_ray.cli.gate.git.repo_root", lambda _cwd: tmp_path)
+    monkeypatch.setattr("apex_ray.cli.gate.git.repo_root", lambda _cwd, **_kwargs: tmp_path)
     monkeypatch.setattr("apex_ray.cli.gate.git.is_git_repo", lambda _root: True)
     monkeypatch.setattr(
         "apex_ray.cli.gate.git.diff_base", lambda _root, _base: "diff --git a/src/orders.ts b/src/orders.ts\n"
@@ -882,7 +1042,7 @@ def test_gate_pre_push_incremental_retry_reviews_previous_head_delta(tmp_path: P
             parse_unified_diff(diff_text, target_mode=target_mode, base=kwargs.get("base")),
         )
 
-    monkeypatch.setattr("apex_ray.cli.gate.git.repo_root", lambda _cwd: tmp_path)
+    monkeypatch.setattr("apex_ray.cli.gate.git.repo_root", lambda _cwd, **_kwargs: tmp_path)
     monkeypatch.setattr("apex_ray.cli.gate.git.is_git_repo", lambda _root: True)
     monkeypatch.setattr("apex_ray.cli.gate.git.rev_parse", lambda _root, _ref: next(heads))
     monkeypatch.setattr("apex_ray.cli.gate.git.merge_base", lambda _root, _base, _head: "base-1")
@@ -939,7 +1099,7 @@ review:
             parse_unified_diff(diff_text, target_mode=target_mode, base=kwargs.get("base")),
         )
 
-    monkeypatch.setattr("apex_ray.cli.gate.git.repo_root", lambda _cwd: tmp_path)
+    monkeypatch.setattr("apex_ray.cli.gate.git.repo_root", lambda _cwd, **_kwargs: tmp_path)
     monkeypatch.setattr("apex_ray.cli.gate.git.is_git_repo", lambda _root: True)
     monkeypatch.setattr("apex_ray.cli.gate.git.rev_parse", lambda _root, _ref: next(heads))
     monkeypatch.setattr("apex_ray.cli.gate.git.merge_base", lambda _root, _base, _head: "base-1")
@@ -1020,7 +1180,7 @@ review:
         report.llm_coverage.partial_severity = "none"
         return report, [object()]
 
-    monkeypatch.setattr("apex_ray.cli.gate.git.repo_root", lambda _cwd: tmp_path)
+    monkeypatch.setattr("apex_ray.cli.gate.git.repo_root", lambda _cwd, **_kwargs: tmp_path)
     monkeypatch.setattr("apex_ray.cli.gate.git.is_git_repo", lambda _root: True)
     monkeypatch.setattr(
         "apex_ray.cli.gate.git.diff_base",
@@ -1151,7 +1311,7 @@ review:
         report.generated_at += timedelta(microseconds=1)
         return report, [reviewed[-1]]
 
-    monkeypatch.setattr("apex_ray.cli.gate.git.repo_root", lambda _cwd: tmp_path)
+    monkeypatch.setattr("apex_ray.cli.gate.git.repo_root", lambda _cwd, **_kwargs: tmp_path)
     monkeypatch.setattr("apex_ray.cli.gate.git.is_git_repo", lambda _root: True)
     monkeypatch.setattr("apex_ray.cli.gate.git.rev_parse", lambda _root, _ref: "head-1")
     monkeypatch.setattr("apex_ray.cli.gate.git.merge_base", lambda _root, _base, _head: "base-1")
@@ -1272,7 +1432,7 @@ review:
         range_calls.append((old, new))
         return _diff_for("src/payments/new-entry.ts", "old", "new")
 
-    monkeypatch.setattr("apex_ray.cli.gate.git.repo_root", lambda _cwd: tmp_path)
+    monkeypatch.setattr("apex_ray.cli.gate.git.repo_root", lambda _cwd, **_kwargs: tmp_path)
     monkeypatch.setattr("apex_ray.cli.gate.git.is_git_repo", lambda _root: True)
     monkeypatch.setattr("apex_ray.cli.gate.git.rev_parse", lambda _root, _ref: next(heads))
     monkeypatch.setattr("apex_ray.cli.gate.git.merge_base", lambda _root, _base, _head: "base-1")
@@ -1378,7 +1538,7 @@ def test_gate_pre_push_coverage_resume_keeps_older_carried_blocker(
             report.llm_coverage.coverage_todos = []
         return report, [delta_pack]
 
-    monkeypatch.setattr("apex_ray.cli.gate.git.repo_root", lambda _cwd: tmp_path)
+    monkeypatch.setattr("apex_ray.cli.gate.git.repo_root", lambda _cwd, **_kwargs: tmp_path)
     monkeypatch.setattr("apex_ray.cli.gate.git.is_git_repo", lambda _root: True)
     monkeypatch.setattr("apex_ray.cli.gate.git.rev_parse", lambda _root, _ref: next(heads))
     monkeypatch.setattr("apex_ray.cli.gate.git.merge_base", lambda _root, _base, _head: "base-1")
@@ -1456,7 +1616,7 @@ review:
         ]
         return report
 
-    monkeypatch.setattr("apex_ray.cli.gate.git.repo_root", lambda _cwd: tmp_path)
+    monkeypatch.setattr("apex_ray.cli.gate.git.repo_root", lambda _cwd, **_kwargs: tmp_path)
     monkeypatch.setattr("apex_ray.cli.gate.git.is_git_repo", lambda _root: True)
     monkeypatch.setattr("apex_ray.cli.gate.git.rev_parse", lambda _root, _ref: "head-1")
     monkeypatch.setattr("apex_ray.cli.gate.git.merge_base", lambda _root, _base, _head: "base-1")
@@ -1554,7 +1714,7 @@ review:
         base_diff_calls += 1
         return _diff_for(pack.file, "old", "new")
 
-    monkeypatch.setattr("apex_ray.cli.gate.git.repo_root", lambda _cwd: tmp_path)
+    monkeypatch.setattr("apex_ray.cli.gate.git.repo_root", lambda _cwd, **_kwargs: tmp_path)
     monkeypatch.setattr("apex_ray.cli.gate.git.is_git_repo", lambda _root: True)
     monkeypatch.setattr("apex_ray.cli.gate.git.rev_parse", lambda _root, _ref: "head-1")
     monkeypatch.setattr("apex_ray.cli.gate.git.merge_base", lambda _root, _base, _head: "base-1")
@@ -1596,7 +1756,7 @@ def test_gate_pre_push_incremental_retry_carries_blocker_when_unrelated_delta(tm
         report_finding = finding if len(diff_texts) == 1 else None
         return _gate_report(root, config, diff_text, target_mode, kwargs.get("base"), report_finding)
 
-    monkeypatch.setattr("apex_ray.cli.gate.git.repo_root", lambda _cwd: tmp_path)
+    monkeypatch.setattr("apex_ray.cli.gate.git.repo_root", lambda _cwd, **_kwargs: tmp_path)
     monkeypatch.setattr("apex_ray.cli.gate.git.is_git_repo", lambda _root: True)
     monkeypatch.setattr("apex_ray.cli.gate.git.rev_parse", lambda _root, _ref: next(heads))
     monkeypatch.setattr("apex_ray.cli.gate.git.merge_base", lambda _root, _base, _head: "base-1")
@@ -1667,7 +1827,7 @@ def test_gate_pre_push_incremental_retry_drops_stale_carried_blocker_when_eviden
             return subprocess.CompletedProcess(args, 0 if path in head_source else 1, stdout=stdout, stderr="")
         return subprocess.CompletedProcess(args, 1, stdout="", stderr="unexpected git call")
 
-    monkeypatch.setattr("apex_ray.cli.gate.git.repo_root", lambda _cwd: tmp_path)
+    monkeypatch.setattr("apex_ray.cli.gate.git.repo_root", lambda _cwd, **_kwargs: tmp_path)
     monkeypatch.setattr("apex_ray.cli.gate.git.is_git_repo", lambda _root: True)
     monkeypatch.setattr("apex_ray.cli.gate.git.rev_parse", lambda _root, _ref: next(heads))
     monkeypatch.setattr("apex_ray.cli.gate.git.merge_base", lambda _root, _base, _head: "base-1")
@@ -1707,7 +1867,7 @@ def test_gate_pre_push_incremental_retry_resolved_carried_blocker_passes(tmp_pat
         report_finding = finding if run_count == 1 else None
         return _gate_report(root, config, diff_text, target_mode, kwargs.get("base"), report_finding)
 
-    monkeypatch.setattr("apex_ray.cli.gate.git.repo_root", lambda _cwd: tmp_path)
+    monkeypatch.setattr("apex_ray.cli.gate.git.repo_root", lambda _cwd, **_kwargs: tmp_path)
     monkeypatch.setattr("apex_ray.cli.gate.git.is_git_repo", lambda _root: True)
     monkeypatch.setattr("apex_ray.cli.gate.git.rev_parse", lambda _root, _ref: next(heads))
     monkeypatch.setattr("apex_ray.cli.gate.git.merge_base", lambda _root, _base, _head: "base-1")
@@ -1770,7 +1930,7 @@ def test_gate_pre_push_incremental_retry_drops_carried_blocker_after_pack_review
             ],
         )
 
-    monkeypatch.setattr("apex_ray.cli.gate.git.repo_root", lambda _cwd: tmp_path)
+    monkeypatch.setattr("apex_ray.cli.gate.git.repo_root", lambda _cwd, **_kwargs: tmp_path)
     monkeypatch.setattr("apex_ray.cli.gate.git.is_git_repo", lambda _root: True)
     monkeypatch.setattr("apex_ray.cli.gate.git.rev_parse", lambda _root, _ref: next(heads))
     monkeypatch.setattr("apex_ray.cli.gate.git.merge_base", lambda _root, _base, _head: "base-1")
@@ -1815,7 +1975,7 @@ def test_gate_pre_push_incremental_retry_suppresses_carried_finding(tmp_path: Pa
         report_finding = finding if run_count == 1 else None
         return _gate_report(root, config, diff_text, target_mode, kwargs.get("base"), report_finding, [pack])
 
-    monkeypatch.setattr("apex_ray.cli.gate.git.repo_root", lambda _cwd: tmp_path)
+    monkeypatch.setattr("apex_ray.cli.gate.git.repo_root", lambda _cwd, **_kwargs: tmp_path)
     monkeypatch.setattr("apex_ray.cli.gate.git.is_git_repo", lambda _root: True)
     monkeypatch.setattr("apex_ray.cli.gate.git.rev_parse", lambda _root, _ref: next(heads))
     monkeypatch.setattr("apex_ray.cli.gate.git.merge_base", lambda _root, _base, _head: "base-1")
@@ -1866,7 +2026,7 @@ def test_gate_pre_push_incremental_retry_uncertain_resolution_blocks(tmp_path: P
         report_finding = finding if run_count == 1 else None
         return _gate_report(root, config, diff_text, target_mode, kwargs.get("base"), report_finding)
 
-    monkeypatch.setattr("apex_ray.cli.gate.git.repo_root", lambda _cwd: tmp_path)
+    monkeypatch.setattr("apex_ray.cli.gate.git.repo_root", lambda _cwd, **_kwargs: tmp_path)
     monkeypatch.setattr("apex_ray.cli.gate.git.is_git_repo", lambda _root: True)
     monkeypatch.setattr("apex_ray.cli.gate.git.rev_parse", lambda _root, _ref: next(heads))
     monkeypatch.setattr("apex_ray.cli.gate.git.merge_base", lambda _root, _base, _head: "base-1")
@@ -1904,7 +2064,7 @@ def test_gate_pre_push_incremental_retry_uses_resolution_provider(tmp_path: Path
         report_finding = finding if run_count == 1 else None
         return _gate_report(root, config, diff_text, target_mode, kwargs.get("base"), report_finding)
 
-    monkeypatch.setattr("apex_ray.cli.gate.git.repo_root", lambda _cwd: tmp_path)
+    monkeypatch.setattr("apex_ray.cli.gate.git.repo_root", lambda _cwd, **_kwargs: tmp_path)
     monkeypatch.setattr("apex_ray.cli.gate.git.is_git_repo", lambda _root: True)
     monkeypatch.setattr("apex_ray.cli.gate.git.rev_parse", lambda _root, _ref: next(heads))
     monkeypatch.setattr("apex_ray.cli.gate.git.merge_base", lambda _root, _base, _head: "base-1")

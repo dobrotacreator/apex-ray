@@ -1,6 +1,11 @@
 from html import escape
 
-from apex_ray.findings import finding_fingerprint
+from apex_ray.findings import (
+    active_verifications,
+    finding_fingerprint,
+    historical_verifications,
+    unresolved_verifications,
+)
 from apex_ray.models import Finding, ReviewReport
 from apex_ray.report.coverage import _unreviewed_pack_reason
 from apex_ray.report.formatting import summarize_notes
@@ -205,7 +210,9 @@ def _reviewers_html(report: ReviewReport) -> str:
         name = reviewer.name if reviewer is not None and reviewer.name else summary.reviewer_id
         focus = reviewer.focus if reviewer is not None else ""
         requirement = "required" if summary.required else "optional"
-        findings_count = sum(summary.reviewer_id in finding.reviewer_ids for finding in report.findings)
+        findings_count = sum(
+            summary.reviewer_id in (finding.reviewer_ids or ["general"]) for finding in report.findings
+        )
         estimated_cost = f"${summary.estimated_cost_usd:.6f}" if summary.estimated_cost_usd is not None else "n/a"
         focus_html = f"<p><strong>Focus:</strong> {escape(focus)}</p>" if focus else ""
         reasons_html = _html_list(
@@ -238,16 +245,24 @@ def _verifications_html(report: ReviewReport) -> str:
     if not report.verifications:
         return "<p>No verifier decisions.</p>"
 
+    current_ids = {id(verification) for verification in active_verifications(report.verifications)}
+    unresolved_ids = {id(verification) for verification in unresolved_verifications(report.verifications)}
     counts: dict[str, list[int]] = {}
+    superseded_count = len(historical_verifications(report.verifications))
     rows: list[str] = []
     for verification in report.verifications:
         reviewer_id = verification.reviewer_id
-        reviewer_counts = counts.setdefault(reviewer_id, [0, 0])
-        reviewer_counts[0 if verification.approved else 1] += 1
-        decision = "approved" if verification.approved else "rejected"
+        is_current = id(verification) in current_ids
+        if is_current:
+            reviewer_counts = counts.setdefault(reviewer_id, [0, 0])
+            reviewer_counts[0 if verification.approved else 1] += 1
+        is_unresolved = id(verification) in unresolved_ids
+        state = "current" if is_current else "unresolved" if is_unresolved else "superseded"
+        decision = "pending" if is_unresolved else "approved" if verification.approved else "rejected"
         rows.append(
             "<tr>"
             f"<td><code>{escape(reviewer_id)}</code></td>"
+            f"<td><code>{state}</code></td>"
             f"<td><code>{decision}</code></td>"
             f"<td>{escape(verification.finding.title)} "
             f"(<code>{escape(finding_fingerprint(verification.finding))}</code>)</td>"
@@ -259,13 +274,15 @@ def _verifications_html(report: ReviewReport) -> str:
         [
             f"Reviewer <code>{escape(reviewer_id)}</code>: {approved} approved / {rejected} rejected"
             for reviewer_id, (approved, rejected) in sorted(counts.items())
-        ],
+        ]
+        + ([f"Unresolved verification decisions: {len(unresolved_ids)}"] if unresolved_ids else [])
+        + ([f"Superseded historical decisions: {superseded_count}"] if superseded_count else []),
         empty="No verifier decisions.",
     )
     return (
         f"{summary}"
         "<table>"
-        "<thead><tr><th>Reviewer</th><th>Decision</th><th>Finding</th>"
+        "<thead><tr><th>Reviewer</th><th>State</th><th>Decision</th><th>Finding</th>"
         "<th>Confidence</th><th>Reason</th></tr></thead>"
         f"<tbody>{''.join(rows)}</tbody>"
         "</table>"

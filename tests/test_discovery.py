@@ -4,7 +4,17 @@ from pathlib import Path
 
 import pytest
 
-from apex_ray.discovery import discover_project, list_project_files
+from apex_ray import git
+from apex_ray.discovery import (
+    DEFAULT_GIT_ROOT_TIMEOUT_SECONDS,
+    PACKAGE_JSON_BYTE_LIMIT,
+    DiscoveryError,
+    DiscoveryTimeoutError,
+    discover_project,
+    discover_project_with_files,
+    discover_repo_root,
+    list_project_files,
+)
 
 
 def test_discovery_prunes_large_generated_and_worktree_directories(tmp_path: Path) -> None:
@@ -28,6 +38,24 @@ def test_discovery_prunes_large_generated_and_worktree_directories(tmp_path: Pat
 
     assert profile.detected_languages == ["typescript"]
     assert profile.ignored_patterns == ["**/generated/**"]
+
+
+def test_discover_repo_root_uses_bounded_default_timeout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen_timeout: float | None = None
+
+    def fake_repo_root(cwd: Path, *, timeout: float | None = None) -> Path | None:
+        assert cwd == tmp_path
+        nonlocal seen_timeout
+        seen_timeout = timeout
+        return None
+
+    monkeypatch.setattr("apex_ray.discovery.git.repo_root", fake_repo_root)
+
+    assert discover_repo_root(tmp_path) == tmp_path.resolve()
+    assert seen_timeout == DEFAULT_GIT_ROOT_TIMEOUT_SECONDS
 
 
 def test_discovery_detects_modern_javascript_and_typescript_module_extensions(tmp_path: Path) -> None:
@@ -60,6 +88,37 @@ def test_discovery_detects_vite_from_modern_config_extensions(
     profile = discover_project(tmp_path)
 
     assert "vite" in profile.framework_hints
+
+
+def test_discovery_does_not_follow_package_json_symlink(
+    tmp_path: Path,
+) -> None:
+    outside = tmp_path / "outside-package.json"
+    outside.write_text(
+        '{"dependencies":{"react":"latest"}}',
+        encoding="utf-8",
+    )
+    (tmp_path / "package.json").symlink_to(outside)
+
+    profile = discover_project(
+        tmp_path,
+        timeout_seconds=0.5,
+    )
+
+    assert "react" not in profile.framework_hints
+
+
+def test_discovery_skips_oversized_package_json(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "package.json").write_bytes(b" " * (PACKAGE_JSON_BYTE_LIMIT + 1))
+
+    profile = discover_project(
+        tmp_path,
+        timeout_seconds=0.5,
+    )
+
+    assert profile.framework_hints == []
 
 
 def test_discovery_uses_git_inventory_with_untracked_files(tmp_path: Path) -> None:
@@ -117,3 +176,172 @@ def test_non_git_inventory_prunes_review_ignored_directories(
 
     assert files == [Path("src/app.ts")]
     assert entered_directories == ["src"]
+
+
+def test_non_git_inventory_stops_when_timeout_expires(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tmp_path / "first.ts").write_text("export {};\n", encoding="utf-8")
+    clock = [0.0]
+
+    def advancing_clock() -> float:
+        clock[0] += 0.6
+        return clock[0]
+
+    monkeypatch.setattr("apex_ray.discovery.time.monotonic", advancing_clock)
+
+    with pytest.raises(TimeoutError, match="Project file discovery timed out"):
+        list_project_files(
+            tmp_path,
+            is_git_repo=False,
+            timeout_seconds=1.0,
+        )
+
+
+def test_git_inventory_bounds_the_git_subprocess(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen_timeout: float | None = None
+
+    def timed_out_git(
+        _args: list[str],
+        cwd: Path,
+        *,
+        timeout: float | None = None,
+        max_output_bytes: int,
+        max_entries: int,
+    ) -> git.GitNulOutput:
+        del cwd, max_output_bytes, max_entries
+        nonlocal seen_timeout
+        seen_timeout = timeout
+        raise subprocess.TimeoutExpired(cmd=["git", "ls-files"], timeout=timeout or 0)
+
+    monkeypatch.setattr("apex_ray.discovery.git.read_git_nul_output", timed_out_git)
+
+    with pytest.raises(TimeoutError, match="Project file discovery timed out"):
+        list_project_files(
+            tmp_path,
+            is_git_repo=True,
+            timeout_seconds=0.25,
+        )
+
+    assert seen_timeout is not None
+    assert 0 < seen_timeout <= 0.25
+
+
+def test_git_inventory_checks_deadline_after_the_subprocess_returns(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = [0.0]
+
+    def slow_git(
+        _args: list[str],
+        cwd: Path,
+        *,
+        timeout: float | None = None,
+        max_output_bytes: int,
+        max_entries: int,
+    ) -> git.GitNulOutput:
+        del cwd, timeout, max_output_bytes, max_entries
+        clock[0] = 2.0
+        return git.GitNulOutput(returncode=1, entries=[])
+
+    monkeypatch.setattr("apex_ray.discovery.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr("apex_ray.discovery.git.read_git_nul_output", slow_git)
+
+    with pytest.raises(TimeoutError, match="Project file discovery timed out"):
+        list_project_files(
+            tmp_path,
+            is_git_repo=True,
+            timeout_seconds=1.0,
+        )
+
+
+def test_project_discovery_shares_one_timeout_across_git_and_inventory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = [10.0]
+    seen_timeouts: list[tuple[str, float | None]] = []
+
+    def fake_repo_root(cwd: Path, *, timeout: float | None = None) -> Path:
+        assert cwd == tmp_path
+        seen_timeouts.append(("root", timeout))
+        clock[0] += 0.2
+        return tmp_path
+
+    def fake_is_git_repo(cwd: Path, *, timeout: float | None = None) -> bool:
+        assert cwd == tmp_path
+        seen_timeouts.append(("is_git", timeout))
+        clock[0] += 0.3
+        return True
+
+    def fake_list_project_files(
+        root: Path,
+        ignored_patterns: list[str] | None = None,
+        *,
+        is_git_repo: bool | None = None,
+        timeout_seconds: float | None = None,
+    ) -> list[Path]:
+        assert root == tmp_path
+        assert ignored_patterns == []
+        assert is_git_repo is True
+        seen_timeouts.append(("inventory", timeout_seconds))
+        return []
+
+    monkeypatch.setattr("apex_ray.discovery.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr("apex_ray.discovery.git.repo_root", fake_repo_root)
+    monkeypatch.setattr("apex_ray.discovery.git.is_git_repo", fake_is_git_repo)
+    monkeypatch.setattr("apex_ray.discovery.list_project_files", fake_list_project_files)
+
+    discover_project_with_files(tmp_path, timeout_seconds=1.0)
+
+    assert seen_timeouts == [
+        ("root", pytest.approx(1.0)),
+        ("is_git", pytest.approx(0.8)),
+        ("inventory", pytest.approx(0.5)),
+    ]
+
+
+def test_project_discovery_translates_git_root_timeout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def timed_out_repo_root(cwd: Path, *, timeout: float | None = None) -> Path | None:
+        del cwd
+        raise subprocess.TimeoutExpired(cmd=["git", "rev-parse"], timeout=timeout or 0)
+
+    monkeypatch.setattr("apex_ray.discovery.git.repo_root", timed_out_repo_root)
+
+    with pytest.raises(DiscoveryTimeoutError, match="locating the Git repository root") as error:
+        discover_project_with_files(tmp_path, timeout_seconds=0.25)
+
+    assert isinstance(error.value, DiscoveryError)
+    assert isinstance(error.value, TimeoutError)
+    assert "review.analyzer.timeout_seconds" in str(error.value)
+
+
+def test_git_inventory_translates_output_limit_to_discovery_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def limited_git(
+        _args: list[str],
+        cwd: Path,
+        *,
+        timeout: float | None = None,
+        max_output_bytes: int,
+        max_entries: int,
+    ) -> git.GitNulOutput:
+        del cwd, timeout, max_output_bytes, max_entries
+        raise git.GitOutputLimitError("Git output exceeded the entry safety limit of 250000.")
+
+    monkeypatch.setattr("apex_ray.discovery.git.read_git_nul_output", limited_git)
+
+    with pytest.raises(DiscoveryError, match="Git inventory exceeded its safety limit") as error:
+        list_project_files(tmp_path, is_git_repo=True)
+
+    assert "generated or untracked files" in str(error.value)

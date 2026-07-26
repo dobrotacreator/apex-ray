@@ -1,6 +1,9 @@
 from pathlib import Path
 
+import pytest
+
 from apex_ray.cli.gate import _combine_incremental_decision, _resolve_incremental_carried_findings
+from apex_ray.findings import findings_are_duplicates
 from apex_ray.gate_retry import CarriedFinding, CoverageDebt, config_fingerprint, relevant_files_for_finding
 from apex_ray.gates import PrePushGateDecision, evaluate_pre_push_gate, render_pre_push_gate_stdout
 from apex_ray.models import (
@@ -110,6 +113,166 @@ def test_incremental_decision_deduplicates_current_and_carried_finding() -> None
     assert combined.reasons == current.reasons
 
 
+def test_unverified_gate_keeps_legacy_finding_with_positive_in_scope_run(
+    tmp_path: Path,
+) -> None:
+    canonical = ContextPack(id="src/a.ts#authorize:1", file="src/a.ts")
+    possible_origin = ContextPack(id="src/b.ts#dispatch:2", file="src/b.ts")
+    config = ReviewConfig(
+        reviewers=[
+            ReviewerConfig(
+                id="finance",
+                paths=["src/b.ts"],
+                verify=False,
+            )
+        ]
+    )
+    config.gates.pre_push.require_verified_findings = False
+    finding = Finding(
+        title="Authorization bypass",
+        severity=FindingSeverity.HIGH,
+        confidence=FindingConfidence.HIGH,
+        file=canonical.file,
+        failure_mode="A transfer can bypass the tenant boundary.",
+        evidence="No authorization predicate precedes the transfer.",
+        suggested_fix="Add a tenant authorization check.",
+        suggested_test="Reject cross-tenant transfers.",
+        context_pack_id=canonical.id,
+        reviewer_ids=["finance"],
+    )
+    report = build_report(
+        ProjectProfile(root=str(tmp_path), is_git_repo=True),
+        config,
+        DiffSummary(target_mode=TargetMode.PATCH),
+        context_packs=[canonical, possible_origin],
+        findings=[finding],
+        llm_runs=[
+            LLMRun(
+                provider="fake",
+                reviewer_id="finance",
+                context_pack_id=possible_origin.id,
+                status="ok",
+                duration_ms=1,
+                findings_count=1,
+            )
+        ],
+    )
+
+    decision = evaluate_pre_push_gate(report, config.gates.pre_push)
+
+    assert decision.blocked is True
+    assert decision.blocking_findings == [finding]
+
+
+def test_unverified_gate_keeps_legacy_finding_when_in_scope_review_failed(
+    tmp_path: Path,
+) -> None:
+    canonical = ContextPack(id="src/a.ts#authorize:1", file="src/a.ts")
+    current_scope = ContextPack(id="src/b.ts#dispatch:2", file="src/b.ts")
+    config = ReviewConfig(
+        reviewers=[
+            ReviewerConfig(
+                id="finance",
+                paths=["src/b.ts"],
+                verify=False,
+            )
+        ]
+    )
+    config.gates.pre_push.require_verified_findings = False
+    config.gates.pre_push.fail_on_quality_gate = False
+    finding = Finding(
+        title="Authorization bypass",
+        severity=FindingSeverity.HIGH,
+        confidence=FindingConfidence.HIGH,
+        file=canonical.file,
+        failure_mode="A transfer can bypass the tenant boundary.",
+        evidence="No authorization predicate precedes the transfer.",
+        suggested_fix="Add a tenant authorization check.",
+        suggested_test="Reject cross-tenant transfers.",
+        context_pack_id=canonical.id,
+        reviewer_ids=["finance"],
+    )
+    report = build_report(
+        ProjectProfile(root=str(tmp_path), is_git_repo=True),
+        config,
+        DiffSummary(target_mode=TargetMode.PATCH),
+        context_packs=[canonical, current_scope],
+        findings=[finding],
+        llm_runs=[
+            LLMRun(
+                provider="fake",
+                reviewer_id="finance",
+                context_pack_id=current_scope.id,
+                status="failed_provider",
+                duration_ms=1,
+            )
+        ],
+    )
+
+    decision = evaluate_pre_push_gate(report, config.gates.pre_push)
+
+    assert decision.blocked is True
+    assert decision.blocking_findings == [finding]
+
+
+def test_unverified_gate_retires_legacy_multi_reviewer_debt_after_clean_scopes(
+    tmp_path: Path,
+) -> None:
+    canonical = ContextPack(id="src/old.ts#authorize:1", file="src/old.ts")
+    security_pack = ContextPack(id="src/auth.ts#authorize:2", file="src/auth.ts")
+    finance_pack = ContextPack(
+        id="src/payments.ts#settle:3",
+        file="src/payments.ts",
+    )
+    config = ReviewConfig(
+        reviewers=[
+            ReviewerConfig(id="security", paths=["src/auth.ts"], verify=False),
+            ReviewerConfig(id="finance", paths=["src/payments.ts"], verify=False),
+        ]
+    )
+    config.gates.pre_push.require_verified_findings = False
+    finding = Finding(
+        title="Authorization bypass",
+        severity=FindingSeverity.HIGH,
+        confidence=FindingConfidence.HIGH,
+        file=canonical.file,
+        failure_mode="A transfer can bypass the tenant boundary.",
+        evidence="No authorization predicate precedes the transfer.",
+        suggested_fix="Add a tenant authorization check.",
+        suggested_test="Reject cross-tenant transfers.",
+        context_pack_id=canonical.id,
+        reviewer_ids=["finance", "security"],
+    )
+    report = build_report(
+        ProjectProfile(root=str(tmp_path), is_git_repo=True),
+        config,
+        DiffSummary(target_mode=TargetMode.PATCH),
+        context_packs=[canonical, security_pack, finance_pack],
+        findings=[finding],
+        llm_runs=[
+            LLMRun(
+                provider="fake",
+                reviewer_id="security",
+                context_pack_id=security_pack.id,
+                status="ok",
+                duration_ms=1,
+            ),
+            LLMRun(
+                provider="fake",
+                reviewer_id="finance",
+                context_pack_id=finance_pack.id,
+                status="ok",
+                duration_ms=1,
+            ),
+        ],
+    )
+
+    decision = evaluate_pre_push_gate(report, config.gates.pre_push)
+
+    assert decision.blocked is False
+    assert decision.blocking_findings == []
+
+
 def test_pre_push_gate_stdout_explains_provider_failures_without_findings(tmp_path: Path) -> None:
     config = ReviewConfig()
     config.llm.enabled = True
@@ -201,6 +364,219 @@ def test_verified_semantic_duplicate_remains_eligible_for_gate() -> None:
     assert decision.blocking_findings == [canonical]
 
 
+def test_latest_legacy_verification_decision_controls_gate_eligibility() -> None:
+    finding = Finding(
+        title="Authorization guard is bypassed",
+        severity=FindingSeverity.HIGH,
+        confidence=FindingConfidence.HIGH,
+        file="src/settlement.ts",
+        failure_mode="A settlement can bypass its account authorization guard.",
+        evidence="The changed branch executes before the ownership check.",
+        suggested_fix="Move the branch after the ownership check.",
+        suggested_test="Reject a settlement for an unauthorized account.",
+    )
+    config = ReviewConfig()
+    report = build_report(
+        ProjectProfile(root="/repo", is_git_repo=True),
+        config,
+        DiffSummary(target_mode=TargetMode.PATCH),
+        findings=[finding],
+        verifications=[
+            FindingVerification(
+                finding=finding,
+                reviewer_id="security",
+                approved=True,
+                confidence=FindingConfidence.HIGH,
+                reason="The original verifier approved the finding.",
+            ),
+            FindingVerification(
+                finding=finding,
+                reviewer_id="security",
+                approved=False,
+                confidence=FindingConfidence.HIGH,
+                reason="A later verifier rejected the finding.",
+            ),
+        ],
+    )
+
+    decision = evaluate_pre_push_gate(report, config.gates.pre_push)
+
+    assert decision.blocked is False
+    assert decision.blocking_findings == []
+
+
+@pytest.mark.parametrize(
+    ("latest_approved", "expected_blocked"),
+    [
+        (False, False),
+        (True, True),
+    ],
+)
+def test_latest_legacy_verification_decision_matches_across_severity_changes(
+    latest_approved: bool,
+    expected_blocked: bool,
+) -> None:
+    finding = Finding(
+        title="Authorization guard is bypassed",
+        severity=FindingSeverity.HIGH,
+        confidence=FindingConfidence.HIGH,
+        file="src/settlement.ts",
+        failure_mode="A settlement can bypass its account authorization guard.",
+        evidence="The changed branch executes before the ownership check.",
+        suggested_fix="Move the branch after the ownership check.",
+        suggested_test="Reject a settlement for an unauthorized account.",
+        context_pack_id="src/settlement.ts#settle:1",
+    )
+    escalated = finding.model_copy(update={"severity": FindingSeverity.CRITICAL})
+    config = ReviewConfig()
+    report = build_report(
+        ProjectProfile(root="/repo", is_git_repo=True),
+        config,
+        DiffSummary(target_mode=TargetMode.PATCH),
+        findings=[finding],
+        verifications=[
+            FindingVerification(
+                finding=finding,
+                reviewer_id="security",
+                approved=not latest_approved,
+                confidence=FindingConfidence.HIGH,
+                reason="The original decision.",
+            ),
+            FindingVerification(
+                finding=escalated,
+                reviewer_id="security",
+                approved=latest_approved,
+                confidence=FindingConfidence.HIGH,
+                reason="The later decision after severity escalation.",
+            ),
+        ],
+    )
+
+    decision = evaluate_pre_push_gate(report, config.gates.pre_push)
+
+    assert decision.blocked is expected_blocked
+    assert decision.blocking_findings == ([finding] if expected_blocked else [])
+
+
+def test_distinct_fuzzy_legacy_verification_decisions_remain_independent() -> None:
+    authorization = Finding(
+        title="Authorization guard is bypassed before settlement",
+        severity=FindingSeverity.HIGH,
+        confidence=FindingConfidence.HIGH,
+        file="src/settlement.ts",
+        line=42,
+        failure_mode=(
+            "An untrusted caller can bypass the authorization guard and submit a settlement "
+            "without the required account ownership check."
+        ),
+        evidence=(
+            "The changed early return executes before the account ownership authorization guard on the settlement path."
+        ),
+        suggested_fix="Move the early return after the ownership guard.",
+        suggested_test="Reject a denied-account settlement.",
+        context_pack_id="src/settlement.ts#settle:42",
+    )
+    audit = authorization.model_copy(
+        update={
+            "title": "Settlement ownership bypass is missing an audit event",
+            "failure_mode": (
+                "An untrusted caller can bypass the account ownership guard and submit a "
+                "settlement without the required authorization audit event."
+            ),
+            "evidence": (
+                "The changed early return executes before the account ownership authorization "
+                "audit event on the settlement path."
+            ),
+        }
+    )
+    assert findings_are_duplicates(authorization, audit) is True
+    config = ReviewConfig()
+    report = build_report(
+        ProjectProfile(root="/repo", is_git_repo=True),
+        config,
+        DiffSummary(target_mode=TargetMode.PATCH),
+        findings=[authorization],
+        verifications=[
+            FindingVerification(
+                finding=authorization,
+                reviewer_id="security",
+                approved=True,
+                confidence=FindingConfidence.HIGH,
+                reason="The authorization bypass is confirmed.",
+            ),
+            FindingVerification(
+                finding=audit,
+                reviewer_id="security",
+                approved=False,
+                confidence=FindingConfidence.HIGH,
+                reason="The audit issue is not reproducible.",
+            ),
+        ],
+    )
+
+    decision = evaluate_pre_push_gate(report, config.gates.pre_push)
+
+    assert decision.blocked is True
+    assert decision.blocking_findings == [authorization]
+
+
+def test_cross_severity_verification_does_not_merge_distinct_same_line_risks() -> None:
+    authorization = Finding(
+        title="Missing authorization allows account deletion",
+        severity=FindingSeverity.CRITICAL,
+        confidence=FindingConfidence.HIGH,
+        file="src/accounts.ts",
+        line=42,
+        failure_mode=(
+            "The deleteAccount handler uses the account deletion token before authorization "
+            "and permits another tenant account deletion."
+        ),
+        evidence="The changed handler invokes deleteAccount before checking caller authorization.",
+        suggested_fix="Enforce caller authorization before using the account deletion token.",
+        suggested_test="Reject another tenant account deletion before the operation runs.",
+        context_pack_id="src/accounts.ts#deleteAccount:42",
+    )
+    audit_leak = authorization.model_copy(
+        update={
+            "title": "Audit log leaks the account deletion token",
+            "severity": FindingSeverity.MEDIUM,
+            "failure_mode": (
+                "The deleteAccount handler logs the account deletion token before authorization "
+                "and exposes another tenant account deletion token."
+            ),
+            "evidence": "The changed handler invokes logger.info before checking caller authorization.",
+        }
+    )
+    config = ReviewConfig()
+    report = build_report(
+        ProjectProfile(root="/repo", is_git_repo=True),
+        config,
+        DiffSummary(target_mode=TargetMode.PATCH),
+        findings=[authorization],
+        verifications=[
+            FindingVerification(
+                finding=authorization,
+                reviewer_id="security",
+                approved=True,
+                confidence=FindingConfidence.HIGH,
+                reason="The authorization bypass is confirmed.",
+            ),
+            FindingVerification(
+                finding=audit_leak,
+                reviewer_id="security",
+                approved=False,
+                confidence=FindingConfidence.HIGH,
+                reason="The audit token leak is not reproducible.",
+            ),
+        ],
+    )
+
+    decision = evaluate_pre_push_gate(report, config.gates.pre_push)
+
+    assert decision.blocked is True
+    assert decision.blocking_findings == [authorization]
+
+
 def test_verified_semantic_duplicate_does_not_cross_provenance_scope() -> None:
     approved = Finding(
         title="Authorization guard is bypassed before settlement",
@@ -233,6 +609,14 @@ def test_verified_semantic_duplicate_does_not_cross_provenance_scope() -> None:
             update={
                 "title": "Settlement authorization can be bypassed",
                 "line": 242,
+                "confidence": FindingConfidence.HIGH,
+            }
+        ),
+        approved.model_copy(
+            update={
+                "file": "src/cards/settlement.ts",
+                "context_pack_id": "src/cards/settlement.ts#settle:42",
+                "reviewer_ids": ["security"],
                 "confidence": FindingConfidence.HIGH,
             }
         ),

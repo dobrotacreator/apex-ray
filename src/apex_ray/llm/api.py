@@ -60,6 +60,7 @@ class _ProviderPreset:
     api_key_env: str
     allowed_hosts: tuple[str, ...]
     allowed_host_suffixes: tuple[str, ...] = ()
+    alternative_protocols: tuple[LLMAPIProtocol, ...] = ()
 
 
 _PRESETS = {
@@ -69,6 +70,7 @@ _PRESETS = {
         base_url="https://api.openai.com/v1",
         api_key_env="OPENAI_API_KEY",
         allowed_hosts=("api.openai.com",),
+        alternative_protocols=(LLMAPIProtocol.OPENAI_CHAT,),
     ),
     LLMProviderName.ANTHROPIC_API: _ProviderPreset(
         protocol=LLMAPIProtocol.ANTHROPIC_MESSAGES,
@@ -130,6 +132,8 @@ _RESERVED_HEADERS = {
     "x-api-key",
 }
 _TRUTHY_ENV_VALUES = {"1", "on", "true", "yes"}
+_CI_ALLOWED_ENV_SELECTORS_ENV = "APEX_RAY_API_ALLOWED_ENV_VARS"
+_CI_ALLOWED_HOSTS_ENV = "APEX_RAY_API_ALLOWED_HOSTS"
 
 
 def api_key_environment_name(config: LLMConfig) -> str | None:
@@ -164,9 +168,20 @@ class APILLMProvider:
             self.protocol = self._required_custom_protocol()
             self.structured_output = self._required_custom_structured_output()
         else:
-            self.protocol = config.api.protocol or self.preset.protocol
+            requested_protocol = config.api.protocol or self.preset.protocol
+            supported_protocols = (
+                self.preset.protocol,
+                *self.preset.alternative_protocols,
+            )
+            if requested_protocol not in supported_protocols:
+                raise LLMProviderError(
+                    f"{config.provider} protocol is fixed to {self.preset.protocol}; "
+                    "use openai_compatible for a different API protocol."
+                )
+            self.protocol = requested_protocol
             self.structured_output = config.api.structured_output or self.preset.structured_output
 
+        self._validate_ci_environment_policy()
         self.base_url = self._resolve_base_url()
         self.url = _append_endpoint(self.base_url, _ENDPOINTS[self.protocol])
         self.api_key = self._resolve_api_key()
@@ -241,11 +256,10 @@ class APILLMProvider:
         schema_name: str,
     ) -> tuple[str, LLMUsage | None]:
         payload = self._request_payload(prompt=prompt, schema=schema, schema_name=schema_name)
-        response = self._request_with_retries(payload)
+        response, response_text = self._request_with_retries(payload)
         data = _as_mapping(response.data)
         if data is None:
             raise LLMProviderError("API response must be a JSON object.", category="malformed")
-        response_text = _extract_response_text(data, self.protocol)
         usage_mapping = _as_mapping(data.get("usage"))
         usage = (
             parse_api_usage(
@@ -304,15 +318,26 @@ class APILLMProvider:
         payload = {
             "model": self.model,
             "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": self.config.api.max_output_tokens,
         }
+        if self.config.provider in {
+            LLMProviderName.OPENAI_API,
+            LLMProviderName.KIMI_API,
+        }:
+            payload["max_completion_tokens"] = self.config.api.max_output_tokens
+        else:
+            payload["max_tokens"] = self.config.api.max_output_tokens
+        if self.config.provider == LLMProviderName.OPENAI_API:
+            payload["store"] = False
         response_format = self._openai_chat_format(schema, schema_name)
         if response_format is not None:
             payload["response_format"] = response_format
         payload.update(self._openai_chat_reasoning())
         return payload
 
-    def _request_with_retries(self, payload: Mapping[str, object]) -> JSONHTTPResponse:
+    def _request_with_retries(
+        self,
+        payload: Mapping[str, object],
+    ) -> tuple[JSONHTTPResponse, str]:
         max_attempts = self.config.api.max_retries + 1
         for attempt in range(max_attempts):
             try:
@@ -336,8 +361,23 @@ class APILLMProvider:
                 if 200 <= response.status_code < 300 and not (
                     response_data is not None and response_data.get("error") is not None
                 ):
-                    return response
-                provider_error = self._http_error(response)
+                    if response_data is None:
+                        provider_error = LLMProviderError(
+                            "API response must be a JSON object.",
+                            category="malformed",
+                        )
+                    else:
+                        try:
+                            response_text = _extract_response_text(
+                                response_data,
+                                self.protocol,
+                            )
+                        except LLMProviderError as exc:
+                            provider_error = exc
+                        else:
+                            return response, response_text
+                else:
+                    provider_error = self._http_error(response)
 
             if not provider_error.retryable or attempt + 1 >= max_attempts:
                 raise provider_error
@@ -357,27 +397,31 @@ class APILLMProvider:
         error = _as_mapping(response.data)
         nested = _as_mapping(error.get("error")) if error is not None else None
         details = nested or error or {}
-        code = " ".join(
-            str(details.get(key, "")) for key in ("type", "code", "status", "message") if details.get(key) is not None
+        structured_code = " ".join(
+            str(details.get(key, "")) for key in ("type", "code", "status") if details.get(key) is not None
         ).lower()
+        message_code = str(details.get("message", "")).lower()
+        code = f"{structured_code} {message_code}"
         retry_after = _parse_retry_after(response.headers)
 
         category: LLMProviderErrorCategory
-        if status in {401, 403} or any(
-            token in code for token in ("authentication", "invalid_api_key", "unauthorized")
-        ):
+        quota_tokens = (
+            "arrearage",
+            "balance",
+            "billing",
+            "insufficient_quota",
+            "quota",
+        )
+        if status == 401:
             category = "auth"
             retryable = False
-        elif any(
-            token in code
-            for token in (
-                "arrearage",
-                "balance",
-                "billing",
-                "insufficient_quota",
-                "quota",
-            )
-        ):
+        elif status == 403:
+            category = "quota" if any(token in structured_code for token in quota_tokens) else "auth"
+            retryable = False
+        elif any(token in code for token in ("authentication", "invalid_api_key", "unauthorized")):
+            category = "auth"
+            retryable = False
+        elif any(token in code for token in quota_tokens):
             category = "quota"
             retryable = False
         elif status == 429 or any(token in code for token in ("overloaded", "rate_limit", "rate limit")):
@@ -419,6 +463,50 @@ class APILLMProvider:
             raise LLMProviderError("openai_compatible requires api.structured_output.")
         return self.config.api.structured_output
 
+    def _validate_ci_environment_policy(self) -> None:
+        if not _is_ci(self.environment):
+            return
+
+        api = self.config.api
+        if self.preset is not None:
+            if api.api_key_env is not None and api.api_key_env != self.preset.api_key_env:
+                raise LLMProviderError(
+                    f"{self.config.provider} API key environment variable is fixed to {self.preset.api_key_env} in CI."
+                )
+        else:
+            if not api.base_url_env:
+                raise LLMProviderError(
+                    "CI custom API endpoints must be supplied through api.base_url_env, not literal api.base_url."
+                )
+            if api.allowed_hosts_env != _CI_ALLOWED_HOSTS_ENV:
+                raise LLMProviderError(
+                    f"CI custom API host allowlist environment variable is fixed to {_CI_ALLOWED_HOSTS_ENV}."
+                )
+
+        selectors: list[tuple[str, str]] = []
+        if api.base_url_env:
+            selectors.append(("base URL", api.base_url_env))
+        if self.preset is None and api.api_key_env:
+            selectors.append(("API key", api.api_key_env))
+        selectors.extend((f"header {header!r}", env_name) for header, env_name in api.headers_from_env.items())
+        if not selectors:
+            return
+
+        allowed_selectors = {
+            item
+            for item in re.split(
+                r"[\s,]+",
+                self.environment.get(_CI_ALLOWED_ENV_SELECTORS_ENV, ""),
+            )
+            if item
+        }
+        for label, selector in selectors:
+            if selector not in allowed_selectors:
+                raise LLMProviderError(
+                    f"CI {label} environment selector {selector!r} is not present in the trusted allowlist "
+                    f"{_CI_ALLOWED_ENV_SELECTORS_ENV}."
+                )
+
     def _resolve_base_url(self) -> str:
         api = self.config.api
         if api.base_url_env:
@@ -440,19 +528,15 @@ class APILLMProvider:
             raise LLMProviderError(f"API endpoint host {host!r} is not allowed for {self.config.provider}.")
 
         if self.preset is None and _is_ci(self.environment):
-            if not api.base_url_env:
-                raise LLMProviderError(
-                    "CI custom API endpoints must be supplied through api.base_url_env, not literal api.base_url."
-                )
             allowed_hosts = {
                 item.lower().rstrip(".")
-                for item in re.split(r"[\s,]+", self.environment.get(api.allowed_hosts_env, ""))
+                for item in re.split(r"[\s,]+", self.environment.get(_CI_ALLOWED_HOSTS_ENV, ""))
                 if item
             }
             if host not in allowed_hosts:
                 raise LLMProviderError(
                     f"Custom API endpoint host {host!r} is not present in the CI-controlled allowlist "
-                    f"{api.allowed_hosts_env}."
+                    f"{_CI_ALLOWED_HOSTS_ENV}."
                 )
         return base_url.rstrip("/")
 
@@ -462,7 +546,10 @@ class APILLMProvider:
             raise LLMProviderError("openai_compatible requires api.api_key_env.")
         api_key = self.environment.get(key_env, "")
         if not api_key.strip():
-            raise LLMProviderError(f"API key environment variable {key_env} is not set.")
+            raise LLMProviderError(
+                f"API key environment variable {key_env} is not set.",
+                category="auth",
+            )
         _validate_header_value(api_key, "API key")
         return api_key
 
@@ -644,10 +731,16 @@ def _extract_openai_chat_text(data: Mapping[str, object]) -> str:
     if choice is None:
         raise LLMProviderError("API response choice was malformed.", category="malformed")
     finish_reason = choice.get("finish_reason")
-    if finish_reason == "length":
+    if finish_reason in {"length", "model_context_window_exceeded"}:
         raise LLMProviderError("API response was truncated at max_tokens.", category="truncated")
-    if finish_reason == "content_filter":
+    if finish_reason in {"content_filter", "sensitive"}:
         raise LLMProviderError("API provider refused the request.", category="refusal")
+    if finish_reason in {"insufficient_system_resource", "network_error"}:
+        raise LLMProviderError(
+            "API provider interrupted generation because a transient resource or network error occurred.",
+            category="provider",
+            retryable=True,
+        )
 
     message = _as_mapping(choice.get("message"))
     if message is None:

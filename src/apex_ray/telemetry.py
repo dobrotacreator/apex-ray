@@ -9,7 +9,12 @@ from pathlib import Path
 from typing import Any
 
 from apex_ray import __version__
-from apex_ray.findings import finding_matches_any
+from apex_ray.findings import (
+    active_verifications,
+    historical_verifications,
+    unresolved_verifications,
+    verified_report_findings,
+)
 from apex_ray.models import ReviewReport
 
 DEFAULT_REVIEW_TELEMETRY_PATH = ".apex-ray/telemetry/review-runs.jsonl"
@@ -33,9 +38,10 @@ def append_review_telemetry(
     coverage = report.llm_coverage
     path_mode = report.config.telemetry.path_mode
     reviewers = _reviewer_telemetry(report)
-    approved_verifications = [verification for verification in report.verifications if verification.approved]
-    approved_findings = [verification.finding for verification in approved_verifications]
-    verified_findings = [finding for finding in report.findings if finding_matches_any(finding, approved_findings)]
+    current_verifications = active_verifications(report.verifications)
+    approved_verifications = [verification for verification in current_verifications if verification.approved]
+    rejected_verifications = [verification for verification in current_verifications if not verification.approved]
+    verified_findings = verified_report_findings(report.findings, report.verifications)
     entry: dict[str, Any] = {
         "schema_version": "review-telemetry/v2",
         "run_id": uuid.uuid4().hex,
@@ -55,7 +61,12 @@ def append_review_telemetry(
         "findings_count": len(report.findings),
         "verified_findings_count": len(verified_findings),
         "verification_decisions_count": len(report.verifications),
-        "approved_verification_decisions_count": len(approved_verifications),
+        "approved_verification_decisions_count": sum(verification.approved for verification in report.verifications),
+        "active_verification_decisions_count": len(current_verifications),
+        "active_approved_verification_decisions_count": len(approved_verifications),
+        "active_rejected_verification_decisions_count": len(rejected_verifications),
+        "unresolved_verification_decisions_count": len(unresolved_verifications(report.verifications)),
+        "superseded_verification_decisions_count": len(historical_verifications(report.verifications)),
         "context_packs_count": len(report.context_packs),
         "llm_enabled": coverage.enabled,
         "llm_verify_enabled": coverage.verify_enabled,
@@ -73,7 +84,7 @@ def append_review_telemetry(
         "residual_p0_context_packs_count": len(coverage.residual_risk_p0_context_pack_ids),
         "residual_p1_context_packs_count": len(coverage.residual_risk_p1_context_pack_ids),
         "coverage_todos_count": len(coverage.coverage_todos),
-        "llm_runs_count": len(report.llm_runs),
+        "llm_runs_count": coverage.review_runs + coverage.verify_runs,
         "llm_review_runs_count": coverage.review_runs,
         "llm_verify_runs_count": coverage.verify_runs,
         "failed_llm_review_runs_count": coverage.failed_review_runs,
@@ -253,10 +264,13 @@ def _effective_actual_input_tokens(
 
 
 def _reviewer_telemetry(report: ReviewReport) -> dict[str, dict[str, int | bool]]:
-    reviewer_ids = sorted({run.reviewer_id for run in report.llm_runs})
     coverage_by_id = {reviewer.reviewer_id: reviewer for reviewer in report.llm_coverage.reviewers}
-    return {
-        reviewer_id: {
+    execution_runs = [run for run in report.llm_runs if run.kind in {"review", "review_shallow", "verify"}]
+    reviewer_ids = sorted({*coverage_by_id, *(run.reviewer_id for run in execution_runs)})
+    outcomes: dict[str, dict[str, int | bool]] = {}
+    for reviewer_id in reviewer_ids:
+        runs = [run for run in execution_runs if run.reviewer_id == reviewer_id]
+        outcomes[reviewer_id] = {
             "runs": len(runs),
             "failed_runs": sum(run.status != "ok" for run in runs),
             "findings": sum(run.findings_count for run in runs if run.kind in {"review", "review_shallow"}),
@@ -266,9 +280,7 @@ def _reviewer_telemetry(report: ReviewReport) -> dict[str, dict[str, int | bool]
                 else report.llm_coverage.verify_enabled
             ),
         }
-        for reviewer_id in reviewer_ids
-        if (runs := [run for run in report.llm_runs if run.reviewer_id == reviewer_id])
-    }
+    return outcomes
 
 
 def _memory_telemetry() -> dict[str, int]:

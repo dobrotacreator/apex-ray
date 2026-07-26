@@ -1,6 +1,10 @@
 from collections.abc import Iterable
 
-from apex_ray.findings import finding_decision_identity, findings_are_duplicates
+from apex_ray.findings import (
+    finding_decision_identity,
+    findings_are_duplicates,
+    merge_finding_reviewer_provenance,
+)
 from apex_ray.models import Finding
 
 
@@ -26,8 +30,10 @@ def consolidate_findings(
             > _finding_preference_key(existing, preferred_identities)
             else existing
         )
-        reviewer_ids = sorted({*existing.reviewer_ids, *finding.reviewer_ids})
-        consolidated[duplicate_index] = preferred.model_copy(update={"reviewer_ids": reviewer_ids})
+        consolidated[duplicate_index] = merge_finding_reviewer_provenance(
+            preferred,
+            [existing, finding],
+        )
     return consolidated
 
 

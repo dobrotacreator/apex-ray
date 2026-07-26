@@ -137,6 +137,14 @@ even a critical one, does not by itself fail the action. Use branch protection
 or repository rules to make the resulting matrix job checks required for
 merge.
 
+Line-addressable findings are published as escaped workflow annotations
+(`error` for critical/high, `warning` for medium, and `notice` for low), capped
+at 50 annotations per invocation; the full set remains in JSON and SARIF. The
+action also exposes stable machine outputs: `findings-count` plus per-severity
+counts, `partial-coverage`, `partial-coverage-severity`, `reviewer-statuses`
+(a compact JSON object), `quality-gate-status`, and the enforced
+`gate-outcome`. Report path outputs are described below.
+
 For an advisory rollout, set `fail-on-quality-gate: "false"`. Reports, the job
 summary, and the `quality-gate-status` action output still expose the failed
 coverage gate, but it does not change the step's exit status. Keep the default
@@ -183,17 +191,23 @@ jobs:
     env:
       APEX_RAY_LLM_BASE_URL: ${{ vars.APEX_RAY_LLM_BASE_URL }}
       APEX_RAY_API_ALLOWED_HOSTS: ${{ vars.APEX_RAY_API_ALLOWED_HOSTS }}
+      APEX_RAY_API_ALLOWED_ENV_VARS: >-
+        APEX_RAY_LLM_BASE_URL,APEX_RAY_LLM_API_KEY
       APEX_RAY_LLM_API_KEY: ${{ secrets.APEX_RAY_LLM_API_KEY }}
     steps:
       - uses: dobrotacreator/apex-ray/.github/actions/apex-ray-review@<full-release-commit-sha>
 ```
 
-The allowlist is a comma- or whitespace-separated list of hostnames, without
-schemes or paths. In CI, a custom endpoint must come from `base_url_env`, and
-its normalized host must appear in the environment variable named by
-`allowed_hosts_env`. Use an environment with required reviewers for
-high-value credentials, set provider spending limits, and avoid forwarding
-unrelated repository secrets to the job.
+The host allowlist is a comma- or whitespace-separated list of hostnames,
+without schemes or paths. In CI, `allowed_hosts_env` is fixed to
+`APEX_RAY_API_ALLOWED_HOSTS`; repository configuration cannot select another
+variable. A custom endpoint must come from `base_url_env`, its normalized host
+must appear in `APEX_RAY_API_ALLOWED_HOSTS`, and every environment selector
+chosen by repository configuration must appear in the trusted
+`APEX_RAY_API_ALLOWED_ENV_VARS` policy. Define both policy variables in the
+workflow or a protected environment. Use an environment with required
+reviewers for high-value credentials, set provider spending limits, and avoid
+forwarding unrelated repository secrets to the job.
 
 ## Fork and configuration safety
 
@@ -212,12 +226,23 @@ as analysis input, but the ordinary `pull_request` event is still the intended
 and least-privileged integration. Use a separate privileged workflow that
 consumes validated report artifacts if a later operation needs write access.
 
+The endpoint and environment-selector allowlists defend against untrusted Apex
+Ray configuration; they cannot defend credentials if an attacker is also
+allowed to rewrite the caller workflow. Treat workflow authors as trusted,
+keep API credentials in a protected GitHub environment with required
+reviewers, and require ownership review for `.github/workflows/` changes before
+granting same-repository pull-request jobs access to those credentials.
+
 For every pull request, the default `trust-pr-config: false` loads
 `.apex-ray/config.yml` from the base commit and writes a restricted temporary
 copy. The restricted copy disables custom analyzer scripts, external
 rule/memory files, caches, telemetry, report archives, and triage writes.
 Inline risk rules and reviewer definitions from the base branch remain
-available.
+available. The optional `base` input changes only the diff-analysis base; it
+cannot select the configuration trust root. With this default (and always for
+forks), configuration is read exclusively from the immutable
+`pull_request.base.sha`, and the action fails closed if that event commit is
+missing or unavailable in the checkout.
 
 When LLM review can run from that restricted copy, every effective provider
 route must use an API provider. The action rejects `codex_cli` and
@@ -238,7 +263,9 @@ allowlists as security changes before merging them to the base branch.
 
 If another step performs checkout, use `checkout: "false"` only after checking
 out the exact head commit at `GITHUB_WORKSPACE` with full history and without
-persisted credentials. Keep the action itself remotely pinned and do not run
+persisted credentials. The `checkout` input accepts only the exact strings
+`"true"` and `"false"` so a typo cannot silently bypass the isolated checkout.
+Keep the action itself remotely pinned and do not run
 dependency hooks, builds, tests, or repository-provided scripts before review
 when the job has secrets. The action validates all report paths relative to the
 repository under review and exposes both repository-relative outputs

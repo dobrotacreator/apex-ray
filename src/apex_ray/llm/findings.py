@@ -1,5 +1,6 @@
 import posixpath
 
+from apex_ray.findings import merge_finding_reviewer_provenance
 from apex_ray.models import ContextPack, Finding, FindingVerification
 
 
@@ -12,7 +13,17 @@ def filter_findings_for_context_pack(findings: list[Finding], pack: ContextPack)
             continue
         if normalized_file not in context_files:
             continue
-        filtered.append(finding.model_copy(update={"context_pack_id": pack.id, "file": normalized_file}))
+        filtered.append(
+            finding.model_copy(
+                update={
+                    "context_pack_id": pack.id,
+                    "file": normalized_file,
+                    # Reviewer origin metadata is assigned by Apex Ray and must
+                    # never be accepted from an untrusted model response.
+                    "reviewer_context_pack_ids": {},
+                }
+            )
+        )
     return filtered
 
 
@@ -26,8 +37,14 @@ def dedupe_findings(findings: list[Finding]) -> list[Finding]:
             _normalize_for_dedupe(finding.failure_mode),
         )
         current = deduped.get(key)
-        if current is None or _finding_rank(finding) > _finding_rank(current):
+        if current is None:
             deduped[key] = finding
+            continue
+        preferred = finding if _finding_rank(finding) > _finding_rank(current) else current
+        deduped[key] = merge_finding_reviewer_provenance(
+            preferred,
+            [current, finding],
+        )
     return list(deduped.values())
 
 

@@ -66,6 +66,8 @@ type _RouteKey = tuple[
     str,
     str | None,
     str | None,
+    int,
+    str | None,
     str | None,
 ]
 _TERMINAL_PROVIDER_FAILURES = {"failed_auth", "failed_quota"}
@@ -218,14 +220,19 @@ def review_context_packs(
                 else:
                     first_attempt = False
                 filtered_findings = filter_findings_for_context_pack(cached_findings, pack)
-                pack_findings = (
-                    [
-                        finding.model_copy(update={"reviewer_ids": sorted({*finding.reviewer_ids, reviewer_id})})
-                        for finding in filtered_findings
-                    ]
-                    if reviewer is not None
-                    else filtered_findings
-                )
+                pack_findings = [
+                    finding.model_copy(
+                        update={
+                            # Reviewer provenance is an execution fact, not
+                            # model-authored output. Persist it explicitly so
+                            # current reports remain distinguishable from
+                            # legacy reports that predate durable origins.
+                            "reviewer_ids": [] if reviewer is None else [reviewer_id],
+                            "reviewer_context_pack_ids": {reviewer_id: [pack.id]},
+                        }
+                    )
+                    for finding in filtered_findings
+                ]
             except Exception as exc:  # keep one bad pack from failing the whole review
                 status = classify_llm_provider_error(exc)
                 if provider_called:
@@ -450,6 +457,8 @@ def verify_findings(
                 approved=False,
                 confidence=FindingConfidence.HIGH,
                 reason=f"Missing context pack: {finding.context_pack_id}",
+                superseded=True,
+                superseded_reason="Verification did not run because the context pack was unavailable.",
             )
             continue
         findings_by_pack_id.setdefault(pack.id, []).append((index, finding))
@@ -508,6 +517,10 @@ def verify_findings(
                             approved=False,
                             confidence=FindingConfidence.LOW,
                             reason=f"Verifier skipped because {reason}",
+                            superseded=True,
+                            superseded_reason=(
+                                "Verification run did not complete successfully (skipped_circuit_open)."
+                            ),
                         )
                 else:
                     provider_called = True
@@ -547,6 +560,8 @@ def verify_findings(
                     approved=False,
                     confidence=FindingConfidence.LOW,
                     reason=f"Verifier failed for this finding: {error}",
+                    superseded=True,
+                    superseded_reason=(f"Verification run did not complete successfully ({status})."),
                 )
         else:
             if provider_called:
@@ -685,7 +700,9 @@ def verify_findings(
         runs.append(run)
 
     verifications = [verifications_by_index[index] for index in range(len(findings))]
-    approved_findings = [verification.finding for verification in verifications if verification.approved]
+    approved_findings = [
+        verification.finding for verification in verifications if verification.approved and not verification.superseded
+    ]
 
     return approved_findings, verifications, runs
 
@@ -717,6 +734,8 @@ def _route_key(config: LLMConfig, profile: str | None) -> _RouteKey:
     return (
         provider,
         config.model,
+        str(config.effort) if config.effort is not None else None,
+        config.timeout_seconds,
         executable,
         api_route,
     )
