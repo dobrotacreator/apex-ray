@@ -1,0 +1,206 @@
+name: Apex Ray review
+description: Review a GitHub pull request with Apex Ray and publish Markdown, JSON, and SARIF artifacts.
+
+inputs:
+  config-path:
+    description: Repository-relative Apex Ray config path.
+    required: false
+    default: .apex-ray/config.yml
+  reviewers:
+    description: Comma- or newline-separated reviewer ids; each becomes a repeated --reviewer flag.
+    required: false
+    default: ""
+  llm:
+    description: Use configured LLM behavior (auto), force it on (true), or force it off (false).
+    required: false
+    default: auto
+  fail-on-quality-gate:
+    description: Fail the job when LLM coverage or a required reviewer reports a failed quality gate.
+    required: false
+    default: "true"
+  base:
+    description: Optional base ref override. Pull requests use the immutable base SHA by default.
+    required: false
+    default: ""
+  trust-pr-config:
+    description: Allow a same-repository pull request to use its head config. Forks always use a restricted base config.
+    required: false
+    default: "false"
+  checkout:
+    description: Checkout the exact pull-request head with full history.
+    required: false
+    default: "true"
+  markdown-output:
+    description: Workspace-relative Markdown report path.
+    required: false
+    default: .apex-ray/ci/review.md
+  json-output:
+    description: Workspace-relative JSON report path.
+    required: false
+    default: .apex-ray/ci/review.json
+  sarif-output:
+    description: Workspace-relative SARIF report path.
+    required: false
+    default: .apex-ray/ci/review.sarif
+  upload-artifact:
+    description: Upload Markdown, JSON, and SARIF as a workflow artifact.
+    required: false
+    default: "true"
+  artifact-name:
+    description: Artifact name. Set a unique value for every matrix job.
+    required: false
+    default: apex-ray-review
+  artifact-retention-days:
+    description: Number of days to retain the workflow artifact.
+    required: false
+    default: "14"
+  upload-sarif:
+    description: Attempt a GitHub code-scanning SARIF upload for trusted events.
+    required: false
+    default: "true"
+  sarif-category:
+    description: Stable code-scanning category. Set a unique value for every reviewer matrix job.
+    required: false
+    default: apex-ray-review
+
+outputs:
+  markdown-output:
+    description: Workspace-relative Markdown report path.
+    value: ${{ steps.prepare.outputs.markdown-output }}
+  json-output:
+    description: Workspace-relative JSON report path.
+    value: ${{ steps.prepare.outputs.json-output }}
+  sarif-output:
+    description: Workspace-relative SARIF report path.
+    value: ${{ steps.prepare.outputs.sarif-output }}
+  llm-mode:
+    description: Effective LLM mode, including fork safety overrides.
+    value: ${{ steps.prepare.outputs.llm-mode }}
+  config-source:
+    description: Whether the run used head, restricted-base, restricted-defaults, or defaults config.
+    value: ${{ steps.prepare.outputs.config-source }}
+  quality-gate-status:
+    description: Coverage quality gate status from the JSON report.
+    value: ${{ steps.finalize.outputs.quality-gate-status }}
+  sarif-upload-outcome:
+    description: Outcome of the optional, non-blocking code-scanning upload.
+    value: ${{ steps.upload-sarif.outcome }}
+
+runs:
+  using: composite
+  steps:
+    - name: Checkout exact review head
+      id: checkout
+      if: ${{ inputs.checkout == 'true' }}
+      uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      with:
+        ref: ${{ github.event.pull_request.head.sha || github.sha }}
+        fetch-depth: 0
+        persist-credentials: false
+        show-progress: false
+
+    - name: Set up Python
+      uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+      with:
+        python-version: "3.14.4"
+
+    - name: Set up Node.js for TypeScript analysis
+      uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+      with:
+        node-version: "24.16.0"
+
+    - name: Set up uv
+      uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78
+      with:
+        version: "0.11.8"
+        python-version: "3.14.4"
+        working-directory: ${{ github.action_path }}/../../..
+        enable-cache: false
+
+    - name: Prepare locked Apex Ray runtime
+      shell: bash
+      env:
+        APEX_RAY_SOURCE: ${{ github.action_path }}/../../..
+        APEX_RAY_TYPESCRIPT_RUNTIME: ${{ github.action_path }}/../../../analyzer-runtimes/typescript
+        PYTHONNOUSERSITE: "1"
+        PYTHONPATH: ${{ github.action_path }}/../../../src
+        UV_PROJECT_ENVIRONMENT: ${{ runner.temp }}/apex-ray-action-venv
+      run: |
+        (
+          cd "$APEX_RAY_TYPESCRIPT_RUNTIME"
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm run build
+        )
+        uv sync --locked --no-dev --no-install-project --project "$APEX_RAY_SOURCE"
+
+    - name: Prepare safe review plan
+      id: prepare
+      shell: bash
+      env:
+        PYTHONNOUSERSITE: "1"
+        PYTHONPATH: ${{ github.action_path }}/../../../src
+        UV_PROJECT_ENVIRONMENT: ${{ runner.temp }}/apex-ray-action-venv
+        INPUT_CONFIG_PATH: ${{ inputs.config-path }}
+        INPUT_REVIEWERS: ${{ inputs.reviewers }}
+        INPUT_LLM: ${{ inputs.llm }}
+        INPUT_FAIL_ON_QUALITY_GATE: ${{ inputs.fail-on-quality-gate }}
+        INPUT_BASE: ${{ inputs.base }}
+        INPUT_TRUST_PR_CONFIG: ${{ inputs.trust-pr-config }}
+        INPUT_MARKDOWN_OUTPUT: ${{ inputs.markdown-output }}
+        INPUT_JSON_OUTPUT: ${{ inputs.json-output }}
+        INPUT_SARIF_OUTPUT: ${{ inputs.sarif-output }}
+        INPUT_ARTIFACT_NAME: ${{ inputs.artifact-name }}
+        INPUT_SARIF_CATEGORY: ${{ inputs.sarif-category }}
+      run: uv run --locked --no-dev --no-sync --project "$GITHUB_ACTION_PATH/../../.." python -P -s "$GITHUB_ACTION_PATH/prepare.py" plan
+
+    - name: Run Apex Ray review
+      id: review
+      continue-on-error: true
+      shell: bash
+      env:
+        PYTHONNOUSERSITE: "1"
+        PYTHONPATH: ${{ github.action_path }}/../../../src
+        UV_PROJECT_ENVIRONMENT: ${{ runner.temp }}/apex-ray-action-venv
+        APEX_RAY_PLAN: ${{ steps.prepare.outputs.plan }}
+      run: uv run --locked --no-dev --no-sync --project "$GITHUB_ACTION_PATH/../../.." python -P -s "$GITHUB_ACTION_PATH/prepare.py" run "$APEX_RAY_PLAN"
+
+    - name: Publish job summary
+      id: finalize
+      if: ${{ always() && steps.prepare.outcome == 'success' && steps.review.outcome == 'success' }}
+      continue-on-error: true
+      shell: bash
+      env:
+        PYTHONNOUSERSITE: "1"
+        PYTHONPATH: ${{ github.action_path }}/../../../src
+        UV_PROJECT_ENVIRONMENT: ${{ runner.temp }}/apex-ray-action-venv
+        APEX_RAY_PLAN: ${{ steps.prepare.outputs.plan }}
+      run: uv run --locked --no-dev --no-sync --project "$GITHUB_ACTION_PATH/../../.." python -P -s "$GITHUB_ACTION_PATH/prepare.py" finalize "$APEX_RAY_PLAN"
+
+    - name: Upload review artifact
+      id: upload-artifact
+      if: ${{ always() && steps.prepare.outcome == 'success' && steps.review.outcome == 'success' && inputs.upload-artifact == 'true' }}
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: ${{ steps.prepare.outputs.artifact-name }}
+        path: |
+          ${{ steps.prepare.outputs.markdown-output }}
+          ${{ steps.prepare.outputs.json-output }}
+          ${{ steps.prepare.outputs.sarif-output }}
+        if-no-files-found: warn
+        include-hidden-files: true
+        retention-days: ${{ inputs.artifact-retention-days }}
+
+    - name: Upload SARIF to code scanning
+      id: upload-sarif
+      if: ${{ steps.review.outcome == 'success' && steps.prepare.outputs.untrusted-pr != 'true' && steps.finalize.outputs.sarif-ready == 'true' && inputs.upload-sarif == 'true' }}
+      continue-on-error: true
+      uses: github/codeql-action/upload-sarif@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81
+      with:
+        sarif_file: ${{ steps.prepare.outputs.sarif-output }}
+        category: ${{ steps.prepare.outputs.sarif-category }}
+        wait-for-processing: true
+
+    - name: Propagate review or rendering failure
+      if: ${{ always() && (steps.review.outcome == 'failure' || steps.finalize.outcome == 'failure') }}
+      shell: bash
+      run: exit 1

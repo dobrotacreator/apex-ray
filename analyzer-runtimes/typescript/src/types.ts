@@ -33,6 +33,13 @@ export interface Reference {
   kind: ReferenceKind;
 }
 
+export interface IndexedReference {
+  file: string;
+  line: number;
+  endLine?: number;
+  kind: ReferenceKind;
+}
+
 export interface MetadataKeyIdentity {
   symbol: ts.Symbol | null;
   text: string | null;
@@ -92,6 +99,7 @@ export interface Args {
   refreshIndexCache: boolean;
   largeChangeSetSize: number | null;
   analysisTimeBudgetMs: number | null;
+  fileManifestPath?: string | null;
 }
 
 export interface DeletedLine {
@@ -177,7 +185,7 @@ export interface CommonJsExportEntry {
 export interface IdentifierIndexEntry {
   name: string;
   namespaceQualifier: string | null;
-  reference: Reference;
+  reference: IndexedReference;
 }
 
 export interface ReceiverIndexEntry {
@@ -258,7 +266,13 @@ export interface RepoIndexCacheStats {
 
 export interface RepoIndexCacheFile {
   version: number;
+  inventoryFingerprint: string | null;
   files: RepoIndexCacheFileEntry[];
+}
+
+export interface RepoIndexCacheWriteResult {
+  written: boolean;
+  error: string | null;
 }
 
 export interface RepoIndexCacheFileEntry {

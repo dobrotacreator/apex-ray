@@ -18,6 +18,7 @@ export function parseArgs(argv: string[]): Args {
   let refreshIndexCache = false;
   let largeChangeSetSize: number | null = null;
   let analysisTimeBudgetMs: number | null = null;
+  let fileManifestPath: string | null = null;
 
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -56,6 +57,8 @@ export function parseArgs(argv: string[]): Args {
     } else if (arg === "--analysis-time-budget-ms") {
       const value = Number(argv[++i] ?? "0");
       analysisTimeBudgetMs = Number.isFinite(value) && value >= 0 ? value : null;
+    } else if (arg === "--file-manifest") {
+      fileManifestPath = argv[++i] ?? null;
     }
   }
 
@@ -73,6 +76,7 @@ export function parseArgs(argv: string[]): Args {
     refreshIndexCache,
     largeChangeSetSize,
     analysisTimeBudgetMs,
+    fileManifestPath: fileManifestPath ? path.resolve(repo, fileManifestPath) : null,
   };
 }
 

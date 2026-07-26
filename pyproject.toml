@@ -80,6 +80,8 @@ include = [
     "/src",
     "/tests",
     "/docs",
+    "/examples",
+    "/.apex-ray/config.yml",
     "/analyzer-runtimes/typescript/src",
     "/analyzer-runtimes/typescript/test",
     "/analyzer-runtimes/typescript/tsconfig.json",

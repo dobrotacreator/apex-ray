@@ -1,4 +1,3 @@
-import fnmatch
 import json
 import os
 from pathlib import Path
@@ -6,6 +5,7 @@ from pathlib import Path
 from apex_ray import git
 from apex_ray.config import find_config
 from apex_ray.models import ProjectProfile
+from apex_ray.path_matching import path_matches_any
 
 LANGUAGE_EXTENSIONS = {
     ".py": "python",
@@ -50,22 +50,51 @@ def discover_project(
     ignored_patterns: list[str] | None = None,
     config_path: Path | None = None,
 ) -> ProjectProfile:
+    profile, _files = discover_project_with_files(
+        cwd,
+        ignored_patterns=ignored_patterns,
+        config_path=config_path,
+    )
+    return profile
+
+
+def discover_project_with_files(
+    cwd: Path,
+    ignored_patterns: list[str] | None = None,
+    config_path: Path | None = None,
+) -> tuple[ProjectProfile, list[Path]]:
     root = git.repo_root(cwd) or cwd.resolve()
     project_config_path = config_path or find_config(root)
     ignored_patterns = ignored_patterns or []
     is_git_repo = git.is_git_repo(root)
-    files = (
-        _list_git_project_files(root, ignored_patterns) if is_git_repo else _list_project_files(root, ignored_patterns)
+    files = list_project_files(root, ignored_patterns, is_git_repo=is_git_repo)
+
+    return (
+        ProjectProfile(
+            root=str(root),
+            is_git_repo=is_git_repo,
+            config_path=str(project_config_path) if project_config_path else None,
+            detected_languages=sorted(_detect_languages(files)),
+            package_managers=sorted(_detect_package_managers(root)),
+            framework_hints=sorted(_detect_frameworks(root)),
+            ignored_patterns=ignored_patterns,
+        ),
+        files,
     )
 
-    return ProjectProfile(
-        root=str(root),
-        is_git_repo=is_git_repo,
-        config_path=str(project_config_path) if project_config_path else None,
-        detected_languages=sorted(_detect_languages(files)),
-        package_managers=sorted(_detect_package_managers(root)),
-        framework_hints=sorted(_detect_frameworks(root)),
-        ignored_patterns=ignored_patterns,
+
+def list_project_files(
+    root: Path,
+    ignored_patterns: list[str] | None = None,
+    *,
+    is_git_repo: bool | None = None,
+) -> list[Path]:
+    root = root.resolve()
+    ignored_patterns = ignored_patterns or []
+    if is_git_repo is None:
+        is_git_repo = (root / ".git").exists() and git.is_git_repo(root)
+    return (
+        _list_git_project_files(root, ignored_patterns) if is_git_repo else _list_project_files(root, ignored_patterns)
     )
 
 
@@ -77,7 +106,10 @@ def _list_project_files(root: Path, ignored_patterns: list[str]) -> list[Path]:
             dirname
             for dirname in dirnames
             if dirname not in DISCOVERY_IGNORED_DIRS
-            and not _matches_ignored_patterns(_relative_posix(current_path / dirname, root), ignored_patterns)
+            and not _matches_ignored_directory(
+                _relative_posix(current_path / dirname, root),
+                ignored_patterns,
+            )
         ]
         for filename in filenames:
             rel = (current_path / filename).relative_to(root)
@@ -89,7 +121,14 @@ def _list_project_files(root: Path, ignored_patterns: list[str]) -> list[Path]:
 
 def _list_git_project_files(root: Path, ignored_patterns: list[str]) -> list[Path]:
     files: list[Path] = []
-    for rel_path in [*git.tracked_files(root), *git.untracked_files(root)]:
+    proc = git.run_git(
+        ["ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+        cwd=root,
+        check=False,
+    )
+    for rel_path in proc.stdout.split("\0") if proc.returncode == 0 else []:
+        if not rel_path:
+            continue
         if _should_ignore_path(rel_path, ignored_patterns):
             continue
         files.append(Path(rel_path))
@@ -104,7 +143,14 @@ def _should_ignore_path(rel_path: str, ignored_patterns: list[str]) -> bool:
 
 
 def _matches_ignored_patterns(rel_path: str, ignored_patterns: list[str]) -> bool:
-    return any(fnmatch.fnmatch(rel_path, pattern) for pattern in ignored_patterns)
+    return path_matches_any(rel_path, ignored_patterns)
+
+
+def _matches_ignored_directory(rel_path: str, ignored_patterns: list[str]) -> bool:
+    return _matches_ignored_patterns(rel_path, ignored_patterns) or _matches_ignored_patterns(
+        f"{rel_path.rstrip('/')}/",
+        ignored_patterns,
+    )
 
 
 def _relative_posix(path: Path, root: Path) -> str:

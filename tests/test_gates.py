@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from apex_ray.cli.gate import _resolve_incremental_carried_findings
-from apex_ray.gate_retry import CarriedFinding, relevant_files_for_finding
+from apex_ray.gate_retry import CarriedFinding, config_fingerprint, relevant_files_for_finding
 from apex_ray.gates import evaluate_pre_push_gate, render_pre_push_gate_stdout
 from apex_ray.models import (
     ChangedFile,
@@ -12,9 +12,11 @@ from apex_ray.models import (
     Finding,
     FindingConfidence,
     FindingSeverity,
+    FindingVerification,
     LLMRun,
     ProjectProfile,
     ReviewConfig,
+    ReviewerConfig,
     RiskSeverity,
     RiskSignal,
     RuleMatch,
@@ -23,6 +25,62 @@ from apex_ray.models import (
 )
 from apex_ray.progress import NoopProgress
 from apex_ray.report import build_report
+
+
+def test_incremental_retry_fingerprint_includes_selected_reviewer_scope() -> None:
+    config = ReviewConfig(
+        reviewers=[
+            ReviewerConfig(id="security", paths=["src/auth/**"]),
+            ReviewerConfig(id="finance", paths=["src/payments/**"]),
+        ]
+    )
+
+    security = config_fingerprint(config, config.gates.pre_push, reviewer_ids=["security"])
+    finance = config_fingerprint(config, config.gates.pre_push, reviewer_ids=["finance"])
+
+    assert security != finance
+
+
+def test_incremental_retry_fingerprint_normalizes_reviewer_order() -> None:
+    first = ReviewConfig(
+        reviewers=[
+            ReviewerConfig(id="security", paths=["src/auth/**"]),
+            ReviewerConfig(id="finance", paths=["src/payments/**"]),
+        ]
+    )
+    second = ReviewConfig(reviewers=list(reversed(first.reviewers)))
+
+    first_hash = config_fingerprint(
+        first,
+        first.gates.pre_push,
+        reviewer_ids=["security", "finance", "security"],
+    )
+    second_hash = config_fingerprint(
+        second,
+        second.gates.pre_push,
+        reviewer_ids=["finance", "security"],
+    )
+
+    assert first_hash == second_hash
+
+
+def test_incremental_retry_fingerprint_includes_effective_reviewer_config() -> None:
+    original = ReviewConfig(reviewers=[ReviewerConfig(id="security", paths=["src/auth/**"], risk_tags=["security"])])
+    changed = original.model_copy(deep=True)
+    changed.reviewers[0].paths = ["src/identity/**"]
+
+    original_hash = config_fingerprint(
+        original,
+        original.gates.pre_push,
+        reviewer_ids=["security"],
+    )
+    changed_hash = config_fingerprint(
+        changed,
+        changed.gates.pre_push,
+        reviewer_ids=["security"],
+    )
+
+    assert original_hash != changed_hash
 
 
 def test_pre_push_gate_stdout_explains_provider_failures_without_findings(tmp_path: Path) -> None:
@@ -67,6 +125,113 @@ def test_pre_push_gate_stdout_explains_provider_failures_without_findings(tmp_pa
     assert decision.blocked is True
     assert report.findings == []
     assert "LLM review run failures: failed_provider: 1" in stdout
+
+
+def test_verified_semantic_duplicate_remains_eligible_for_gate() -> None:
+    approved = Finding(
+        title="Authorization guard is bypassed before settlement",
+        severity=FindingSeverity.HIGH,
+        confidence=FindingConfidence.MEDIUM,
+        file="src/settlement.ts",
+        line=42,
+        failure_mode=(
+            "An untrusted caller can bypass the account authorization guard and submit "
+            "a settlement without the required ownership check."
+        ),
+        evidence=(
+            "The changed early return executes before the account ownership authorization guard on the settlement path."
+        ),
+        suggested_fix="Move the early return after the ownership authorization guard.",
+        suggested_test="Add a denied-account settlement regression test.",
+    )
+    canonical = approved.model_copy(
+        update={
+            "title": "Settlement authorization can be bypassed",
+            "confidence": FindingConfidence.HIGH,
+            "reviewer_ids": ["finance", "security"],
+        }
+    )
+    config = ReviewConfig()
+    report = build_report(
+        ProjectProfile(root="/repo", is_git_repo=True),
+        config,
+        DiffSummary(target_mode=TargetMode.PATCH),
+        findings=[canonical],
+        verifications=[
+            FindingVerification(
+                finding=approved,
+                reviewer_id="security",
+                approved=True,
+                confidence=FindingConfidence.HIGH,
+                reason="Evidence confirms the authorization bypass.",
+            )
+        ],
+    )
+
+    decision = evaluate_pre_push_gate(report, config.gates.pre_push)
+
+    assert decision.blocked is True
+    assert decision.blocking_findings == [canonical]
+
+
+def test_verified_semantic_duplicate_does_not_cross_provenance_scope() -> None:
+    approved = Finding(
+        title="Authorization guard is bypassed before settlement",
+        severity=FindingSeverity.HIGH,
+        confidence=FindingConfidence.MEDIUM,
+        file="src/accounts/settlement.ts",
+        line=42,
+        failure_mode=(
+            "An untrusted caller can bypass the account authorization guard and submit "
+            "a settlement without the required ownership check."
+        ),
+        evidence=(
+            "The changed early return executes before the account ownership authorization guard on the settlement path."
+        ),
+        suggested_fix="Move the early return after the ownership authorization guard.",
+        suggested_test="Add a denied-account settlement regression test.",
+        context_pack_id="src/accounts/settlement.ts#settle:42",
+    )
+    config = ReviewConfig()
+    unrelated_findings = [
+        approved.model_copy(
+            update={
+                "title": "Settlement authorization can be bypassed",
+                "file": "src/cards/settlement.ts",
+                "context_pack_id": "src/cards/settlement.ts#settle:42",
+                "confidence": FindingConfidence.HIGH,
+            }
+        ),
+        approved.model_copy(
+            update={
+                "title": "Settlement authorization can be bypassed",
+                "line": 242,
+                "confidence": FindingConfidence.HIGH,
+            }
+        ),
+    ]
+
+    for unrelated in unrelated_findings:
+        report = build_report(
+            ProjectProfile(root="/repo", is_git_repo=True),
+            config,
+            DiffSummary(target_mode=TargetMode.PATCH),
+            findings=[unrelated],
+            verifications=[
+                FindingVerification(
+                    finding=approved,
+                    reviewer_id="security",
+                    approved=True,
+                    confidence=FindingConfidence.HIGH,
+                    reason="Evidence confirms the authorization bypass in the account settlement pack.",
+                )
+            ],
+        )
+
+        decision = evaluate_pre_push_gate(report, config.gates.pre_push)
+
+        assert decision.blocked is False
+        assert decision.blocking_findings == []
 
 
 def test_relevant_files_include_matched_rule_resolution_surfaces(tmp_path: Path) -> None:

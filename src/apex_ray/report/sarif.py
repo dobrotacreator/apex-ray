@@ -1,0 +1,342 @@
+"""Deterministic SARIF output for Apex Ray findings."""
+
+from __future__ import annotations
+
+import json
+import re
+from collections.abc import Iterable
+from pathlib import PurePosixPath, PureWindowsPath
+from typing import Any
+from urllib.parse import parse_qsl, quote, unquote, urlsplit
+
+from apex_ray.findings import finding_fingerprint
+from apex_ray.models import ContextPack, Finding, ReviewReport, RiskSignal
+
+_RULE_ID = "APEX-RAY-REVIEW"
+_SARIF_SCHEMA = "https://json.schemastore.org/sarif-2.1.0.json"
+_LEVELS = {
+    "critical": "error",
+    "high": "error",
+    "medium": "warning",
+    "low": "note",
+}
+_URL = re.compile(
+    r"\b[A-Za-z][A-Za-z0-9+.-]*://[^ \t\r\n`\"'<>]+",
+    flags=re.IGNORECASE,
+)
+_LOCAL_URL_SCHEMES = frozenset(
+    {
+        "atom",
+        "cursor",
+        "cursor-insiders",
+        "editor",
+        "file",
+        "idea",
+        "jetbrains",
+        "subl",
+        "vscode",
+        "vscode-insiders",
+    }
+)
+_LOCAL_PATH_QUERY_KEYS = frozenset(
+    {
+        "cwd",
+        "dir",
+        "directory",
+        "file",
+        "folder",
+        "path",
+        "repo",
+        "repository",
+        "root",
+        "workspace",
+    }
+)
+_UNC_ABSOLUTE_PATH = re.compile(r"(?<![\\A-Za-z0-9_])\\\\[^ \t\r\n`\"'<>|]+")
+_WINDOWS_ABSOLUTE_PATH = re.compile(
+    r"(?<![A-Za-z0-9_])(?:[A-Za-z]:[\\/])"
+    r"(?:[^ \t\r\n`\"'<>|]+)"
+)
+_POSIX_ABSOLUTE_PATH = re.compile(r"(?<![/A-Za-z0-9_])/(?:[^ \t\r\n`\"'<>]+)")
+
+
+def render_sarif(report: ReviewReport) -> str:
+    """Render a review report as stable SARIF 2.1.0 JSON.
+
+    Artifact locations are emitted only when they can be represented as paths
+    inside the reviewed repository. This keeps local and CI workspace paths out
+    of uploaded code-scanning artifacts.
+    """
+
+    packs_by_id = {pack.id: pack for pack in report.context_packs}
+    results = [
+        _finding_result(
+            finding,
+            root=report.project.root,
+            context_pack=packs_by_id.get(finding.context_pack_id),
+        )
+        for finding in report.findings
+    ]
+    results.sort(
+        key=lambda result: json.dumps(
+            result,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        )
+    )
+    payload = {
+        "$schema": _SARIF_SCHEMA,
+        "version": "2.1.0",
+        "runs": [
+            {
+                "tool": {
+                    "driver": {
+                        "name": "Apex Ray",
+                        "version": report.version,
+                        "rules": [
+                            {
+                                "id": _RULE_ID,
+                                "name": "ApexRayReviewFinding",
+                                "shortDescription": {"text": "Apex Ray code review finding"},
+                                "help": {
+                                    "text": (
+                                        "Review the failure mode and evidence, "
+                                        "then apply the suggested fix and regression test."
+                                    )
+                                },
+                            }
+                        ],
+                    }
+                },
+                "results": results,
+            }
+        ],
+    }
+    return json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+
+
+def _finding_result(
+    finding: Finding,
+    *,
+    root: str,
+    context_pack: ContextPack | None,
+) -> dict[str, Any]:
+    severity = _enum_value(finding.severity)
+    result: dict[str, Any] = {
+        "ruleId": _RULE_ID,
+        "level": _LEVELS.get(severity, "warning"),
+        "message": {"text": _finding_message(finding, root)},
+        "partialFingerprints": {
+            "apexRayFinding/v1": _sarif_fingerprint(finding, root),
+        },
+        "properties": _finding_properties(finding, context_pack, root),
+    }
+
+    relative_path = _repo_relative_path(finding.file, root)
+    if relative_path is not None:
+        physical_location: dict[str, Any] = {
+            "artifactLocation": {
+                "uri": quote(relative_path, safe="/-._~"),
+            }
+        }
+        if finding.line is not None and finding.line > 0:
+            physical_location["region"] = {
+                "startLine": finding.line,
+                "startColumn": 1,
+            }
+        result["locations"] = [{"physicalLocation": physical_location}]
+
+    return result
+
+
+def _finding_message(finding: Finding, root: str) -> str:
+    parts = [finding.title.strip()]
+    details = (
+        ("Failure mode", finding.failure_mode),
+        ("Evidence", finding.evidence),
+        ("Suggested fix", finding.suggested_fix),
+        ("Suggested test", finding.suggested_test),
+    )
+    parts.extend(f"{label}: {value.strip()}" for label, value in details if value.strip())
+    return _sanitize_text("\n".join(parts), root)
+
+
+def _finding_properties(
+    finding: Finding,
+    context_pack: ContextPack | None,
+    root: str,
+) -> dict[str, Any]:
+    properties: dict[str, Any] = {
+        "severity": _enum_value(finding.severity),
+        "confidence": _enum_value(finding.confidence),
+        "reviewerIds": _sorted_values(_sanitize_text(reviewer, root) for reviewer in finding.reviewer_ids),
+    }
+    signals = sorted(
+        context_pack.risk_signals if context_pack is not None else [],
+        key=_risk_signal_sort_key,
+    )
+    if not signals:
+        return properties
+
+    properties.update(
+        {
+            "riskKinds": _sorted_values(_sanitize_text(signal.kind, root) for signal in signals),
+            "riskSeverities": _sorted_values(_enum_value(signal.severity) for signal in signals),
+            "riskScore": max(signal.score for signal in signals),
+            "riskCategories": _sorted_values(
+                _sanitize_text(category, root) for signal in signals for category in signal.categories
+            ),
+            "riskReviewerTags": _sorted_values(
+                _sanitize_text(reviewer, root) for signal in signals for reviewer in signal.reviewer_tags
+            ),
+            "riskSignals": [_risk_signal_properties(signal, root) for signal in signals],
+        }
+    )
+    return properties
+
+
+def _risk_signal_properties(signal: RiskSignal, root: str) -> dict[str, Any]:
+    properties: dict[str, Any] = {
+        "kind": _sanitize_text(signal.kind, root),
+        "severity": _enum_value(signal.severity),
+        "score": signal.score,
+        "source": _sanitize_text(signal.source, root),
+        "categories": _sorted_values(_sanitize_text(category, root) for category in signal.categories),
+        "reviewerTags": _sorted_values(_sanitize_text(reviewer, root) for reviewer in signal.reviewer_tags),
+    }
+    if signal.rule_id:
+        properties["ruleId"] = _sanitize_text(signal.rule_id, root)
+    return properties
+
+
+def _sarif_fingerprint(finding: Finding, root: str) -> str:
+    relative_path = _repo_relative_path(finding.file, root)
+    canonical_finding = finding.model_copy(update={"file": relative_path or "<outside-repository>"})
+    return finding_fingerprint(canonical_finding)
+
+
+def _risk_signal_sort_key(signal: RiskSignal) -> tuple[Any, ...]:
+    return (
+        signal.kind,
+        _enum_value(signal.severity),
+        -signal.score,
+        signal.source,
+        signal.rule_id or "",
+        tuple(sorted(set(signal.categories))),
+        tuple(sorted(set(signal.reviewer_tags))),
+    )
+
+
+def _repo_relative_path(value: str, root: str) -> str | None:
+    candidate = value.strip()
+    if not candidate or candidate == "<unknown>" or "\x00" in candidate:
+        return None
+
+    if _looks_windows_path(candidate) or _looks_windows_path(root):
+        windows_candidate = PureWindowsPath(candidate)
+        if windows_candidate.is_absolute():
+            windows_root = PureWindowsPath(root)
+            if not windows_root.is_absolute():
+                return None
+            try:
+                relative = windows_candidate.relative_to(windows_root)
+            except ValueError:
+                return None
+            parts = relative.parts
+        else:
+            parts = windows_candidate.parts
+    else:
+        posix_candidate = PurePosixPath(candidate)
+        if posix_candidate.is_absolute():
+            posix_root = PurePosixPath(root)
+            if not posix_root.is_absolute():
+                return None
+            try:
+                relative = posix_candidate.relative_to(posix_root)
+            except ValueError:
+                return None
+            parts = relative.parts
+        else:
+            parts = posix_candidate.parts
+
+    safe_parts = [part for part in parts if part not in ("", ".")]
+    if not safe_parts or any(part == ".." for part in safe_parts):
+        return None
+    return "/".join(safe_parts)
+
+
+def _looks_windows_path(value: str) -> bool:
+    path = PureWindowsPath(value)
+    return bool(path.drive) or "\\" in value
+
+
+def _sanitize_text(value: str, root: str) -> str:
+    parts: list[str] = []
+    cursor = 0
+    for match in _URL.finditer(value):
+        parts.append(_redact_paths(value[cursor : match.start()], root))
+        parts.append(_sanitize_url(match.group(0), root))
+        cursor = match.end()
+    parts.append(_redact_paths(value[cursor:], root))
+    return "".join(parts)
+
+
+def _sanitize_url(value: str, root: str) -> str:
+    scheme = value.partition(":")[0].casefold()
+    if scheme in _LOCAL_URL_SCHEMES:
+        return "<local-url>"
+    if _url_exposes_local_path(value, root):
+        return "<remote-url-with-local-path>"
+    return value
+
+
+def _url_exposes_local_path(value: str, root: str) -> bool:
+    decoded = unquote(value)
+    folded = decoded.casefold()
+    if any(variant.casefold() in folded for variant in _root_path_variants(root) if len(variant) > 1):
+        return True
+
+    try:
+        query = urlsplit(decoded).query
+    except ValueError:
+        return True
+    for key, query_value in parse_qsl(query, keep_blank_values=True):
+        if key.casefold() not in _LOCAL_PATH_QUERY_KEYS:
+            continue
+        if _is_absolute_path(query_value):
+            return True
+    return False
+
+
+def _is_absolute_path(value: str) -> bool:
+    return PurePosixPath(value).is_absolute() or PureWindowsPath(value).is_absolute() or value.startswith("\\\\")
+
+
+def _redact_paths(value: str, root: str) -> str:
+    redacted = value
+    for variant in sorted(
+        (item for item in _root_path_variants(root) if len(item) > 1),
+        key=len,
+        reverse=True,
+    ):
+        redacted = redacted.replace(variant, "<repo>")
+    redacted = _UNC_ABSOLUTE_PATH.sub("<absolute-path>", redacted)
+    redacted = _WINDOWS_ABSOLUTE_PATH.sub("<absolute-path>", redacted)
+    return _POSIX_ABSOLUTE_PATH.sub("<absolute-path>", redacted)
+
+
+def _root_path_variants(root: str) -> set[str]:
+    return {
+        root.rstrip("/\\"),
+        root.replace("\\", "/").rstrip("/"),
+        root.replace("/", "\\").rstrip("\\"),
+    }
+
+
+def _enum_value(value: Any) -> str:
+    return str(getattr(value, "value", value))
+
+
+def _sorted_values(values: Iterable[str]) -> list[str]:
+    return sorted(set(values))

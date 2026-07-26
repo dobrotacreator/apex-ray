@@ -1,5 +1,6 @@
 import hashlib
 import json
+import os
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -7,6 +8,7 @@ from typing import Any, Literal
 
 from pydantic import ValidationError
 
+from apex_ray.llm.api import api_key_environment_name
 from apex_ray.memory import pack_prompt_payload
 from apex_ray.models import (
     ContextPack,
@@ -18,7 +20,7 @@ from apex_ray.models import (
     VerificationResponse,
 )
 
-LLM_CACHE_VERSION = "apex-ray-llm-cache-v1"
+LLM_CACHE_VERSION = "apex-ray-llm-cache-v2"
 REVIEW_PROMPT_VERSION = "review-v9"
 REVIEW_SHALLOW_PROMPT_VERSION = "review-shallow-v2"
 VERIFIER_PROMPT_VERSION = "verify-v9"
@@ -147,9 +149,7 @@ def review_cache_key(pack: ContextPack, config: LLMConfig) -> str:
             "cache_version": LLM_CACHE_VERSION,
             "prompt_version": review_prompt_version(config),
             "review_depth": depth,
-            "provider": config.provider,
-            "model": config.model,
-            "effort": config.effort,
+            "provider": _provider_cache_identity(config),
             "pack": pack_prompt_payload(pack, "review", depth=depth),
         }
     )
@@ -161,13 +161,47 @@ def verification_cache_key(finding: Finding, pack: ContextPack, config: LLMConfi
             "kind": "verify",
             "cache_version": LLM_CACHE_VERSION,
             "prompt_version": VERIFIER_PROMPT_VERSION,
-            "provider": config.provider,
-            "model": config.model,
-            "effort": config.effort,
+            "provider": _provider_cache_identity(config),
             "finding": finding.model_dump(mode="json"),
             "pack": pack_prompt_payload(pack, "verify"),
         }
     )
+
+
+def _provider_cache_identity(config: LLMConfig) -> dict[str, Any]:
+    identity: dict[str, Any] = {
+        "provider": config.provider,
+        "model": config.model,
+        "effort": config.effort,
+    }
+    if config.provider == LLMProviderName.CODEX_CLI:
+        identity["executable"] = config.codex_path
+    elif config.provider == LLMProviderName.CLAUDE_CODE_CLI:
+        identity["executable"] = config.claude_path
+    elif config.provider != LLMProviderName.FAKE:
+        # API settings contain endpoint and environment-variable names, never
+        # the corresponding secret values. The outer cache key hashes this
+        # identity before it reaches disk.
+        api_identity = config.api.model_dump(mode="json")
+        if config.api.base_url_env:
+            resolved_endpoint = os.environ.get(config.api.base_url_env, "")
+            api_identity["resolved_base_url_sha256"] = (
+                hashlib.sha256(resolved_endpoint.encode("utf-8")).hexdigest() if resolved_endpoint else None
+            )
+        key_env = api_key_environment_name(config)
+        if key_env is not None:
+            api_identity["resolved_api_key_sha256"] = _environment_value_digest(key_env)
+        api_identity["resolved_header_value_sha256"] = {
+            header.lower(): _environment_value_digest(env_name)
+            for header, env_name in sorted(config.api.headers_from_env.items())
+        }
+        identity["api"] = api_identity
+    return identity
+
+
+def _environment_value_digest(name: str) -> str | None:
+    value = os.environ.get(name, "")
+    return hashlib.sha256(value.encode("utf-8")).hexdigest() if value else None
 
 
 def _cache_key(payload: dict[str, Any]) -> str:

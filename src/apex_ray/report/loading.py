@@ -1,5 +1,7 @@
 import copy
+import gzip
 import json
+import zlib
 from pathlib import Path
 from typing import Any
 
@@ -13,7 +15,16 @@ class ReviewReportLoadError(ValueError):
 
 
 def load_review_report(path: Path) -> ReviewReport:
-    raw_text = path.read_text(encoding="utf-8")
+    raw_bytes = path.read_bytes()
+    if raw_bytes.startswith(b"\x1f\x8b"):
+        try:
+            raw_bytes = gzip.decompress(raw_bytes)
+        except (OSError, EOFError, zlib.error) as exc:
+            raise ReviewReportLoadError(f"Invalid gzip Apex Ray report {path}: {exc}") from exc
+    try:
+        raw_text = raw_bytes.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ReviewReportLoadError(f"Invalid UTF-8 in Apex Ray report {path}: {exc}") from exc
     try:
         raw_payload = json.loads(raw_text)
     except json.JSONDecodeError as exc:

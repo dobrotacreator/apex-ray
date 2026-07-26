@@ -42,8 +42,10 @@ from apex_ray.report import (
     load_review_report,
     render_html,
     render_markdown,
+    render_sarif,
 )
 from apex_ray.report.coverage import continue_command_for_pack
+from apex_ray.reviewers import ReviewerConfigError, effective_reviewers
 from apex_ray.telemetry import (
     TelemetryError,
     append_review_telemetry,
@@ -298,7 +300,15 @@ def review(
         ".apex-ray/reports/review.json"
     ),
     html_output: Annotated[Path | None, typer.Option("--html", help="Optional HTML report path.")] = None,
+    sarif_output: Annotated[
+        Path | None,
+        typer.Option("--sarif", help="Optional SARIF 2.1.0 report path."),
+    ] = None,
     config: Annotated[Path | None, typer.Option("--config", help="Path to config file.")] = None,
+    reviewer: Annotated[
+        list[str] | None,
+        typer.Option("--reviewer", help="Run only this configured reviewer. May be repeated."),
+    ] = None,
     llm: Annotated[bool, typer.Option("--llm", help="Run LLM review over generated context packs.")] = False,
     no_llm: Annotated[bool, typer.Option("--no-llm", help="Disable configured LLM review.")] = False,
     llm_provider: Annotated[str | None, typer.Option("--llm-provider", help="Override LLM provider.")] = None,
@@ -385,13 +395,15 @@ def review(
         except ReviewReportLoadError as exc:
             raise typer.BadParameter(str(exc)) from exc
         root = Path(prior_report.project.root)
-        review_config = prior_report.config
+        if config is None:
+            review_config = prior_report.config
     warn_outdated_agent_artifacts(root)
 
     output = resolve_output_path(root, output)
     json_output = resolve_output_path(root, json_output)
     html_output = resolve_output_path(root, html_output) if html_output is not None else None
-    ensure_distinct_outputs(output, json_output, html_output)
+    sarif_output = resolve_output_path(root, sarif_output) if sarif_output is not None else None
+    ensure_distinct_outputs(output, json_output, html_output, sarif_output)
 
     parsed_provider = None
     if llm_provider:
@@ -424,6 +436,11 @@ def review(
             analyzer_cache_dir=analyzer_cache_dir,
         ),
     )
+    try:
+        if reviewer:
+            effective_reviewers(effective_config.reviewers, reviewer)
+    except ReviewerConfigError as exc:
+        raise typer.BadParameter(str(exc)) from exc
     try:
         effective_config = resolve_runtime_config_paths(root, effective_config)
     except LocalDataPathError as exc:
@@ -458,6 +475,7 @@ def review(
                 pack_ids=set(only_pack or []) or None,
                 only_unreviewed=only_unreviewed,
                 review_depth=continue_review_depth,  # type: ignore[arg-type]
+                reviewer_ids=reviewer,
             )
             if not selected_packs:
                 typer.echo("No continuation context packs matched the requested filters.")
@@ -471,6 +489,7 @@ def review(
                 effective_config,
                 base=target_base if target_mode == TargetMode.BASE else None,
                 config_path=config_path,
+                reviewer_ids=reviewer,
             )
             if auto_followup and report.llm_coverage.partial_severity == "critical":
                 report, selected_packs = continue_review_from_report(
@@ -480,6 +499,7 @@ def review(
                     residual_priorities={"p0"},
                     only_unreviewed=True,
                     review_depth="deep",
+                    reviewer_ids=reviewer,
                 )
                 if selected_packs:
                     typer.echo(f"Auto-followup reviewed {len(selected_packs)} residual P0 context pack(s).")
@@ -492,7 +512,8 @@ def review(
     markdown_text = render_markdown(report)
     json_text = report.model_dump_json(indent=2)
     html_text = render_html(report) if html_output else None
-    ensure_apex_ignore_for_outputs(root, output, json_output, html_output)
+    sarif_text = render_sarif(report) if sarif_output else None
+    ensure_apex_ignore_for_outputs(root, output, json_output, html_output, sarif_output)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(markdown_text, encoding="utf-8")
     json_output.parent.mkdir(parents=True, exist_ok=True)
@@ -501,6 +522,9 @@ def review(
     if html_output:
         html_output.parent.mkdir(parents=True, exist_ok=True)
         html_output.write_text(html_text or "", encoding="utf-8")
+    if sarif_output:
+        sarif_output.parent.mkdir(parents=True, exist_ok=True)
+        sarif_output.write_text(sarif_text or "", encoding="utf-8")
 
     artifacts = [
         ReportArtifact(output, markdown_text),
@@ -508,6 +532,8 @@ def review(
     ]
     if html_output and html_text is not None:
         artifacts.append(ReportArtifact(html_output, html_text))
+    if sarif_output and sarif_text is not None:
+        artifacts.append(ReportArtifact(sarif_output, sarif_text))
     archive_path = archive_report_artifacts(
         root,
         effective_config.reports,
@@ -533,6 +559,8 @@ def review(
     typer.echo(f"Wrote {json_output}")
     if html_output:
         typer.echo(f"Wrote {html_output}")
+    if sarif_output:
+        typer.echo(f"Wrote {sarif_output}")
     if archive_path:
         typer.echo(f"Archived report: {archive_path}")
     if telemetry_enabled:
@@ -541,7 +569,11 @@ def review(
 
 def _set_continue_commands(report: ReviewReport, json_output: Path) -> None:
     for todo in report.llm_coverage.coverage_todos:
-        todo.suggested_command = continue_command_for_pack(todo.context_pack_id, str(json_output))
+        todo.suggested_command = continue_command_for_pack(
+            todo.context_pack_id,
+            str(json_output),
+            todo.reviewer_id,
+        )
 
 
 def _load_diff(

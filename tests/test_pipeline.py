@@ -2,7 +2,7 @@ from pathlib import Path
 
 from apex_ray.classify import classify_diff
 from apex_ray.diff import parse_unified_diff
-from apex_ray.llm import FakeLLMProvider
+from apex_ray.llm import FakeLLMProvider, LLMProviderError
 from apex_ray.models import (
     ChangedFile,
     ContextPack,
@@ -13,10 +13,12 @@ from apex_ray.models import (
     Finding,
     FindingConfidence,
     FindingSeverity,
+    LLMContextSelection,
     LLMProviderName,
     LLMRun,
     ProjectProfile,
     ReviewConfig,
+    ReviewerConfig,
     RiskSeverity,
     RiskSignal,
     RuleMatch,
@@ -98,7 +100,124 @@ def test_select_llm_context_packs_caps_and_prioritizes_source_risk() -> None:
     assert selected == [source_pack]
 
 
-def test_select_llm_context_packs_does_not_let_noisy_tests_crowd_out_source() -> None:
+def test_select_llm_context_packs_uses_project_risk_score_and_critical_severity() -> None:
+    critical_pack = ContextPack(
+        id="src/settlement.ts#settle:1",
+        file="src/settlement.ts",
+        file_kind=FileKind.SOURCE,
+        risk_signals=[
+            RiskSignal(
+                kind="policy:settlement",
+                severity=RiskSeverity.CRITICAL,
+                score=97,
+                reason="Financial boundary.",
+                file="src/settlement.ts",
+                source="project",
+            )
+        ],
+    )
+    high_pack = ContextPack(
+        id="src/auth.ts#authorize:1",
+        file="src/auth.ts",
+        file_kind=FileKind.SOURCE,
+        risk_signals=[
+            RiskSignal(
+                kind="auth",
+                severity=RiskSeverity.HIGH,
+                score=75,
+                reason="Authentication boundary.",
+                file="src/auth.ts",
+            )
+        ],
+    )
+
+    selected = select_llm_context_packs(
+        [critical_pack, high_pack],
+        [
+            ChangedFile(old_path="src/settlement.ts", new_path="src/settlement.ts", file_kind=FileKind.SOURCE),
+            ChangedFile(old_path="src/auth.ts", new_path="src/auth.ts", file_kind=FileKind.SOURCE),
+        ],
+        max_packs=1,
+    )
+
+    assert selected == [critical_pack]
+
+
+def test_explicit_critical_project_risk_outranks_low_risk_source_across_file_kinds() -> None:
+    source_pack = ContextPack(
+        id="src/cart.ts#calculateTotal:1",
+        file="src/cart.ts",
+        file_kind=FileKind.SOURCE,
+    )
+    critical_test_pack = ContextPack(
+        id="src/settlement.test.ts#settles:1",
+        file="src/settlement.test.ts",
+        file_kind=FileKind.TEST,
+        risk_signals=[
+            RiskSignal(
+                kind="policy:settlement-regression",
+                severity=RiskSeverity.CRITICAL,
+                score=100,
+                reason="Explicit financial regression boundary.",
+                file="src/settlement.test.ts",
+                source="project",
+            )
+        ],
+    )
+
+    selected = select_llm_context_packs(
+        [source_pack, critical_test_pack],
+        [
+            ChangedFile(old_path=source_pack.file, new_path=source_pack.file, file_kind=FileKind.SOURCE),
+            ChangedFile(
+                old_path=critical_test_pack.file,
+                new_path=critical_test_pack.file,
+                file_kind=FileKind.TEST,
+            ),
+        ],
+        max_packs=1,
+    )
+
+    assert selected == [critical_test_pack]
+
+
+def test_builtin_high_risk_outranks_low_risk_source_across_file_kinds() -> None:
+    source_pack = ContextPack(
+        id="src/cart.ts#calculateTotal:1",
+        file="src/cart.ts",
+        file_kind=FileKind.SOURCE,
+    )
+    risky_test_pack = ContextPack(
+        id="src/authorization.test.ts#denies:1",
+        file="src/authorization.test.ts",
+        file_kind=FileKind.TEST,
+        risk_signals=[
+            RiskSignal(
+                kind="auth",
+                severity=RiskSeverity.HIGH,
+                reason="Authorization behavior changed.",
+                file="src/authorization.test.ts",
+            )
+        ],
+    )
+
+    selected = select_llm_context_packs(
+        [source_pack, risky_test_pack],
+        [
+            ChangedFile(old_path=source_pack.file, new_path=source_pack.file, file_kind=FileKind.SOURCE),
+            ChangedFile(
+                old_path=risky_test_pack.file,
+                new_path=risky_test_pack.file,
+                file_kind=FileKind.TEST,
+            ),
+        ],
+        max_packs=1,
+    )
+
+    assert selected == [risky_test_pack]
+
+
+def test_select_llm_context_packs_does_not_let_duplicate_same_band_test_risks_crowd_out_source() -> None:
     noisy_test_pack = ContextPack(
         id="src/cart.test.ts#test:1",
         file="src/cart.test.ts",
@@ -106,7 +225,7 @@ def test_select_llm_context_packs_does_not_let_noisy_tests_crowd_out_source() ->
         risk_signals=[
             RiskSignal(
                 kind="persistence",
-                severity=RiskSeverity.HIGH,
+                severity=RiskSeverity.MEDIUM,
                 reason="Noisy test fixture.",
                 file="src/cart.test.ts",
             )
@@ -117,6 +236,14 @@ def test_select_llm_context_packs_does_not_let_noisy_tests_crowd_out_source() ->
         id="src/cart.ts#calculateTotal:1",
         file="src/cart.ts",
         file_kind=FileKind.SOURCE,
+        risk_signals=[
+            RiskSignal(
+                kind="persistence",
+                severity=RiskSeverity.MEDIUM,
+                reason="Source persistence boundary.",
+                file="src/cart.ts",
+            )
+        ],
     )
 
     selected = select_llm_context_packs(
@@ -129,6 +256,55 @@ def test_select_llm_context_packs_does_not_let_noisy_tests_crowd_out_source() ->
     )
 
     assert selected == [source_pack]
+
+
+def test_risk_severity_band_outranks_numeric_score() -> None:
+    medium_pack = ContextPack(
+        id="src/settlement.ts#settle:1",
+        file="src/settlement.ts",
+        file_kind=FileKind.SOURCE,
+        risk_signals=[
+            RiskSignal(
+                kind="policy:medium",
+                severity=RiskSeverity.MEDIUM,
+                score=0,
+                reason="Explicit medium risk.",
+                file="src/settlement.ts",
+                source="project",
+            )
+        ],
+    )
+    low_pack = ContextPack(
+        id="src/large.ts#run:1",
+        file="src/large.ts",
+        file_kind=FileKind.SOURCE,
+        risk_signals=[
+            RiskSignal(
+                kind="policy:low",
+                severity=RiskSeverity.LOW,
+                score=100,
+                reason="Explicit low risk with a high within-band score.",
+                file="src/large.ts",
+                source="project",
+            )
+        ],
+        stats=ContextPackStats(estimated_chars=100_000),
+    )
+
+    selected = select_llm_context_packs(
+        [low_pack, medium_pack],
+        [
+            ChangedFile(old_path=low_pack.file, new_path=low_pack.file, file_kind=FileKind.SOURCE),
+            ChangedFile(
+                old_path=medium_pack.file,
+                new_path=medium_pack.file,
+                file_kind=FileKind.SOURCE,
+            ),
+        ],
+        max_packs=1,
+    )
+
+    assert selected == [medium_pack]
 
 
 def test_select_llm_context_packs_prioritizes_non_test_residual_risk_over_file_kind() -> None:
@@ -172,7 +348,7 @@ def test_select_llm_context_packs_spreads_cap_across_files() -> None:
     )
     second_a = first_a.model_copy(update={"id": "src/a.ts#second"})
     third_a = first_a.model_copy(update={"id": "src/a.ts#third"})
-    first_b = ContextPack(id="src/b.ts#first", file="src/b.ts", file_kind=FileKind.SOURCE)
+    first_b = first_a.model_copy(update={"id": "src/b.ts#first", "file": "src/b.ts"})
 
     selected = select_llm_context_packs(
         [first_a, second_a, third_a, first_b],
@@ -184,6 +360,41 @@ def test_select_llm_context_packs_spreads_cap_across_files() -> None:
     )
 
     assert selected == [first_a, first_b]
+
+
+def test_select_llm_context_packs_exhausts_p0_before_p1_breadth() -> None:
+    first_critical = ContextPack(
+        id="src/a.ts#first",
+        file="src/a.ts",
+        file_kind=FileKind.SOURCE,
+        risk_signals=[
+            RiskSignal(
+                kind="policy:money-movement",
+                severity=RiskSeverity.CRITICAL,
+                score=100,
+                reason="Critical financial boundary.",
+                file="src/a.ts",
+                source="project",
+            )
+        ],
+    )
+    second_critical = first_critical.model_copy(update={"id": "src/a.ts#second"})
+    normal_source = ContextPack(
+        id="src/b.ts#first",
+        file="src/b.ts",
+        file_kind=FileKind.SOURCE,
+    )
+
+    selected = select_llm_context_packs(
+        [first_critical, second_critical, normal_source],
+        [
+            ChangedFile(old_path="src/a.ts", new_path="src/a.ts", file_kind=FileKind.SOURCE),
+            ChangedFile(old_path="src/b.ts", new_path="src/b.ts", file_kind=FileKind.SOURCE),
+        ],
+        max_packs=2,
+    )
+
+    assert selected == [first_critical, second_critical]
 
 
 def test_select_llm_context_packs_keeps_risky_sibling_before_low_priority_files() -> None:
@@ -287,7 +498,8 @@ def test_plan_llm_context_selection_balanced_reviews_remaining_packs_shallow() -
             ChangedFile(old_path="src/b.ts", new_path="src/b.ts", file_kind=FileKind.SOURCE),
             ChangedFile(old_path="src/a.test.ts", new_path="src/a.test.ts", file_kind=FileKind.TEST),
         ],
-        max_packs=1,
+        max_packs=3,
+        max_deep_packs=1,
         max_input_tokens=None,
     )
 
@@ -296,6 +508,35 @@ def test_plan_llm_context_selection_balanced_reviews_remaining_packs_shallow() -
     assert selection.shallow_selected_context_pack_ids == ["src/b.ts#file", "src/a.test.ts#file"]
     assert selection.unselected_context_pack_ids == []
     assert [stage.stage for stage in selection.stages] == ["deep", "shallow"]
+
+
+def test_plan_llm_context_selection_enforces_max_packs_across_deep_and_shallow() -> None:
+    risky = ContextPack(
+        id="src/a.ts#file",
+        file="src/a.ts",
+        file_kind=FileKind.SOURCE,
+        risk_signals=[RiskSignal(kind="auth", severity=RiskSeverity.HIGH, reason="Auth changed.", file="src/a.ts")],
+    )
+    low = ContextPack(id="src/b.ts#file", file="src/b.ts", file_kind=FileKind.SOURCE)
+    test_pack = ContextPack(id="src/a.test.ts#file", file="src/a.test.ts", file_kind=FileKind.TEST)
+
+    selection = plan_llm_context_selection(
+        [low, risky, test_pack],
+        [
+            ChangedFile(old_path="src/a.ts", new_path="src/a.ts", file_kind=FileKind.SOURCE),
+            ChangedFile(old_path="src/b.ts", new_path="src/b.ts", file_kind=FileKind.SOURCE),
+            ChangedFile(old_path="src/a.test.ts", new_path="src/a.test.ts", file_kind=FileKind.TEST),
+        ],
+        max_packs=2,
+        max_deep_packs=1,
+        max_input_tokens=None,
+    )
+
+    assert len(selection.selected_context_pack_ids) == 2
+    assert selection.deep_selected_context_pack_ids == ["src/a.ts#file"]
+    assert len(selection.shallow_selected_context_pack_ids) == 1
+    assert len(selection.unselected_context_pack_ids) == 1
+    assert set(selection.selected_context_pack_ids).isdisjoint(selection.unselected_context_pack_ids)
 
 
 def test_plan_llm_context_selection_reports_token_budget_skips() -> None:
@@ -396,6 +637,717 @@ def test_continue_review_from_report_reviews_residual_pack(tmp_path: Path) -> No
     assert any(stage.stage == "continue_deep" for stage in continued.llm_selection.stages)
 
 
+def test_continue_review_updates_modern_default_general_reviewer_selection(
+    tmp_path: Path,
+) -> None:
+    reviewed = ContextPack(id="src/a.ts#run:1", file="src/a.ts")
+    residual = ContextPack(id="src/b.ts#run:1", file="src/b.ts")
+    config = ReviewConfig()
+    config.llm.enabled = True
+    config.llm.provider = LLMProviderName.FAKE
+    config.llm.verify = False
+    config.llm.cache_enabled = False
+    selection = LLMContextSelection(
+        total_context_pack_ids=[reviewed.id, residual.id],
+        selected_context_pack_ids=[reviewed.id],
+        deep_selected_context_pack_ids=[reviewed.id],
+        unselected_context_pack_ids=[residual.id],
+    )
+    initial = build_report(
+        ProjectProfile(root=str(tmp_path), is_git_repo=True),
+        config,
+        DiffSummary(target_mode=TargetMode.PATCH),
+        context_packs=[reviewed, residual],
+        llm_runs=[
+            LLMRun(
+                provider="fake",
+                reviewer_id="general",
+                context_pack_id=reviewed.id,
+                status="ok",
+                duration_ms=1,
+            )
+        ],
+        llm_selection=selection,
+        reviewer_selections={"general": selection},
+    )
+
+    continued, selected = continue_review_from_report(
+        initial,
+        repo_root=tmp_path,
+        provider=FakeLLMProvider([]),
+    )
+
+    assert [pack.id for pack in selected] == [residual.id]
+    assert continued.reviewer_selections["general"].selected_context_pack_ids == [reviewed.id, residual.id]
+    assert continued.llm_coverage.reviewers[0].selected_context_pack_ids == [
+        reviewed.id,
+        residual.id,
+    ]
+    assert continued.llm_coverage.reviewers[0].reviewed_context_pack_ids == [
+        reviewed.id,
+        residual.id,
+    ]
+
+
+def test_continue_review_uses_all_configured_reviewers_when_not_explicitly_scoped(
+    tmp_path: Path,
+) -> None:
+    config = ReviewConfig(
+        reviewers=[
+            ReviewerConfig(id="security", focus="Authorization boundaries."),
+            ReviewerConfig(id="correctness", focus="Behavioral regressions."),
+        ]
+    )
+    config.llm.enabled = True
+    config.llm.provider = LLMProviderName.FAKE
+    config.llm.verify = False
+    pack = ContextPack(
+        id="src/auth.ts#authorize:1",
+        file="src/auth.ts",
+        file_kind=FileKind.SOURCE,
+        risk_signals=[
+            RiskSignal(
+                kind="auth",
+                severity=RiskSeverity.HIGH,
+                reason="Authorization changed.",
+                file="src/auth.ts",
+            )
+        ],
+    )
+    initial = build_report(
+        ProjectProfile(root=str(tmp_path), is_git_repo=True),
+        config,
+        DiffSummary(target_mode=TargetMode.PATCH, stats=DiffStats(files_changed=1)),
+        context_packs=[pack],
+    )
+    finding = Finding(
+        title="Authorization guard can be bypassed",
+        severity=FindingSeverity.HIGH,
+        confidence=FindingConfidence.HIGH,
+        file=pack.file,
+        line=1,
+        failure_mode="An untrusted caller can bypass authorization.",
+        evidence="The changed branch returns before the guard.",
+        suggested_fix="Keep the guard before the return.",
+        suggested_test="Add a denied-role regression test.",
+    )
+
+    continued, selected = continue_review_from_report(
+        initial,
+        repo_root=tmp_path,
+        provider=FakeLLMProvider([finding]),
+    )
+
+    assert [candidate.id for candidate in selected] == [pack.id]
+    assert {run.reviewer_id for run in continued.llm_runs if run.kind in {"review", "review_shallow"}} == {
+        "correctness",
+        "security",
+    }
+    assert continued.findings[0].reviewer_ids == ["correctness", "security"]
+    assert set(continued.reviewer_selections) == {"correctness", "security"}
+
+
+def test_continue_review_retries_required_reviewer_debt_even_when_pack_was_reviewed(
+    tmp_path: Path,
+) -> None:
+    pack = ContextPack(
+        id="src/ledger.ts#settle:1",
+        file="src/ledger.ts",
+        file_kind=FileKind.SOURCE,
+        risk_signals=[
+            RiskSignal(
+                kind="financial",
+                severity=RiskSeverity.CRITICAL,
+                reason="Settlement arithmetic changed.",
+                file="src/ledger.ts",
+            )
+        ],
+    )
+    config = ReviewConfig(
+        reviewers=[
+            ReviewerConfig(id="security", focus="Authorization."),
+            ReviewerConfig(id="finance", focus="Financial correctness.", required=True),
+        ]
+    )
+    config.llm.enabled = True
+    config.llm.provider = LLMProviderName.FAKE
+    config.llm.verify = False
+    selection = LLMContextSelection(
+        total_context_pack_ids=[pack.id],
+        selected_context_pack_ids=[pack.id],
+        deep_selected_context_pack_ids=[pack.id],
+    )
+    initial = build_report(
+        ProjectProfile(root=str(tmp_path), is_git_repo=True),
+        config,
+        DiffSummary(target_mode=TargetMode.PATCH, stats=DiffStats(files_changed=1)),
+        context_packs=[pack],
+        llm_runs=[
+            LLMRun(
+                provider="fake",
+                reviewer_id="security",
+                context_pack_id=pack.id,
+                status="ok",
+                duration_ms=1,
+            ),
+            LLMRun(
+                provider="fake",
+                reviewer_id="finance",
+                context_pack_id=pack.id,
+                status="failed_auth",
+                duration_ms=1,
+                error="invalid credentials",
+            ),
+        ],
+        llm_selection=selection,
+        reviewer_selections={"security": selection, "finance": selection},
+    )
+
+    assert initial.llm_coverage.reviewed_context_pack_ids == [pack.id]
+    assert initial.llm_coverage.quality_gate_status == "fail"
+    assert [(todo.context_pack_id, todo.reviewer_id) for todo in initial.llm_coverage.coverage_todos] == [
+        (pack.id, "finance")
+    ]
+    assert "--reviewer finance" in initial.llm_coverage.coverage_todos[0].suggested_command
+
+    continued, selected = continue_review_from_report(
+        initial,
+        repo_root=tmp_path,
+        residual_priorities={"p0"},
+        reviewer_ids=["finance"],
+        provider=FakeLLMProvider([]),
+    )
+
+    reviewer_coverage = {reviewer.reviewer_id: reviewer for reviewer in continued.llm_coverage.reviewers}
+    assert [candidate.id for candidate in selected] == [pack.id]
+    assert [run.reviewer_id for run in continued.llm_runs if run.context_pack_id == pack.id and run.status == "ok"] == [
+        "security",
+        "finance",
+    ]
+    assert set(reviewer_coverage) == {"security", "finance"}
+    assert reviewer_coverage["finance"].status == "pass"
+    assert continued.llm_coverage.quality_gate_status != "fail"
+
+
+def test_continue_review_clean_retry_supersedes_failed_verifier_run(
+    tmp_path: Path,
+) -> None:
+    pack = ContextPack(id="src/auth.ts#authorize:1", file="src/auth.ts")
+    config = ReviewConfig(
+        reviewers=[
+            ReviewerConfig(
+                id="security",
+                focus="Authorization.",
+                required=True,
+                verify=True,
+            )
+        ]
+    )
+    config.llm.enabled = True
+    config.llm.provider = LLMProviderName.FAKE
+    config.llm.cache_enabled = False
+    selection = LLMContextSelection(
+        total_context_pack_ids=[pack.id],
+        selected_context_pack_ids=[pack.id],
+        deep_selected_context_pack_ids=[pack.id],
+    )
+    initial = build_report(
+        ProjectProfile(root=str(tmp_path), is_git_repo=True),
+        config,
+        DiffSummary(target_mode=TargetMode.PATCH),
+        context_packs=[pack],
+        llm_runs=[
+            LLMRun(
+                provider="fake",
+                reviewer_id="security",
+                context_pack_id=pack.id,
+                status="ok",
+                duration_ms=1,
+                findings_count=1,
+            ),
+            LLMRun(
+                kind="verify",
+                provider="fake",
+                reviewer_id="security",
+                context_pack_id=pack.id,
+                status="provider_error",
+                duration_ms=1,
+            ),
+        ],
+        llm_selection=selection,
+        reviewer_selections={"security": selection},
+    )
+
+    continued, first_selected = continue_review_from_report(
+        initial,
+        repo_root=tmp_path,
+        reviewer_ids=["security"],
+        provider=FakeLLMProvider([]),
+    )
+    _unchanged, second_selected = continue_review_from_report(
+        continued,
+        repo_root=tmp_path,
+        reviewer_ids=["security"],
+        provider=FakeLLMProvider([]),
+    )
+
+    assert [candidate.id for candidate in first_selected] == [pack.id]
+    assert continued.llm_coverage.reviewers[0].status == "pass"
+    assert continued.llm_coverage.quality_gate_status == "pass"
+    assert second_selected == []
+
+
+def test_continue_review_disabled_verifier_ignores_prior_verifier_debt(
+    tmp_path: Path,
+) -> None:
+    pack = ContextPack(id="src/auth.ts#authorize:1", file="src/auth.ts")
+    original_config = ReviewConfig(
+        reviewers=[
+            ReviewerConfig(
+                id="security",
+                required=True,
+                verify=True,
+            )
+        ]
+    )
+    original_config.llm.enabled = True
+    original_config.llm.provider = LLMProviderName.FAKE
+    selection = LLMContextSelection(
+        total_context_pack_ids=[pack.id],
+        selected_context_pack_ids=[pack.id],
+        deep_selected_context_pack_ids=[pack.id],
+    )
+    initial = build_report(
+        ProjectProfile(root=str(tmp_path), is_git_repo=True),
+        original_config,
+        DiffSummary(target_mode=TargetMode.PATCH),
+        context_packs=[pack],
+        llm_runs=[
+            LLMRun(
+                provider="fake",
+                reviewer_id="security",
+                context_pack_id=pack.id,
+                status="ok",
+                duration_ms=1,
+                findings_count=1,
+            ),
+            LLMRun(
+                kind="verify",
+                provider="fake",
+                reviewer_id="security",
+                context_pack_id=pack.id,
+                status="provider_error",
+                duration_ms=1,
+            ),
+        ],
+        llm_selection=selection,
+        reviewer_selections={"security": selection},
+    )
+    disabled_config = original_config.model_copy(deep=True)
+    disabled_config.reviewers[0].verify = False
+
+    continued, selected = continue_review_from_report(
+        initial,
+        repo_root=tmp_path,
+        config=disabled_config,
+        reviewer_ids=["security"],
+        provider=FakeLLMProvider([]),
+    )
+
+    assert selected == []
+    assert continued.llm_coverage.verify_enabled is False
+    assert continued.llm_coverage.reviewers[0].status == "pass"
+    assert continued.llm_coverage.quality_gate_status == "pass"
+    assert continued.llm_coverage.partial_severity == "none"
+
+
+def test_continue_review_expanded_reviewer_scope_selects_new_matching_pack(
+    tmp_path: Path,
+) -> None:
+    first = ContextPack(id="src/a.ts#file:1", file="src/a.ts")
+    newly_matching = ContextPack(id="src/b.ts#file:1", file="src/b.ts")
+    original_config = ReviewConfig(
+        reviewers=[
+            ReviewerConfig(
+                id="security",
+                paths=["src/a.ts"],
+                verify=False,
+            )
+        ]
+    )
+    original_config.llm.enabled = True
+    original_config.llm.provider = LLMProviderName.FAKE
+    original_config.llm.cache_enabled = False
+    reviewer_selection = LLMContextSelection(
+        total_context_pack_ids=[first.id],
+        selected_context_pack_ids=[first.id],
+        deep_selected_context_pack_ids=[first.id],
+    )
+    initial = build_report(
+        ProjectProfile(root=str(tmp_path), is_git_repo=True),
+        original_config,
+        DiffSummary(target_mode=TargetMode.PATCH),
+        context_packs=[first, newly_matching],
+        llm_runs=[
+            LLMRun(
+                provider="fake",
+                reviewer_id="security",
+                context_pack_id=first.id,
+                status="ok",
+                duration_ms=1,
+            )
+        ],
+        reviewer_selections={"security": reviewer_selection},
+    )
+    expanded_config = original_config.model_copy(deep=True)
+    expanded_config.reviewers[0].paths = ["src/**"]
+
+    continued, selected = continue_review_from_report(
+        initial,
+        repo_root=tmp_path,
+        config=expanded_config,
+        reviewer_ids=["security"],
+        provider=FakeLLMProvider([]),
+    )
+
+    reviewer = continued.llm_coverage.reviewers[0]
+    assert [candidate.id for candidate in selected] == [newly_matching.id]
+    assert reviewer.matching_context_pack_ids == [first.id, newly_matching.id]
+    assert reviewer.reviewed_context_pack_ids == [first.id, newly_matching.id]
+    assert reviewer.status == "pass"
+
+
+def test_continue_review_narrowed_reviewer_scope_drops_out_of_scope_debt(
+    tmp_path: Path,
+) -> None:
+    kept = ContextPack(id="src/a.ts#file:1", file="src/a.ts")
+    removed = ContextPack(id="src/b.ts#file:1", file="src/b.ts")
+    original_config = ReviewConfig(
+        reviewers=[
+            ReviewerConfig(
+                id="security",
+                paths=["src/**"],
+                required=True,
+                verify=False,
+            )
+        ]
+    )
+    original_config.llm.enabled = True
+    original_config.llm.provider = LLMProviderName.FAKE
+    selection = LLMContextSelection(
+        total_context_pack_ids=[kept.id, removed.id],
+        selected_context_pack_ids=[kept.id, removed.id],
+        deep_selected_context_pack_ids=[kept.id, removed.id],
+    )
+    initial = build_report(
+        ProjectProfile(root=str(tmp_path), is_git_repo=True),
+        original_config,
+        DiffSummary(target_mode=TargetMode.PATCH),
+        context_packs=[kept, removed],
+        llm_runs=[
+            LLMRun(
+                provider="fake",
+                reviewer_id="security",
+                context_pack_id=kept.id,
+                status="ok",
+                duration_ms=1,
+            ),
+            LLMRun(
+                provider="fake",
+                reviewer_id="security",
+                context_pack_id=removed.id,
+                status="failed_auth",
+                duration_ms=1,
+            ),
+        ],
+        llm_selection=selection,
+        reviewer_selections={"security": selection},
+    )
+    narrowed_config = original_config.model_copy(deep=True)
+    narrowed_config.reviewers[0].paths = ["src/a.ts"]
+
+    continued, selected = continue_review_from_report(
+        initial,
+        repo_root=tmp_path,
+        config=narrowed_config,
+        reviewer_ids=["security"],
+        provider=FakeLLMProvider([]),
+    )
+
+    reviewer = continued.llm_coverage.reviewers[0]
+    assert selected == []
+    assert continued.llm_selection is not None
+    assert continued.llm_selection.selected_context_pack_ids == [kept.id]
+    assert reviewer.matching_context_pack_ids == [kept.id]
+    assert reviewer.reviewed_context_pack_ids == [kept.id]
+    assert reviewer.status == "pass"
+    assert continued.llm_coverage.quality_gate_status != "fail"
+    assert not any("review run(s) failed" in reason for reason in continued.llm_coverage.partial_reasons)
+
+
+def test_continue_review_current_config_drops_removed_reviewer_state(
+    tmp_path: Path,
+) -> None:
+    pack = ContextPack(id="src/auth.ts#authorize:1", file="src/auth.ts")
+    original_config = ReviewConfig(
+        reviewers=[
+            ReviewerConfig(id="security", verify=False),
+            ReviewerConfig(id="finance", required=True, verify=False),
+        ]
+    )
+    original_config.llm.enabled = True
+    original_config.llm.provider = LLMProviderName.FAKE
+    selection = LLMContextSelection(
+        total_context_pack_ids=[pack.id],
+        selected_context_pack_ids=[pack.id],
+        deep_selected_context_pack_ids=[pack.id],
+    )
+    initial = build_report(
+        ProjectProfile(root=str(tmp_path), is_git_repo=True),
+        original_config,
+        DiffSummary(target_mode=TargetMode.PATCH),
+        context_packs=[pack],
+        llm_runs=[
+            LLMRun(
+                provider="fake",
+                reviewer_id="security",
+                context_pack_id=pack.id,
+                status="ok",
+                duration_ms=1,
+            ),
+            LLMRun(
+                provider="fake",
+                reviewer_id="finance",
+                context_pack_id=pack.id,
+                status="failed_auth",
+                duration_ms=1,
+            ),
+        ],
+        llm_selection=selection,
+        reviewer_selections={
+            "security": selection,
+            "finance": selection,
+        },
+    )
+    current_config = original_config.model_copy(deep=True)
+    current_config.reviewers = [current_config.reviewers[0]]
+
+    continued, selected = continue_review_from_report(
+        initial,
+        repo_root=tmp_path,
+        config=current_config,
+        reviewer_ids=["security"],
+        provider=FakeLLMProvider([]),
+    )
+
+    assert selected == []
+    assert set(continued.reviewer_selections) == {"security"}
+    assert [reviewer.reviewer_id for reviewer in continued.llm_coverage.reviewers] == ["security"]
+    assert not any("review run(s) failed" in reason for reason in continued.llm_coverage.partial_reasons)
+
+
+def test_continue_review_empty_reviewer_config_replaces_prior_specialists_with_general(
+    tmp_path: Path,
+) -> None:
+    pack = ContextPack(id="src/auth.ts#authorize:1", file="src/auth.ts")
+    original_config = ReviewConfig(
+        reviewers=[
+            ReviewerConfig(id="security", verify=False),
+            ReviewerConfig(id="finance", verify=False),
+        ]
+    )
+    original_config.llm.enabled = True
+    original_config.llm.provider = LLMProviderName.FAKE
+    original_config.llm.cache_enabled = False
+    selection = LLMContextSelection(
+        total_context_pack_ids=[pack.id],
+        selected_context_pack_ids=[pack.id],
+        deep_selected_context_pack_ids=[pack.id],
+    )
+    initial = build_report(
+        ProjectProfile(root=str(tmp_path), is_git_repo=True),
+        original_config,
+        DiffSummary(target_mode=TargetMode.PATCH),
+        context_packs=[pack],
+        llm_runs=[
+            LLMRun(
+                provider="fake",
+                reviewer_id=reviewer_id,
+                context_pack_id=pack.id,
+                status="ok",
+                duration_ms=1,
+            )
+            for reviewer_id in ("security", "finance")
+        ],
+        llm_selection=selection,
+        reviewer_selections={
+            "security": selection,
+            "finance": selection,
+        },
+    )
+    current_config = original_config.model_copy(deep=True)
+    current_config.reviewers = []
+
+    continued, selected = continue_review_from_report(
+        initial,
+        repo_root=tmp_path,
+        config=current_config,
+        provider=FakeLLMProvider([]),
+    )
+
+    assert [candidate.id for candidate in selected] == [pack.id]
+    assert set(continued.reviewer_selections) == {"general"}
+    assert [reviewer.reviewer_id for reviewer in continued.llm_coverage.reviewers] == ["general"]
+    assert continued.llm_coverage.reviewers[0].status == "pass"
+    assert any(run.reviewer_id == "general" and run.status == "ok" for run in continued.llm_runs)
+
+
+def test_continue_review_all_disabled_reviewers_excludes_prior_active_state(
+    tmp_path: Path,
+) -> None:
+    pack = ContextPack(id="src/auth.ts#authorize:1", file="src/auth.ts")
+    original_config = ReviewConfig(reviewers=[ReviewerConfig(id="security", verify=False)])
+    original_config.llm.enabled = True
+    original_config.llm.provider = LLMProviderName.FAKE
+    selection = LLMContextSelection(
+        total_context_pack_ids=[pack.id],
+        selected_context_pack_ids=[pack.id],
+        deep_selected_context_pack_ids=[pack.id],
+    )
+    initial = build_report(
+        ProjectProfile(root=str(tmp_path), is_git_repo=True),
+        original_config,
+        DiffSummary(target_mode=TargetMode.PATCH),
+        context_packs=[pack],
+        llm_runs=[
+            LLMRun(
+                provider="fake",
+                reviewer_id="security",
+                context_pack_id=pack.id,
+                status="ok",
+                duration_ms=1,
+            )
+        ],
+        llm_selection=selection,
+        reviewer_selections={"security": selection},
+    )
+    current_config = original_config.model_copy(deep=True)
+    current_config.reviewers[0].enabled = False
+
+    continued, selected = continue_review_from_report(
+        initial,
+        repo_root=tmp_path,
+        config=current_config,
+        provider=FakeLLMProvider([]),
+    )
+
+    assert selected == []
+    assert continued.reviewer_selections == {}
+    assert continued.llm_coverage.reviewers == []
+    assert continued.llm_coverage.reviewed_context_pack_ids == []
+    assert continued.llm_coverage.unreviewed_context_pack_ids == [pack.id]
+    assert continued.llm_selection is not None
+    assert continued.llm_selection.selected_context_pack_ids == []
+    assert continued.llm_selection.skipped_context_pack_reasons == {pack.id: "not matched by any enabled reviewer"}
+
+
+def test_continue_review_includes_reviewer_packs_skipped_by_prior_budget(
+    tmp_path: Path,
+) -> None:
+    reviewed = ContextPack(id="src/a.ts#run:1", file="src/a.ts")
+    capped = ContextPack(
+        id="src/b.ts#settle:1",
+        file="src/b.ts",
+        risk_signals=[
+            RiskSignal(
+                kind="financial",
+                severity=RiskSeverity.CRITICAL,
+                reason="Settlement changed.",
+                file="src/b.ts",
+            )
+        ],
+    )
+    config = ReviewConfig(reviewers=[ReviewerConfig(id="security", focus="Security boundaries.")])
+    config.llm.enabled = True
+    config.llm.provider = LLMProviderName.FAKE
+    config.llm.verify = False
+    selection = LLMContextSelection(
+        total_context_pack_ids=[reviewed.id, capped.id],
+        selected_context_pack_ids=[reviewed.id],
+        deep_selected_context_pack_ids=[reviewed.id],
+        unselected_context_pack_ids=[capped.id],
+        skipped_context_pack_reasons={capped.id: "not selected by LLM pack cap"},
+    )
+    initial = build_report(
+        ProjectProfile(root=str(tmp_path), is_git_repo=True),
+        config,
+        DiffSummary(target_mode=TargetMode.PATCH, stats=DiffStats(files_changed=2)),
+        context_packs=[reviewed, capped],
+        llm_runs=[
+            LLMRun(
+                provider="fake",
+                reviewer_id="security",
+                context_pack_id=reviewed.id,
+                status="ok",
+                duration_ms=1,
+            )
+        ],
+        llm_selection=selection,
+        reviewer_selections={"security": selection},
+    )
+
+    continued, selected = continue_review_from_report(
+        initial,
+        repo_root=tmp_path,
+        reviewer_ids=["security"],
+        provider=FakeLLMProvider([]),
+    )
+
+    assert [pack.id for pack in selected] == [capped.id]
+    assert [
+        run.context_pack_id for run in continued.llm_runs if run.reviewer_id == "security" and run.status == "ok"
+    ] == [reviewed.id, capped.id]
+
+
+def test_continue_review_shares_route_circuit_across_reviewers(tmp_path: Path) -> None:
+    class TerminalProvider:
+        calls = 0
+
+        def review_context_pack(self, _pack: ContextPack, _repo_root: Path) -> list[Finding]:
+            self.calls += 1
+            raise LLMProviderError("Invalid API key.", category="auth")
+
+    pack = ContextPack(id="src/auth.ts#authorize:1", file="src/auth.ts")
+    config = ReviewConfig(
+        reviewers=[
+            ReviewerConfig(id="security", focus="Authorization."),
+            ReviewerConfig(id="correctness", focus="Behavior."),
+        ]
+    )
+    config.llm.enabled = True
+    config.llm.provider = LLMProviderName.FAKE
+    config.llm.verify = False
+    initial = build_report(
+        ProjectProfile(root=str(tmp_path), is_git_repo=True),
+        config,
+        DiffSummary(target_mode=TargetMode.PATCH, stats=DiffStats(files_changed=1)),
+        context_packs=[pack],
+    )
+    provider = TerminalProvider()
+
+    continued, _selected = continue_review_from_report(
+        initial,
+        repo_root=tmp_path,
+        provider=provider,  # type: ignore[arg-type]
+    )
+
+    assert provider.calls == 1
+    assert [run.status for run in continued.llm_runs] == [
+        "failed_auth",
+        "skipped_circuit_open",
+    ]
+
+
 def test_continue_review_from_report_does_not_enable_llm_implicitly(tmp_path: Path) -> None:
     config = ReviewConfig()
     reviewed = ContextPack(id="src/auth.ts#login:1", file="src/auth.ts", file_kind=FileKind.SOURCE)
@@ -469,6 +1421,189 @@ def test_run_review_pipeline_skips_over_budget_llm_packs(tmp_path: Path) -> None
     assert any("over-budget" in warning for warning in report.diff.warnings)
 
 
+def test_run_review_pipeline_runs_scoped_reviewers_and_merges_provenance(tmp_path: Path) -> None:
+    diff_text = """diff --git a/package.json b/package.json
+--- a/package.json
++++ b/package.json
+@@ -1 +1 @@
+-{"name":"old"}
++{"name":"new","scripts":{"postinstall":"node setup.js"}}
+"""
+    config = ReviewConfig(
+        reviewers=[
+            ReviewerConfig(id="security", focus="Supply-chain and command execution risks."),
+            ReviewerConfig(id="finance", focus="Financial and settlement correctness."),
+        ]
+    )
+    config.llm.enabled = True
+    config.llm.provider = LLMProviderName.FAKE
+    config.llm.verify = False
+    candidate = Finding(
+        title="Untrusted install command can execute during dependency installation",
+        severity=FindingSeverity.HIGH,
+        confidence=FindingConfidence.HIGH,
+        file="package.json",
+        failure_mode=(
+            "Dependency installation can execute an untrusted setup command before operators "
+            "can validate the package contents."
+        ),
+        evidence=(
+            "The changed package manifest adds a postinstall command that invokes a local setup "
+            "script during every installation."
+        ),
+        suggested_fix="Remove the lifecycle command or pin and validate the invoked artifact.",
+        suggested_test="Install with lifecycle scripts disabled and assert the build remains valid.",
+    )
+    provider = FakeLLMProvider([candidate])
+
+    report = run_review_pipeline(tmp_path, diff_text, TargetMode.PATCH, config, provider=provider)
+
+    assert len(provider.reviewed_pack_ids) == 2
+    assert len(report.findings) == 1
+    assert report.findings[0].reviewer_ids == ["finance", "security"]
+    assert {run.reviewer_id for run in report.llm_runs} == {"finance", "security"}
+    assert set(report.reviewer_selections) == {"finance", "security"}
+    assert report.llm_selection is not None
+    assert (
+        report.llm_selection.selected_context_pack_ids
+        == report.reviewer_selections["security"].selected_context_pack_ids
+    )
+    assert set(report.stage_durations_ms) == {
+        "diff",
+        "discovery",
+        "analyzers",
+        "context",
+        "llm",
+        "report",
+        "total",
+    }
+    assert report.stage_durations_ms["total"] >= report.stage_durations_ms["llm"]
+
+
+def test_explicit_reviewer_scope_excludes_out_of_scope_packs_from_global_gate(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "auth.py").write_text(
+        "def authorize(token):\n    return bool(token)\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "src" / "ui.py").write_text(
+        "def button_label():\n    return 'Continue'\n",
+        encoding="utf-8",
+    )
+    diff_text = """diff --git a/src/auth.py b/src/auth.py
+--- /dev/null
++++ b/src/auth.py
+@@ -0,0 +1,2 @@
++def authorize(token):
++    return bool(token)
+diff --git a/src/ui.py b/src/ui.py
+--- /dev/null
++++ b/src/ui.py
+@@ -0,0 +1,2 @@
++def button_label():
++    return "Continue"
+"""
+    config = ReviewConfig(
+        reviewers=[
+            ReviewerConfig(
+                id="ux",
+                focus="User-facing behavior.",
+                paths=["src/ui.py"],
+                verify=False,
+            )
+        ]
+    )
+    config.llm.enabled = True
+    config.llm.provider = LLMProviderName.FAKE
+    config.llm.verify = False
+    config.llm.cache_enabled = False
+
+    scoped = run_review_pipeline(
+        tmp_path,
+        diff_text,
+        TargetMode.PATCH,
+        config,
+        provider=FakeLLMProvider([]),
+        reviewer_ids=["ux"],
+    )
+    full = run_review_pipeline(
+        tmp_path,
+        diff_text,
+        TargetMode.PATCH,
+        config,
+        provider=FakeLLMProvider([]),
+    )
+
+    assert len(scoped.context_packs) == 2
+    assert scoped.llm_selection is not None
+    assert scoped.llm_selection.total_context_pack_ids == scoped.reviewer_selections["ux"].total_context_pack_ids
+    assert scoped.llm_coverage.total_context_packs == 1
+    assert scoped.llm_coverage.quality_gate_status == "pass"
+    assert full.llm_coverage.total_context_packs == 2
+    assert full.llm_coverage.quality_gate_status == "fail"
+    assert len(full.llm_coverage.residual_risk_p0_context_pack_ids) == 1
+
+    continued, selected = continue_review_from_report(
+        scoped,
+        repo_root=tmp_path,
+        config=config,
+        reviewer_id="ux",
+        provider=FakeLLMProvider([]),
+    )
+
+    assert selected == []
+    assert continued.llm_selection is not None
+    assert continued.llm_selection.total_context_pack_ids == scoped.llm_selection.total_context_pack_ids
+    assert continued.llm_coverage.total_context_packs == 1
+    assert continued.llm_coverage.quality_gate_status == "pass"
+
+
+def test_multi_reviewer_verification_preserves_decision_provenance(
+    tmp_path: Path,
+) -> None:
+    diff_text = """diff --git a/package.json b/package.json
+--- a/package.json
++++ b/package.json
+@@ -1 +1 @@
+-{"name":"old"}
++{"name":"new","scripts":{"postinstall":"node setup.js"}}
+"""
+    config = ReviewConfig(
+        reviewers=[
+            ReviewerConfig(id="security", focus="Supply-chain execution."),
+            ReviewerConfig(id="operations", focus="Deployment safety."),
+        ]
+    )
+    config.llm.enabled = True
+    config.llm.provider = LLMProviderName.FAKE
+    config.llm.verify = True
+    candidate = Finding(
+        title="Install hook executes an untrusted local script",
+        severity=FindingSeverity.HIGH,
+        confidence=FindingConfidence.HIGH,
+        file="package.json",
+        failure_mode=(
+            "Dependency installation executes a local script before operators can validate the package contents."
+        ),
+        evidence="The changed manifest adds a postinstall command that invokes setup.js.",
+        suggested_fix="Remove the lifecycle command or validate the invoked artifact.",
+        suggested_test="Install with lifecycle scripts disabled and assert the build succeeds.",
+    )
+    provider = FakeLLMProvider([candidate], verification_approvals=[True, True])
+
+    report = run_review_pipeline(tmp_path, diff_text, TargetMode.PATCH, config, provider=provider)
+
+    assert len(report.findings) == 1
+    assert report.findings[0].reviewer_ids == ["operations", "security"]
+    assert len(report.verifications) == 2
+    assert {decision.reviewer_id for decision in report.verifications} == {
+        "operations",
+        "security",
+    }
+
+
 def test_consolidate_findings_deduplicates_test_and_source_root_cause() -> None:
     test_finding = Finding(
         title="Test locks in raw CoreBank TFA method pass-through",
@@ -520,6 +1655,68 @@ def test_consolidate_findings_deduplicates_test_and_source_root_cause() -> None:
         source_finding,
         distinct_finding,
     ]
+
+
+def test_consolidate_findings_preserves_all_reviewer_provenance() -> None:
+    first = Finding(
+        title="Authorization guard can be bypassed before settlement",
+        severity=FindingSeverity.HIGH,
+        confidence=FindingConfidence.HIGH,
+        file="src/settlement.ts",
+        line=42,
+        failure_mode=(
+            "An untrusted caller can bypass the authorization guard and submit a settlement "
+            "without the required account ownership check."
+        ),
+        evidence=(
+            "The changed early return executes before the account ownership authorization guard on the settlement path."
+        ),
+        suggested_fix="Move the early return after the ownership authorization guard.",
+        suggested_test="Add a denied-account settlement regression test.",
+        reviewer_ids=["security"],
+    )
+    duplicate = first.model_copy(update={"reviewer_ids": ["finance"]})
+
+    consolidated = consolidate_findings([first, duplicate])
+
+    assert len(consolidated) == 1
+    assert consolidated[0].reviewer_ids == ["finance", "security"]
+
+
+def test_consolidate_findings_prefers_an_approved_duplicate() -> None:
+    approved = Finding(
+        title="Authorization guard is bypassed before settlement",
+        severity=FindingSeverity.HIGH,
+        confidence=FindingConfidence.MEDIUM,
+        file="src/settlement.ts",
+        line=42,
+        failure_mode=(
+            "An untrusted caller can bypass the account authorization guard and submit "
+            "a settlement without the required ownership check."
+        ),
+        evidence=(
+            "The changed early return executes before the account ownership authorization guard on the settlement path."
+        ),
+        suggested_fix="Move the early return after the ownership authorization guard.",
+        suggested_test="Add a denied-account settlement regression test.",
+        reviewer_ids=["security"],
+    )
+    unverified = approved.model_copy(
+        update={
+            "title": "Settlement authorization can be bypassed",
+            "confidence": FindingConfidence.HIGH,
+            "reviewer_ids": ["finance"],
+        }
+    )
+
+    consolidated = consolidate_findings(
+        [approved, unverified],
+        preferred_findings=[approved],
+    )
+
+    assert len(consolidated) == 1
+    assert consolidated[0].title == approved.title
+    assert consolidated[0].reviewer_ids == ["finance", "security"]
 
 
 def test_consolidate_findings_uses_bracketed_query_tokens_for_duplicates() -> None:

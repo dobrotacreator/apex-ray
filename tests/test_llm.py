@@ -18,6 +18,7 @@ from apex_ray.llm import (
     build_verifier_batch_prompt,
     build_verifier_prompt,
     dedupe_findings,
+    estimate_provider_input_tokens,
     filter_findings_for_context_pack,
     finding_response_schema,
     parse_finding_response,
@@ -32,8 +33,15 @@ from apex_ray.llm import (
     verification_response_schema,
     verify_findings,
 )
-from apex_ray.llm.cache import REVIEW_PROMPT_VERSION, REVIEW_SHALLOW_PROMPT_VERSION, VERIFIER_PROMPT_VERSION, LLMCache
+from apex_ray.llm.cache import (
+    REVIEW_PROMPT_VERSION,
+    REVIEW_SHALLOW_PROMPT_VERSION,
+    VERIFIER_PROMPT_VERSION,
+    LLMCache,
+    verification_cache_key,
+)
 from apex_ray.llm.cli import claude_result_text
+from apex_ray.llm.review import LLMRouteCircuitBreaker
 from apex_ray.llm.usage import parse_claude_usage_from_json, parse_codex_usage_from_jsonl
 from apex_ray.models import (
     AnalyzerReference,
@@ -45,15 +53,20 @@ from apex_ray.models import (
     FindingConfidence,
     FindingSeverity,
     FindingVerification,
+    LLMAPIConfig,
+    LLMAPIProtocol,
     LLMConfig,
     LLMProfile,
     LLMProviderName,
     LLMReviewResult,
     LLMRoutingCondition,
     LLMRoutingConfig,
+    LLMStructuredOutput,
     LLMUsage,
     LLMVerificationResult,
     MemoryMatch,
+    ReviewerConfig,
+    RiskSeverity,
     RiskSignal,
     RuleMatch,
 )
@@ -180,6 +193,22 @@ def test_review_context_packs_records_routed_model_profile() -> None:
     assert runs[0].estimated_input_tokens > 0
 
 
+def test_llm_run_estimates_use_effective_provider_calibration() -> None:
+    provider = FakeLLMProvider([])
+    config = LLMConfig(
+        provider=LLMProviderName.CODEX_CLI,
+        model="review-model",
+        cache_enabled=False,
+    )
+
+    _, review_runs = review_context_packs([make_pack()], config, Path("."), provider=provider)
+
+    assert review_runs[0].estimated_input_tokens == estimate_provider_input_tokens(
+        review_runs[0].input_chars,
+        provider=LLMProviderName.CODEX_CLI,
+    )
+
+
 def test_review_context_packs_records_provider_failure_per_pack() -> None:
     class FailingProvider:
         def review_context_pack(self, pack: ContextPack, repo_root: Path) -> list[Finding]:
@@ -195,6 +224,306 @@ def test_review_context_packs_records_provider_failure_per_pack() -> None:
     assert findings == []
     assert runs[0].status == "failed_quota"
     assert "usage limit" in (runs[0].error or "")
+
+
+def test_review_context_packs_opens_circuit_after_terminal_parallel_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FailingProvider:
+        calls = 0
+
+        def review_context_pack(self, pack: ContextPack, repo_root: Path) -> list[Finding]:
+            self.calls += 1
+            raise LLMProviderError("Invalid API key.", category="auth")
+
+        def verify_finding(self, finding: Finding, pack: ContextPack, repo_root: Path) -> FindingVerification:
+            raise AssertionError("not used")
+
+    failing = FailingProvider()
+    monkeypatch.setattr("apex_ray.llm.review.provider_from_config", lambda _config: failing)
+    packs = [make_pack().model_copy(update={"id": f"src/cart.ts#pack-{index}"}) for index in range(6)]
+    config = LLMConfig(provider=LLMProviderName.FAKE, jobs=2, max_consecutive_provider_failures=3)
+
+    findings, runs = review_context_packs(packs, config, Path("."))
+
+    assert findings == []
+    assert failing.calls == 2
+    assert [run.status for run in runs[:2]] == ["failed_auth", "failed_auth"]
+    assert [run.status for run in runs[2:]] == ["skipped_circuit_open"] * 4
+    assert all("circuit" in (run.error or "").lower() for run in runs[2:])
+
+
+def test_review_context_packs_opens_circuit_only_for_failed_route(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class HealthyProvider:
+        calls = 0
+
+        def review_context_pack(self, pack: ContextPack, repo_root: Path) -> list[Finding]:
+            self.calls += 1
+            return []
+
+        def verify_finding(self, finding: Finding, pack: ContextPack, repo_root: Path) -> FindingVerification:
+            raise AssertionError("not used")
+
+    healthy = HealthyProvider()
+    factory_calls = {"broken": 0, "healthy": 0}
+
+    def provider_factory(config: LLMConfig) -> HealthyProvider:
+        if config.model == "broken":
+            factory_calls["broken"] += 1
+            raise LLMProviderError("Invalid API key.", category="auth")
+        factory_calls["healthy"] += 1
+        return healthy
+
+    monkeypatch.setattr("apex_ray.llm.review.provider_from_config", provider_factory)
+    normal = make_pack()
+    risky = normal.model_copy(
+        update={
+            "id": "src/cart.ts#risky-1",
+            "risk_signals": [
+                RiskSignal(
+                    kind="auth",
+                    severity=RiskSeverity.HIGH,
+                    reason="Auth changed.",
+                    file=normal.file,
+                    line=5,
+                )
+            ],
+        }
+    )
+    risky_again = risky.model_copy(update={"id": "src/cart.ts#risky-2"})
+    normal_again = normal.model_copy(update={"id": "src/cart.ts#normal-2"})
+    config = LLMConfig(
+        provider=LLMProviderName.FAKE,
+        model="healthy",
+        cache_enabled=False,
+        profiles={
+            "broken": LLMProfile(
+                provider=LLMProviderName.OPENAI_API,
+                model="broken",
+            )
+        },
+        routing=LLMRoutingConfig(
+            escalated_review_profile="broken",
+            escalate_review_when=LLMRoutingCondition(risk=["auth"]),
+        ),
+    )
+
+    findings, runs = review_context_packs(
+        [risky, normal, risky_again, normal_again],
+        config,
+        Path("."),
+    )
+
+    assert findings == []
+    assert factory_calls == {"broken": 1, "healthy": 2}
+    assert healthy.calls == 2
+    assert [run.status for run in runs] == [
+        "failed_auth",
+        "ok",
+        "skipped_circuit_open",
+        "ok",
+    ]
+    assert [run.model for run in runs] == ["broken", "healthy", "broken", "healthy"]
+
+
+def test_profile_provider_change_does_not_inherit_another_api_credentials() -> None:
+    config = LLMConfig(
+        provider=LLMProviderName.OPENAI_API,
+        model="broad-model",
+        api=LLMAPIConfig(
+            api_key_env="BROAD_OPENAI_API_KEY",
+            headers_from_env={"X-Tenant": "BROAD_TENANT"},
+        ),
+        profiles={
+            "strong": LLMProfile(
+                provider=LLMProviderName.ANTHROPIC_API,
+                model="strong-model",
+            )
+        },
+        routing=LLMRoutingConfig(review_profile="strong"),
+    )
+
+    resolved, profile, _reason = review_config_for_pack(config, make_pack())
+
+    assert profile == "strong"
+    assert resolved.provider == LLMProviderName.ANTHROPIC_API
+    assert resolved.api == LLMAPIConfig()
+
+
+def test_review_circuit_preserves_quota_fallback_for_later_packs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ReviewProvider:
+        def __init__(self, *, quota_failure: bool) -> None:
+            self.quota_failure = quota_failure
+            self.calls = 0
+
+        def review_context_pack(self, pack: ContextPack, repo_root: Path) -> list[Finding]:
+            self.calls += 1
+            if self.quota_failure:
+                raise LLMProviderError("Quota exhausted.", category="quota")
+            return []
+
+        def verify_finding(self, finding: Finding, pack: ContextPack, repo_root: Path) -> FindingVerification:
+            raise AssertionError("not used")
+
+    cheap = ReviewProvider(quota_failure=True)
+    strong = ReviewProvider(quota_failure=False)
+
+    def provider_factory(config: LLMConfig) -> ReviewProvider:
+        return cheap if config.model == "cheap-model" else strong
+
+    monkeypatch.setattr("apex_ray.llm.review.provider_from_config", provider_factory)
+    first = make_pack()
+    second = first.model_copy(update={"id": "src/cart.ts#second"})
+    config = LLMConfig(
+        provider=LLMProviderName.FAKE,
+        cache_enabled=False,
+        profiles={
+            "cheap": LLMProfile(model="cheap-model"),
+            "strong": LLMProfile(model="strong-model"),
+        },
+        routing=LLMRoutingConfig(
+            review_profile="cheap",
+            escalated_review_profile="strong",
+        ),
+    )
+
+    findings, runs = review_context_packs([first, second], config, Path("."))
+
+    assert findings == []
+    assert cheap.calls == 1
+    assert strong.calls == 2
+    assert [run.status for run in runs] == [
+        "failed_quota",
+        "ok",
+        "skipped_circuit_open",
+        "ok",
+    ]
+    assert [run.route_reason for run in runs] == [
+        "profile:cheap",
+        "fallback:strong:after_failed_quota",
+        "profile:cheap",
+        "fallback:strong:after_failed_quota",
+    ]
+
+
+def test_shared_route_circuit_persists_across_review_and_verification_calls() -> None:
+    class TerminalProvider(FakeLLMProvider):
+        review_calls = 0
+        verification_calls = 0
+
+        def __init__(self) -> None:
+            super().__init__()
+
+        def review_context_pack(self, pack: ContextPack, repo_root: Path) -> list[Finding]:
+            self.review_calls += 1
+            raise LLMProviderError("Invalid API key.", category="auth")
+
+        def verify_finding(self, finding: Finding, pack: ContextPack, repo_root: Path) -> FindingVerification:
+            self.verification_calls += 1
+            raise AssertionError("an open circuit must prevent verification")
+
+    provider = TerminalProvider()
+    circuit = LLMRouteCircuitBreaker()
+    config = LLMConfig(
+        provider=LLMProviderName.FAKE,
+        model="shared-route",
+        cache_enabled=False,
+    )
+    pack = make_pack()
+    finding = Finding(
+        title="Finding on the failed route",
+        severity=FindingSeverity.HIGH,
+        confidence=FindingConfidence.HIGH,
+        file=pack.file,
+        line=6,
+        failure_mode="The route cannot be verified.",
+        evidence="Provider authentication failed.",
+        suggested_fix="Restore provider credentials.",
+        suggested_test="Run verification with valid credentials.",
+        context_pack_id=pack.id,
+    )
+
+    _, first_runs = review_context_packs(
+        [pack],
+        config,
+        Path("."),
+        provider=provider,
+        circuit_breaker=circuit,
+    )
+    approved, verifications, verify_runs = verify_findings(
+        [finding],
+        [pack],
+        config,
+        Path("."),
+        provider=provider,
+        circuit_breaker=circuit,
+    )
+    _, independent_runs = review_context_packs(
+        [pack],
+        config,
+        Path("."),
+        provider=provider,
+    )
+
+    assert first_runs[0].status == "failed_auth"
+    assert approved == []
+    assert verifications[0].approved is False
+    assert "circuit" in verifications[0].reason.lower()
+    assert verify_runs[0].status == "skipped_circuit_open"
+    assert provider.verification_calls == 0
+    assert independent_runs[0].status == "failed_auth"
+    assert provider.review_calls == 2
+
+
+def test_route_circuit_treats_profile_aliases_as_the_same_transport() -> None:
+    circuit = LLMRouteCircuitBreaker()
+    config = LLMConfig(
+        provider=LLMProviderName.OPENAI_COMPATIBLE,
+        model="shared-model",
+        api=LLMAPIConfig(
+            base_url="https://gateway.example/v1",
+            api_key_env="PRIVATE_LLM_API_KEY",
+        ),
+    )
+
+    circuit.record(
+        config,
+        "security-alias",
+        "failed_auth",
+        max_consecutive_failures=3,
+    )
+
+    open_failure = circuit.open_failure(config, "finance-alias")
+    assert open_failure is not None
+    assert open_failure[1] == "failed_auth"
+
+
+def test_route_circuit_isolates_custom_api_tenant_headers() -> None:
+    circuit = LLMRouteCircuitBreaker()
+    first = LLMConfig(
+        provider=LLMProviderName.OPENAI_COMPATIBLE,
+        model="shared-model",
+        api=LLMAPIConfig(
+            base_url="https://gateway.example/v1",
+            api_key_env="PRIVATE_LLM_API_KEY",
+            headers_from_env={"X-Tenant": "FIRST_TENANT"},
+        ),
+    )
+    second = first.model_copy(deep=True)
+    second.api.headers_from_env = {"X-Tenant": "SECOND_TENANT"}
+
+    circuit.record(
+        first,
+        "first-reviewer",
+        "failed_quota",
+        max_consecutive_failures=3,
+    )
+
+    assert circuit.open_failure(second, "second-reviewer") is None
 
 
 def test_review_context_packs_records_provider_reported_usage() -> None:
@@ -271,7 +600,11 @@ def test_verify_findings_records_provider_reported_usage() -> None:
     approved, verifications, runs = verify_findings(
         [finding],
         [make_pack()],
-        LLMConfig(provider=LLMProviderName.FAKE),
+        LLMConfig(
+            provider=LLMProviderName.CODEX_CLI,
+            model="review-model",
+            cache_enabled=False,
+        ),
         Path("."),
         provider=UsageVerifier(),
     )
@@ -282,6 +615,10 @@ def test_verify_findings_records_provider_reported_usage() -> None:
     assert runs[0].actual_input_tokens == 40
     assert runs[0].actual_output_tokens == 8
     assert runs[0].actual_total_tokens == 48
+    assert runs[0].estimated_input_tokens == estimate_provider_input_tokens(
+        runs[0].input_chars,
+        provider=LLMProviderName.CODEX_CLI,
+    )
 
 
 def test_shallow_review_uses_compact_prompt_and_cheap_route() -> None:
@@ -601,6 +938,138 @@ def test_review_cache_key_changes_when_effort_changes() -> None:
     high = LLMConfig(provider=LLMProviderName.FAKE, model="codex-model", effort="high")
 
     assert review_cache_key(pack, low) != review_cache_key(pack, high)
+
+
+def test_api_cache_keys_change_when_endpoint_contract_changes() -> None:
+    pack = make_pack()
+    finding = Finding(
+        title="Potential incorrect total",
+        severity=FindingSeverity.HIGH,
+        confidence=FindingConfidence.HIGH,
+        file=pack.file,
+        line=6,
+        failure_mode="Totals can be wrong.",
+        evidence="The changed symbol is calculateTotal.",
+        suggested_fix="Preserve multiplication.",
+        suggested_test="Add a multi-item cart test.",
+        context_pack_id=pack.id,
+    )
+    first = LLMConfig(
+        provider=LLMProviderName.OPENAI_COMPATIBLE,
+        model="review-model",
+        api=LLMAPIConfig(
+            protocol=LLMAPIProtocol.OPENAI_CHAT,
+            structured_output=LLMStructuredOutput.JSON_SCHEMA,
+            base_url="https://first.example/v1",
+            api_key_env="FIRST_API_KEY",
+        ),
+    )
+    second = first.model_copy(
+        deep=True,
+        update={
+            "api": first.api.model_copy(
+                update={
+                    "base_url": "https://second.example/v1",
+                    "api_key_env": "SECOND_API_KEY",
+                }
+            )
+        },
+    )
+
+    assert review_cache_key(pack, first) != review_cache_key(pack, second)
+    assert verification_cache_key(finding, pack, first) != verification_cache_key(
+        finding,
+        pack,
+        second,
+    )
+
+
+def test_api_cache_key_changes_when_endpoint_environment_value_changes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = LLMConfig(
+        provider=LLMProviderName.OPENAI_COMPATIBLE,
+        model="review-model",
+        api=LLMAPIConfig(
+            protocol=LLMAPIProtocol.OPENAI_CHAT,
+            structured_output=LLMStructuredOutput.JSON_SCHEMA,
+            base_url_env="CUSTOM_REVIEW_URL",
+            api_key_env="CUSTOM_REVIEW_KEY",
+        ),
+    )
+    monkeypatch.setenv("CUSTOM_REVIEW_URL", "https://first.example/v1")
+    first_key = review_cache_key(make_pack(), config)
+
+    monkeypatch.setenv("CUSTOM_REVIEW_URL", "https://second.example/v1")
+    second_key = review_cache_key(make_pack(), config)
+
+    assert first_key != second_key
+    assert "first.example" not in first_key
+    assert "second.example" not in second_key
+
+
+def test_api_cache_keys_change_when_auth_or_tenant_identity_changes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pack = make_pack()
+    finding = Finding(
+        title="Potential incorrect total",
+        severity=FindingSeverity.HIGH,
+        confidence=FindingConfidence.HIGH,
+        file=pack.file,
+        line=6,
+        failure_mode="Totals can be wrong.",
+        evidence="The changed symbol is calculateTotal.",
+        suggested_fix="Preserve multiplication.",
+        suggested_test="Add a multi-item cart test.",
+        context_pack_id=pack.id,
+    )
+    config = LLMConfig(
+        provider=LLMProviderName.OPENAI_COMPATIBLE,
+        model="review-model",
+        api=LLMAPIConfig(
+            protocol=LLMAPIProtocol.OPENAI_CHAT,
+            structured_output=LLMStructuredOutput.JSON_SCHEMA,
+            base_url="https://gateway.example/v1",
+            api_key_env="CUSTOM_REVIEW_KEY",
+            headers_from_env={"X-Tenant-ID": "CUSTOM_REVIEW_TENANT"},
+        ),
+    )
+    monkeypatch.setenv("CUSTOM_REVIEW_KEY", "first-secret")
+    monkeypatch.setenv("CUSTOM_REVIEW_TENANT", "tenant-a")
+    first = (
+        review_cache_key(pack, config),
+        verification_cache_key(finding, pack, config),
+    )
+
+    monkeypatch.setenv("CUSTOM_REVIEW_KEY", "second-secret")
+    second = (
+        review_cache_key(pack, config),
+        verification_cache_key(finding, pack, config),
+    )
+    monkeypatch.setenv("CUSTOM_REVIEW_TENANT", "tenant-b")
+    third = (
+        review_cache_key(pack, config),
+        verification_cache_key(finding, pack, config),
+    )
+
+    assert len({*first, *second, *third}) == 6
+    assert all("secret" not in key and "tenant-" not in key for key in (*first, *second, *third))
+
+
+def test_built_in_api_cache_key_uses_default_key_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = LLMConfig(provider=LLMProviderName.OPENAI_API, model="gpt-5.6")
+    monkeypatch.setenv("OPENAI_API_KEY", "first-secret")
+    first = review_cache_key(make_pack(), config)
+
+    monkeypatch.setenv("OPENAI_API_KEY", "second-secret")
+    second = review_cache_key(make_pack(), config)
+
+    assert first != second
+    assert "first-secret" not in first
+    assert "second-secret" not in second
 
 
 def test_review_config_uses_default_profile() -> None:
@@ -949,6 +1418,52 @@ def test_verify_findings_batches_by_context_pack() -> None:
     assert runs[0].input_chars > 0
 
 
+def test_verify_findings_scopes_only_referenced_packs_for_reviewer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    referenced_pack = make_pack()
+    unused_pack = referenced_pack.model_copy(
+        update={"id": "src/cart.ts#unused:1"},
+    )
+    finding = Finding(
+        title="Cart totals ignore item quantity",
+        severity=FindingSeverity.HIGH,
+        confidence=FindingConfidence.HIGH,
+        file="src/cart.ts",
+        line=7,
+        failure_mode="Totals are undercounted.",
+        evidence="Quantity is removed.",
+        suggested_fix="Multiply by quantity.",
+        suggested_test="Add quantity > 1 test.",
+        context_pack_id=referenced_pack.id,
+    )
+    scoped_pack_ids: list[str] = []
+
+    from apex_ray.llm import review as review_module
+
+    original_pack_for_reviewer = review_module.pack_for_reviewer
+
+    def tracked_pack_for_reviewer(pack: ContextPack, reviewer: ReviewerConfig) -> ContextPack:
+        scoped_pack_ids.append(pack.id)
+        return original_pack_for_reviewer(pack, reviewer)
+
+    monkeypatch.setattr(review_module, "pack_for_reviewer", tracked_pack_for_reviewer)
+
+    approved, verifications, runs = verify_findings(
+        [finding],
+        [referenced_pack, unused_pack],
+        LLMConfig(provider=LLMProviderName.FAKE, cache_enabled=False),
+        Path("."),
+        provider=FakeLLMProvider(verification_approvals=[True]),
+        reviewer=ReviewerConfig(id="security", focus="Authorization boundaries."),
+    )
+
+    assert scoped_pack_ids == [referenced_pack.id]
+    assert approved == [finding]
+    assert verifications[0].reviewer_id == "security"
+    assert [run.context_pack_id for run in runs] == [referenced_pack.id]
+
+
 def test_verify_findings_falls_back_to_legacy_provider_protocol() -> None:
     finding = Finding(
         title="Legacy verifier finding",
@@ -1112,6 +1627,146 @@ def test_verify_findings_groups_cache_by_per_finding_route(tmp_path: Path) -> No
     assert strong_run.cache_hits == 0
     assert strong_run.cache_misses == 1
     assert strong_run.input_chars > 0
+
+
+def test_verify_findings_opens_circuit_only_for_failed_route(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class RouteVerifier:
+        def __init__(self, *, fails: bool) -> None:
+            self.fails = fails
+            self.calls = 0
+
+        def review_context_pack(self, pack: ContextPack, repo_root: Path) -> list[Finding]:
+            raise AssertionError("not used")
+
+        def verify_finding(self, finding: Finding, pack: ContextPack, repo_root: Path) -> FindingVerification:
+            self.calls += 1
+            if self.fails:
+                raise LLMProviderError("Invalid API key.", category="auth")
+            return FindingVerification(
+                finding=finding,
+                approved=True,
+                confidence=FindingConfidence.HIGH,
+                reason="Healthy route verified the finding.",
+            )
+
+    broken = RouteVerifier(fails=True)
+    healthy = RouteVerifier(fails=False)
+
+    def provider_factory(config: LLMConfig) -> RouteVerifier:
+        return broken if config.model == "broken" else healthy
+
+    monkeypatch.setattr("apex_ray.llm.review.provider_from_config", provider_factory)
+    packs = [make_pack().model_copy(update={"id": f"src/cart.ts#verify-{index}"}) for index in range(4)]
+    findings = [
+        Finding(
+            title=f"Finding {index}",
+            severity=severity,
+            confidence=FindingConfidence.HIGH,
+            file=pack.file,
+            line=6,
+            failure_mode="The changed code can fail.",
+            evidence="The diff removes a required check.",
+            suggested_fix="Restore the check.",
+            suggested_test="Add a regression test.",
+            context_pack_id=pack.id,
+        )
+        for index, (pack, severity) in enumerate(
+            zip(
+                packs,
+                [
+                    FindingSeverity.HIGH,
+                    FindingSeverity.LOW,
+                    FindingSeverity.HIGH,
+                    FindingSeverity.LOW,
+                ],
+                strict=True,
+            )
+        )
+    ]
+    config = LLMConfig(
+        provider=LLMProviderName.FAKE,
+        model="healthy",
+        cache_enabled=False,
+        profiles={
+            "cheap": LLMProfile(provider=LLMProviderName.FAKE, model="healthy"),
+            "strong": LLMProfile(provider=LLMProviderName.OPENAI_API, model="broken"),
+        },
+        routing=LLMRoutingConfig(
+            verify_profile="cheap",
+            escalated_verify_profile="strong",
+            escalate_verify_when=LLMRoutingCondition(finding_severity=[FindingSeverity.HIGH]),
+        ),
+    )
+
+    approved, verifications, runs = verify_findings(findings, packs, config, Path("."))
+
+    assert approved == [findings[1], findings[3]]
+    assert broken.calls == 1
+    assert healthy.calls == 2
+    assert [run.status for run in runs] == [
+        "failed_auth",
+        "ok",
+        "skipped_circuit_open",
+        "ok",
+    ]
+    assert [verification.approved for verification in verifications] == [False, True, False, True]
+    assert "circuit" in verifications[2].reason.lower()
+
+
+def test_verify_findings_opens_retryable_circuit_after_parallel_threshold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class TimeoutVerifier:
+        calls = 0
+
+        def review_context_pack(self, pack: ContextPack, repo_root: Path) -> list[Finding]:
+            raise AssertionError("not used")
+
+        def verify_finding(self, finding: Finding, pack: ContextPack, repo_root: Path) -> FindingVerification:
+            self.calls += 1
+            raise LLMProviderError("Provider timed out.", category="timeout", retryable=True)
+
+    timeout_verifier = TimeoutVerifier()
+    monkeypatch.setattr("apex_ray.llm.review.provider_from_config", lambda _config: timeout_verifier)
+    packs = [make_pack().model_copy(update={"id": f"src/cart.ts#timeout-{index}"}) for index in range(5)]
+    findings = [
+        Finding(
+            title=f"Timeout finding {index}",
+            severity=FindingSeverity.MEDIUM,
+            confidence=FindingConfidence.HIGH,
+            file=pack.file,
+            line=6,
+            failure_mode="The changed code can fail.",
+            evidence="The diff removes a required check.",
+            suggested_fix="Restore the check.",
+            suggested_test="Add a regression test.",
+            context_pack_id=pack.id,
+        )
+        for index, pack in enumerate(packs)
+    ]
+    config = LLMConfig(
+        provider=LLMProviderName.FAKE,
+        model="timeout-route",
+        cache_enabled=False,
+        jobs=2,
+        max_consecutive_provider_failures=2,
+    )
+
+    approved, verifications, runs = verify_findings(findings, packs, config, Path("."))
+
+    assert approved == []
+    assert timeout_verifier.calls == 2
+    assert [run.status for run in runs] == [
+        "failed_timeout",
+        "failed_timeout",
+        "skipped_circuit_open",
+        "skipped_circuit_open",
+        "skipped_circuit_open",
+    ]
+    assert all(not verification.approved for verification in verifications)
+    assert all("circuit" in verification.reason.lower() for verification in verifications[2:])
 
 
 def test_dedupe_findings_keeps_highest_ranked_duplicate() -> None:

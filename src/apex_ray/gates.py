@@ -2,7 +2,7 @@ from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
-from apex_ray.findings import finding_fingerprint
+from apex_ray.findings import finding_fingerprint, finding_matches_any
 from apex_ray.models import Finding, PrePushGateConfig, ReviewReport
 from apex_ray.triage import StaleSuppression, SuppressedFinding
 
@@ -152,12 +152,10 @@ def _blocking_findings(report: ReviewReport, config: PrePushGateConfig) -> list[
 def _eligible_findings(report: ReviewReport, config: PrePushGateConfig) -> list[Finding]:
     if not config.require_verified_findings:
         return report.findings
-    approved = {
-        _finding_identity(verification.finding) for verification in report.verifications if verification.approved
-    }
+    approved = [verification.finding for verification in report.verifications if verification.approved]
     if not approved:
         return []
-    return [finding for finding in report.findings if _finding_identity(finding) in approved]
+    return [finding for finding in report.findings if finding_matches_any(finding, approved)]
 
 
 def _partial_severity_blocks(
@@ -176,16 +174,6 @@ def _failed_review_status_details(report: ReviewReport) -> str:
         if run.kind in {"review", "review_shallow"} and run.status != "ok" and run.status.startswith("failed_")
     )
     return ", ".join(f"{status}: {count}" for status, count in sorted(failed_counts.items()))
-
-
-def _finding_identity(finding: object) -> tuple[object, ...]:
-    return (
-        getattr(finding, "title", ""),
-        getattr(finding, "file", ""),
-        getattr(finding, "line", None),
-        getattr(finding, "failure_mode", ""),
-        getattr(finding, "evidence", ""),
-    )
 
 
 def _finding_fingerprint(finding: Finding) -> tuple[object, ...]:

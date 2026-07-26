@@ -59,3 +59,72 @@ test("repo index builder captures module, identifier, receiver, and cache metada
     fs.rmSync(cacheDir, { recursive: true, force: true });
   }
 });
+
+test("repo index builder limits indexing to a file manifest", () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "apex-ray-ts-index-manifest-"));
+  const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "apex-ray-ts-index-manifest-cache-"));
+  try {
+    writeFile(repo, "src/cart.ts", "export const cart = true;\n");
+    writeFile(repo, "src/consumer.ts", "export const consumer = true;\n");
+    writeFile(repo, ".venv/vendor.min.js", "const ignored = true;\n");
+    const manifestPath = path.join(repo, "typescript-files.json");
+    fs.writeFileSync(
+      manifestPath,
+      JSON.stringify({ version: 1, files: ["src/cart.ts", "src/consumer.ts"] }),
+      "utf8",
+    );
+
+    const args = parseArgs([
+      "--repo",
+      repo,
+      "--changed",
+      "src/cart.ts",
+      "--file-manifest",
+      manifestPath,
+      "--index-cache-dir",
+      cacheDir,
+    ]);
+    const first = buildRepoIndex(args);
+    const second = buildRepoIndex(args);
+
+    assert.deepEqual(
+      first.files.map((entry) => entry.relPath),
+      ["src/cart.ts", "src/consumer.ts"],
+    );
+    assert.equal(first.cacheStats?.misses, 2);
+    assert.equal(first.cacheStats?.written, true);
+    assert.equal(second.cacheStats?.hits, 2);
+    assert.equal(second.cacheStats?.misses, 0);
+
+    fs.writeFileSync(manifestPath, JSON.stringify({ version: 1, files: ["src/cart.ts"] }), "utf8");
+    const narrowed = buildRepoIndex(args);
+    assert.deepEqual(narrowed.files.map((entry) => entry.relPath), ["src/cart.ts"]);
+    assert.equal(narrowed.cacheStats?.hits, 1);
+    assert.equal(narrowed.cacheStats?.misses, 0);
+    assert.equal(narrowed.cacheStats?.written, true);
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
+    fs.rmSync(cacheDir, { recursive: true, force: true });
+  }
+});
+
+test("repo index builder rejects manifest paths outside the repository", () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "apex-ray-ts-index-manifest-boundary-"));
+  try {
+    const manifestPath = path.join(repo, "typescript-files.json");
+    fs.writeFileSync(manifestPath, JSON.stringify({ version: 1, files: ["../outside.ts"] }), "utf8");
+    const args = parseArgs([
+      "--repo",
+      repo,
+      "--changed",
+      "src/cart.ts",
+      "--file-manifest",
+      manifestPath,
+      "--no-index-cache",
+    ]);
+
+    assert.throws(() => buildRepoIndex(args), /outside the repository/);
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
+});

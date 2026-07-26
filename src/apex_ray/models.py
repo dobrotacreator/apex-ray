@@ -1,8 +1,12 @@
+import re
 from datetime import datetime
 from enum import StrEnum
 from typing import Literal
+from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+_HTTP_FIELD_NAME = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")
 
 
 class ApexModel(BaseModel):
@@ -49,6 +53,7 @@ class DiffLineKind(StrEnum):
 
 
 class RiskSeverity(StrEnum):
+    CRITICAL = "critical"
     HIGH = "high"
     MEDIUM = "medium"
     LOW = "low"
@@ -58,6 +63,25 @@ class LLMProviderName(StrEnum):
     FAKE = "fake"
     CODEX_CLI = "codex_cli"
     CLAUDE_CODE_CLI = "claude_code_cli"
+    OPENAI_API = "openai_api"
+    ANTHROPIC_API = "anthropic_api"
+    DEEPSEEK_API = "deepseek_api"
+    QWEN_API = "qwen_api"
+    KIMI_API = "kimi_api"
+    ZAI_API = "zai_api"
+    OPENAI_COMPATIBLE = "openai_compatible"
+
+
+class LLMAPIProtocol(StrEnum):
+    OPENAI_RESPONSES = "openai_responses"
+    ANTHROPIC_MESSAGES = "anthropic_messages"
+    OPENAI_CHAT = "openai_chat"
+
+
+class LLMStructuredOutput(StrEnum):
+    JSON_SCHEMA = "json_schema"
+    JSON_OBJECT = "json_object"
+    PROMPT_ONLY = "prompt_only"
 
 
 class LLMCoverageMode(StrEnum):
@@ -67,6 +91,8 @@ class LLMCoverageMode(StrEnum):
 
 
 class LLMReasoningEffort(StrEnum):
+    NONE = "none"
+    MINIMAL = "minimal"
     LOW = "low"
     MEDIUM = "medium"
     HIGH = "high"
@@ -199,6 +225,69 @@ class MemoryConfig(StrictApexModel):
     max_context_ratio: float = Field(default=0.10, ge=0.0, le=1.0)
 
 
+class RiskRule(StrictApexModel):
+    id: str = Field(min_length=1, pattern=r"^[a-z0-9][a-z0-9._-]*$")
+    title: str = ""
+    severity: RiskSeverity = RiskSeverity.MEDIUM
+    score: int | None = Field(default=None, ge=0, le=100)
+    paths: list[str] = Field(default_factory=list)
+    exclude_paths: list[str] = Field(default_factory=list)
+    languages: list[str] = Field(default_factory=list)
+    file_kinds: list[FileKind] = Field(default_factory=list)
+    statuses: list[FileStatus] = Field(default_factory=list)
+    text: list[str] = Field(default_factory=list)
+    risk: list[str] = Field(default_factory=list)
+    categories: list[str] = Field(default_factory=list)
+    reviewer_tags: list[str] = Field(default_factory=list)
+    guidance: str = ""
+
+
+class RiskConfig(StrictApexModel):
+    built_in_enabled: bool = True
+    rules: list[RiskRule] = Field(default_factory=list)
+
+
+class LLMAPIConfig(StrictApexModel):
+    protocol: LLMAPIProtocol | None = None
+    structured_output: LLMStructuredOutput | None = None
+    base_url: str | None = None
+    base_url_env: str | None = Field(default=None, pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")
+    api_key_env: str | None = Field(default=None, pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")
+    allowed_hosts_env: str = Field(
+        default="APEX_RAY_API_ALLOWED_HOSTS",
+        pattern=r"^[A-Za-z_][A-Za-z0-9_]*$",
+    )
+    headers_from_env: dict[str, str] = Field(default_factory=dict)
+    api_version: str | None = None
+    max_output_tokens: int = Field(default=4096, gt=0)
+    max_retries: int = Field(default=2, ge=0, le=8)
+    retry_backoff_seconds: float = Field(default=0.5, gt=0.0, le=60.0)
+    retry_max_seconds: float = Field(default=8.0, gt=0.0, le=300.0)
+    use_system_proxy: bool = True
+
+    @model_validator(mode="after")
+    def validate_endpoint_and_headers(self) -> LLMAPIConfig:
+        if self.base_url and self.base_url_env:
+            raise ValueError("Use only one of base_url or base_url_env")
+        if self.base_url:
+            parsed = urlsplit(self.base_url)
+            loopback = parsed.hostname in {"localhost", "127.0.0.1", "::1"}
+            if parsed.scheme != "https" and not (parsed.scheme == "http" and loopback):
+                raise ValueError("API base_url must use HTTPS (HTTP is allowed only for loopback tests)")
+            if not parsed.hostname:
+                raise ValueError("API base_url must include a host")
+            if parsed.username or parsed.password:
+                raise ValueError("API base_url must not contain credentials")
+            if parsed.query or parsed.fragment:
+                raise ValueError("API base_url must not contain a query or fragment")
+        for header, env_name in self.headers_from_env.items():
+            if _HTTP_FIELD_NAME.fullmatch(header) is None:
+                raise ValueError(f"Invalid API header name: {header!r}")
+            if not env_name or not env_name.replace("_", "a").isalnum() or env_name[0].isdigit():
+                raise ValueError(f"Invalid environment variable name for API header {header!r}")
+        return self
+
+
 class LLMProfile(StrictApexModel):
     provider: LLMProviderName | None = None
     model: str | None = None
@@ -206,6 +295,7 @@ class LLMProfile(StrictApexModel):
     timeout_seconds: int | None = Field(default=None, gt=0)
     codex_path: str | None = None
     claude_path: str | None = None
+    api: LLMAPIConfig | None = None
 
 
 class LLMRoutingCondition(StrictApexModel):
@@ -236,6 +326,7 @@ class LLMConfig(StrictApexModel):
     effort: LLMReasoningEffort | None = None
     timeout_seconds: int = Field(default=300, gt=0)
     jobs: int = Field(default=1, ge=1)
+    max_consecutive_provider_failures: int = Field(default=3, ge=1, le=100)
     max_packs: int = Field(default=64, gt=0)
     coverage_mode: LLMCoverageMode = LLMCoverageMode.BALANCED
     max_deep_packs: int | None = Field(default=48, gt=0)
@@ -245,12 +336,35 @@ class LLMConfig(StrictApexModel):
     review_depth: Literal["deep", "shallow"] = "deep"
     codex_path: str = "codex"
     claude_path: str = "claude"
+    api: LLMAPIConfig = Field(default_factory=LLMAPIConfig)
     verify: bool = True
     cache_enabled: bool = True
     cache_dir: str | None = None
     refresh_cache: bool = False
     profiles: dict[str, LLMProfile] = Field(default_factory=dict)
     routing: LLMRoutingConfig = Field(default_factory=LLMRoutingConfig)
+
+
+class ReviewerConfig(StrictApexModel):
+    id: str = Field(min_length=1, pattern=r"^[a-z0-9][a-z0-9._-]*$")
+    name: str = ""
+    enabled: bool = True
+    focus: str = ""
+    instructions: list[str] = Field(default_factory=list)
+    paths: list[str] = Field(default_factory=list)
+    exclude_paths: list[str] = Field(default_factory=list)
+    file_kinds: list[FileKind] = Field(default_factory=list)
+    risk: list[str] = Field(default_factory=list)
+    risk_tags: list[str] = Field(default_factory=list)
+    profile: str | None = None
+    verify_profile: str | None = None
+    coverage_mode: LLMCoverageMode | None = None
+    review_depth: Literal["balanced", "deep", "shallow"] = "balanced"
+    max_packs: int | None = Field(default=None, gt=0)
+    max_deep_packs: int | None = Field(default=None, gt=0)
+    max_input_tokens: int | None = Field(default=None, gt=0)
+    verify: bool | None = None
+    required: bool = False
 
 
 class AnalyzerConfig(StrictApexModel):
@@ -272,12 +386,15 @@ class LocalDataConfig(StrictApexModel):
 class TelemetryConfig(StrictApexModel):
     enabled: bool = False
     path: str = ".apex-ray/telemetry/review-runs.jsonl"
+    path_mode: Literal["anonymized", "full"] = "full"
 
 
 class ReportsConfig(StrictApexModel):
     archive: bool = False
     archive_dir: str = ".apex-ray/reports/runs"
     retention: int | None = Field(default=20, ge=1)
+    compression: Literal["none", "gzip", "auto"] = "none"
+    compression_min_bytes: int = Field(default=65_536, ge=0)
 
 
 class TriageConfig(StrictApexModel):
@@ -322,10 +439,12 @@ class ReviewConfig(StrictApexModel):
     rule_definitions: list[ReviewRule] = Field(default_factory=list)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     memory_definitions: list[MemoryCard] = Field(default_factory=list)
+    risk: RiskConfig = Field(default_factory=RiskConfig)
     analyzer: AnalyzerConfig = Field(default_factory=AnalyzerConfig)
     context: ContextConfig = Field(default_factory=ContextConfig)
     local_data: LocalDataConfig = Field(default_factory=LocalDataConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
+    reviewers: list[ReviewerConfig] = Field(default_factory=list)
     telemetry: TelemetryConfig = Field(default_factory=TelemetryConfig)
     reports: ReportsConfig = Field(default_factory=ReportsConfig)
     triage: TriageConfig = Field(default_factory=TriageConfig)
@@ -355,6 +474,12 @@ class RiskSignal(ApexModel):
     reason: str
     file: str
     line: int | None = None
+    score: int = Field(default=0, ge=0, le=100)
+    source: str = "built_in"
+    rule_id: str | None = None
+    categories: list[str] = Field(default_factory=list)
+    reviewer_tags: list[str] = Field(default_factory=list)
+    guidance: str = ""
 
 
 class ChangedHunk(ApexModel):
@@ -409,6 +534,7 @@ class ReportSummary(ApexModel):
 
 class LLMRouteSummary(ApexModel):
     kind: str
+    reviewer_id: str = "general"
     provider: str
     model: str | None = None
     effort: str | None = None
@@ -488,6 +614,7 @@ class LLMPackReviewStatus(ApexModel):
 class LLMCoverageTodo(ApexModel):
     context_pack_id: str
     file: str
+    reviewer_id: str | None = None
     file_kind: FileKind = FileKind.UNKNOWN
     priority: str
     slice: str = "other"
@@ -533,6 +660,25 @@ class LLMSliceCoverageSummary(ApexModel):
     unreviewed_context_pack_ids: list[str] = Field(default_factory=list)
 
 
+class LLMReviewerCoverageSummary(ApexModel):
+    reviewer_id: str
+    required: bool = False
+    verify_enabled: bool = False
+    status: Literal["not_applicable", "pass", "warn", "fail"] = "not_applicable"
+    reasons: list[str] = Field(default_factory=list)
+    matching_context_packs: int = 0
+    selected_context_packs: int = 0
+    reviewed_context_packs: int = 0
+    failed_review_runs: int = 0
+    failed_verify_runs: int = 0
+    matching_context_pack_ids: list[str] = Field(default_factory=list)
+    selected_context_pack_ids: list[str] = Field(default_factory=list)
+    reviewed_context_pack_ids: list[str] = Field(default_factory=list)
+    estimated_input_tokens: int = 0
+    actual_total_tokens: int = 0
+    estimated_cost_usd: float | None = None
+
+
 class LLMCoverageSummary(ApexModel):
     enabled: bool = False
     verify_enabled: bool = False
@@ -572,6 +718,7 @@ class LLMCoverageSummary(ApexModel):
     residual_risk_context_packs: list[LLMResidualRiskSummary] = Field(default_factory=list)
     file_coverage: list[LLMFileCoverageSummary] = Field(default_factory=list)
     slice_coverage: list[LLMSliceCoverageSummary] = Field(default_factory=list)
+    reviewers: list[LLMReviewerCoverageSummary] = Field(default_factory=list)
     cluster_context_packs: int = 0
     file_context_packs: int = 0
     symbol_context_packs: int = 0
@@ -693,6 +840,13 @@ class ContextPackStats(ApexModel):
     policy_key: str = ""
 
 
+class ReviewerPromptContext(ApexModel):
+    id: str
+    name: str = ""
+    focus: str = ""
+    instructions: list[str] = Field(default_factory=list)
+
+
 class ContextPack(ApexModel):
     id: str
     file: str
@@ -720,6 +874,7 @@ class ContextPack(ApexModel):
     rule_matches: list[RuleMatch] = Field(default_factory=list)
     memory_matches: list[MemoryMatch] = Field(default_factory=list)
     memory_omissions: list[MemoryOmission] = Field(default_factory=list)
+    reviewer: ReviewerPromptContext | None = None
     warnings: list[str] = Field(default_factory=list)
     stats: ContextPackStats = Field(default_factory=ContextPackStats)
 
@@ -735,6 +890,7 @@ class Finding(ApexModel):
     suggested_fix: str
     suggested_test: str
     context_pack_id: str = ""
+    reviewer_ids: list[str] = Field(default_factory=list)
 
 
 class FindingResponse(ApexModel):
@@ -760,6 +916,7 @@ class VerificationBatchResponse(StrictApexModel):
 
 class FindingVerification(ApexModel):
     finding: Finding
+    reviewer_id: str = "general"
     approved: bool
     confidence: FindingConfidence
     reason: str
@@ -818,6 +975,7 @@ class LLMRun(ApexModel):
     profile: str | None = None
     route_reason: str | None = None
     prompt_version: str | None = None
+    reviewer_id: str = "general"
     context_pack_id: str
     status: str
     duration_ms: int
@@ -848,6 +1006,8 @@ class ReviewReport(ApexModel):
     diff: DiffSummary
     summary: ReportSummary
     llm_selection: LLMContextSelection | None = None
+    reviewer_selections: dict[str, LLMContextSelection] = Field(default_factory=dict)
+    stage_durations_ms: dict[str, int] = Field(default_factory=dict)
     llm_coverage: LLMCoverageSummary = Field(default_factory=LLMCoverageSummary)
     memory_summary: MemorySummary = Field(default_factory=MemorySummary)
     rules: list[str] = Field(default_factory=list)

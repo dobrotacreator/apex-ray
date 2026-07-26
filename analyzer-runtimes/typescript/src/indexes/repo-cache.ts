@@ -11,6 +11,7 @@ import type {
   DiProviderIndexEntry,
   ExportIndexEntry,
   IdentifierIndexEntry,
+  IndexedReference,
   ImportIndexEntry,
   NamedImportIndexEntry,
   NamespaceImportIndexEntry,
@@ -19,6 +20,7 @@ import type {
   RepoFileIndexEntry,
   RepoIndexCacheFile,
   RepoIndexCacheFileEntry,
+  RepoIndexCacheWriteResult,
   TypeAliasIndexEntry,
 } from "../types.js";
 import { isRecord } from "../utils.js";
@@ -43,7 +45,10 @@ function defaultCacheHome(): string {
   return path.join(os.tmpdir(), "apex-ray-cache");
 }
 
-export function readRepoIndexCache(cachePath: string): RepoIndexCacheFile | null {
+export function readRepoIndexCache(
+  cachePath: string,
+  _inventoryFingerprint: string | null = null,
+): RepoIndexCacheFile | null {
   try {
     const parsed = JSON.parse(fs.readFileSync(cachePath, "utf-8")) as RepoIndexCacheFile;
     if (parsed.version !== REPO_INDEX_CACHE_VERSION || !Array.isArray(parsed.files)) return null;
@@ -122,7 +127,17 @@ function isIdentifierIndexEntry(value: unknown): value is IdentifierIndexEntry {
     isRecord(value) &&
     typeof value.name === "string" &&
     (typeof value.namespaceQualifier === "string" || value.namespaceQualifier === null) &&
-    isReference(value.reference)
+    isIndexedReference(value.reference)
+  );
+}
+
+function isIndexedReference(value: unknown): value is IndexedReference {
+  return (
+    isRecord(value) &&
+    typeof value.file === "string" &&
+    typeof value.line === "number" &&
+    (value.endLine === undefined || typeof value.endLine === "number") &&
+    typeof value.kind === "string"
   );
 }
 
@@ -175,12 +190,18 @@ function isReference(value: unknown): value is Reference {
   );
 }
 
-export function writeRepoIndexCache(cachePath: string, files: RepoFileIndexEntry[]): boolean {
+export function writeRepoIndexCache(
+  cachePath: string,
+  files: RepoFileIndexEntry[],
+  inventoryFingerprint: string | null = null,
+): RepoIndexCacheWriteResult {
+  let tmpPath: string | null = null;
   try {
     fs.mkdirSync(path.dirname(cachePath), { recursive: true });
-    const tmpPath = `${cachePath}.${process.pid}.${Date.now()}.tmp`;
+    tmpPath = `${cachePath}.${process.pid}.${Date.now()}.tmp`;
     const payload: RepoIndexCacheFile = {
       version: REPO_INDEX_CACHE_VERSION,
+      inventoryFingerprint,
       files: files.map((file) => ({
         relPath: file.relPath,
         size: file.size,
@@ -197,8 +218,18 @@ export function writeRepoIndexCache(cachePath: string, files: RepoFileIndexEntry
     };
     fs.writeFileSync(tmpPath, JSON.stringify(payload), "utf-8");
     fs.renameSync(tmpPath, cachePath);
-    return true;
-  } catch {
-    return false;
+    return { written: true, error: null };
+  } catch (error) {
+    if (tmpPath !== null) {
+      try {
+        fs.rmSync(tmpPath, { force: true });
+      } catch {
+        // Preserve the original write error as the actionable diagnostic.
+      }
+    }
+    return {
+      written: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
   }
 }

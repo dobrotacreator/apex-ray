@@ -14,7 +14,11 @@ Local CLI-first AI code review for git diffs with analyzer-backed context.
 
 Full documentation: [dobrotacreator.github.io/apex-ray](https://dobrotacreator.github.io/apex-ray/)
 
-Apex Ray reads a git diff, builds compact context packs around changed code, runs optional LLM review through a local CLI provider, verifies findings, and writes Markdown, JSON, and HTML reports. It is designed for teams that want review intelligence locally, without depending on a hosted PR-review product.
+Apex Ray reads a git diff, builds compact context packs around changed code,
+runs optional specialist LLM review through local CLIs or direct APIs,
+verifies findings, and writes Markdown, JSON, HTML, and SARIF reports. It can
+run locally or in GitHub Actions without depending on a hosted PR-review
+product.
 
 > Apex Ray is pre-1.0. Report schemas and configuration can change while the project is prepared for production use.
 
@@ -97,7 +101,14 @@ See the full [Quick Start](https://dobrotacreator.github.io/apex-ray/quickstart/
 - Runs a language-neutral diff -> context pack -> optional LLM review workflow.
 - Uses enhanced analyzers for TypeScript/JavaScript, Python, and Go today, with Rust planned next.
 - Supports project-specific rules and repo-committed review memory.
-- Runs without LLM calls, or with Codex CLI / Claude Code CLI when configured.
+- Runs without LLM calls, with Codex CLI / Claude Code CLI subscriptions, or
+  with OpenAI, Anthropic, DeepSeek, Qwen, Kimi, Z.ai, and custom compatible
+  APIs.
+- Supports project risk policies and independent correctness, security,
+  financial, UX, or other focused reviewers with separate scope, model
+  routing, depth, verification, and budgets.
+- Runs reviewer matrices in GitHub Actions and emits SARIF/code-scanning,
+  step-summary, and downloadable report artifacts.
 - Routes cheap and strong models through profiles.
 - Tracks LLM coverage, skipped packs, partial severity, provider failures, cache usage, and continuation commands.
 - Replays historical GitHub PR review comments for local evals.

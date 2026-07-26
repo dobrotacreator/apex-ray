@@ -1,3 +1,4 @@
+import subprocess
 from pathlib import Path
 
 from apex_ray.analyzers import run_python_analyzer, run_typescript_analyzer
@@ -20,11 +21,15 @@ from apex_ray.models import (
     LLMProviderName,
     MemoryCard,
     ReviewConfig,
+    ReviewerConfig,
     ReviewRule,
+    RiskConfig,
+    RiskRule,
     RiskSeverity,
     RiskSignal,
     TargetMode,
 )
+from apex_ray.reviewers import reviewer_matches_pack
 
 ROOT = Path(__file__).resolve().parents[1]
 TS_FIXTURE = ROOT / "tests" / "fixtures" / "ts_project"
@@ -4954,12 +4959,70 @@ index 1111111..2222222 100644
     assert second.index_cache.hits == 2
     assert second.index_cache.misses == 0
     assert second.index_cache.written is False
+    second_references = second.files[0].changed_symbols[0].references
+    assert any("tenantScopedSettingsKey('tenant-a', 'user-a')" in reference.text for reference in second_references)
     assert third is not None and third.index_cache is not None
     assert third.index_cache.hits == 1
     assert third.index_cache.misses == 1
     references = third.files[0].changed_symbols[0].references
     assert any("tenantScopedSettingsKey('tenant-b', 'user-b')" in reference.text for reference in references)
     assert all("tenantScopedSettingsKey('tenant-a', 'user-a')" not in reference.text for reference in references)
+
+
+def test_typescript_analyzer_uses_git_inventory_and_keeps_untracked_sources(
+    tmp_path: Path,
+    built_ts_analyzer: None,
+) -> None:
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    (tmp_path / ".gitignore").write_text(".venv/\n", encoding="utf-8")
+    (tmp_path / "src").mkdir()
+    (tmp_path / "tsconfig.json").write_text(
+        '{"compilerOptions":{"target":"ES2022","module":"ESNext","moduleResolution":"Bundler","strict":true},'
+        '"include":["src/**/*.ts"]}',
+        encoding="utf-8",
+    )
+    (tmp_path / "src" / "cart.ts").write_text(
+        "export function cartTotal(): number {\n  return 1;\n}\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "src" / "consumer.ts").write_text(
+        "import { cartTotal } from './cart.js';\nexport const total = cartTotal();\n",
+        encoding="utf-8",
+    )
+    (tmp_path / ".venv").mkdir()
+    (tmp_path / ".venv" / "vendor.min.js").write_text(
+        "import { cartTotal } from '../src/cart.js'; cartTotal();\n",
+        encoding="utf-8",
+    )
+    subprocess.run(
+        ["git", "add", ".gitignore", "tsconfig.json", "src/cart.ts"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    diff = parse_unified_diff(
+        """diff --git a/src/cart.ts b/src/cart.ts
+index 1111111..2222222 100644
+--- a/src/cart.ts
++++ b/src/cart.ts
+@@ -1,3 +1,3 @@
+ export function cartTotal(): number {
+-  return 0;
++  return 1;
+ }
+""",
+        TargetMode.PATCH,
+    )
+    diff = classify_diff(diff, ignore_patterns=[])
+
+    result = run_typescript_analyzer(tmp_path, diff.files)
+
+    assert result is not None and result.index_cache is not None
+    assert result.index_cache.files == 2
+    references = result.files[0].changed_symbols[0].references
+    assert any(reference.file == "src/consumer.ts" and "cartTotal()" in reference.text for reference in references)
+    assert all(not reference.file.startswith(".venv/") for reference in references)
 
 
 def test_typescript_analyzer_can_store_repo_index_cache_outside_repo(
@@ -6297,6 +6360,95 @@ def test_context_pack_risk_signals_are_localized_to_symbol_ranges() -> None:
     localized = _risk_signals_for_symbols(changed_file, [symbol])
 
     assert [signal.kind for signal in localized] == ["auth"]
+
+
+def test_file_level_risk_tags_scope_every_symbol_pack_to_focused_reviewer() -> None:
+    changed_file = ChangedFile(
+        old_path="src/settlement.ts",
+        new_path="src/settlement.ts",
+        file_kind=FileKind.SOURCE,
+        risk_signals=[
+            RiskSignal(
+                kind="policy:money-movement",
+                severity=RiskSeverity.CRITICAL,
+                reason="Money movement boundary.",
+                file="src/settlement.ts",
+                source="project",
+                reviewer_tags=["finance"],
+            )
+        ],
+    )
+    result = AnalyzerResult(
+        language="typescript",
+        projectRoot="/repo",
+        files=[
+            AnalyzerFile(
+                path="src/settlement.ts",
+                changedSymbols=[
+                    AnalyzerSymbol(
+                        name=f"operation{index}",
+                        kind="function",
+                        startLine=index * 10 + 1,
+                        endLine=index * 10 + 4,
+                    )
+                    for index in range(25)
+                ],
+            )
+        ],
+    )
+    reviewer = ReviewerConfig(id="finance", risk_tags=["finance"])
+
+    packs = build_context_packs([result], [changed_file], ReviewConfig())
+
+    assert len(packs) > 1
+    assert all(reviewer_matches_pack(reviewer, pack) for pack in packs)
+    assert all(pack.risk_signals[0].reviewer_tags == ["finance"] for pack in packs)
+
+
+def test_deleted_line_project_risk_uses_current_file_anchor_for_symbol_localization() -> None:
+    diff = parse_unified_diff(
+        """diff --git a/src/payments.ts b/src/payments.ts
+--- a/src/payments.ts
++++ b/src/payments.ts
+@@ -1,12 +1,3 @@
+ export function settle(): boolean {
+-  const obsolete1 = true;
+-  const obsolete2 = true;
+-  const obsolete3 = true;
+-  const obsolete4 = true;
+-  const obsolete5 = true;
+-  const obsolete6 = true;
+-  const obsolete7 = true;
+-  const obsolete8 = true;
+-  if (!authorized) throw new Error("denied");
+   return true;
+ }
+""",
+        TargetMode.PATCH,
+    )
+    classified = classify_diff(
+        diff,
+        ignore_patterns=[],
+        risk=RiskConfig(
+            built_in_enabled=False,
+            rules=[
+                RiskRule(
+                    id="authorization-removal",
+                    severity=RiskSeverity.CRITICAL,
+                    text=["authorized"],
+                    reviewer_tags=["security"],
+                )
+            ],
+        ),
+    )
+    changed_file = classified.files[0]
+    symbol = AnalyzerSymbol(name="settle", kind="function", startLine=1, endLine=3)
+
+    localized = _risk_signals_for_symbols(changed_file, [symbol])
+
+    assert changed_file.risk_signals[0].line == 2
+    assert [signal.kind for signal in localized] == ["policy:authorization-removal"]
+    assert localized[0].reviewer_tags == ["security"]
 
 
 def test_symbolized_source_pack_retains_file_level_risk_once() -> None:

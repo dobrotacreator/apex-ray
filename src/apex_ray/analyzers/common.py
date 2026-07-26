@@ -39,6 +39,9 @@ def run_analyzers(
     repo_root: Path,
     files: list[ChangedFile],
     config: AnalyzerConfig | None = None,
+    *,
+    ignored_patterns: list[str] | None = None,
+    project_files: list[Path] | None = None,
 ) -> AnalyzerRun:
     config = config or AnalyzerConfig()
     results: list[AnalyzerResult] = []
@@ -46,7 +49,7 @@ def run_analyzers(
     warnings: list[str] = []
     backend_runs: list[AnalyzerBackendRun] = []
 
-    for backend in _analyzer_backends():
+    for backend in _analyzer_backends(ignored_patterns, project_files):
         backend_changed_files = backend.changed_files(files)
         if not backend_changed_files:
             backend_runs.append(
@@ -105,7 +108,10 @@ def run_analyzers(
     )
 
 
-def _analyzer_backends() -> list[_AnalyzerBackend]:
+def _analyzer_backends(
+    ignored_patterns: list[str] | None = None,
+    project_files: list[Path] | None = None,
+) -> list[_AnalyzerBackend]:
     from apex_ray import analyzers
 
     return [
@@ -113,7 +119,13 @@ def _analyzer_backends() -> list[_AnalyzerBackend]:
             name="typescript",
             display_name="TypeScript",
             changed_files=analyzers.ts_js_changed_files,
-            run=analyzers.run_typescript_analyzer,
+            run=lambda root, files, config: analyzers.run_typescript_analyzer(
+                root,
+                files,
+                config,
+                ignored_patterns=ignored_patterns,
+                project_files=project_files,
+            ),
             partial_fallback_reason="TypeScript analyzer shard failed; using diff-only fallback context.",
         ),
         _AnalyzerBackend(

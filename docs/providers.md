@@ -2,7 +2,15 @@
 
 Apex Ray can run without LLM review. In that mode it still builds context packs and reports coverage, risk signals, and review surfaces.
 
-Apex Ray supports Codex CLI and Claude Code CLI as local providers:
+Apex Ray supports subscription-backed local CLIs and direct API providers:
+
+- `codex_cli` and `claude_code_cli`;
+- `openai_api` and `anthropic_api`;
+- `deepseek_api`, `qwen_api`, `kimi_api`, and `zai_api`;
+- `openai_compatible` for an explicitly configured OpenAI Responses, Anthropic
+  Messages, or OpenAI-compatible Chat Completions endpoint.
+
+Local CLI example:
 
 ```yaml
 review:
@@ -16,6 +24,132 @@ review:
 ```
 
 Put shared provider policy in `.apex-ray/config.yml` only when the whole team can use it. Put personal model IDs, executable paths, job counts, timeouts, and token budgets in `.apex-ray/config.local.yml`.
+
+## Direct API Providers
+
+API keys are read only from environment variables. Apex Ray does not accept a
+key value in YAML or on the command line.
+LLM cache keys include one-way identities for the resolved endpoint,
+credential, and custom header values, so rotating credentials or switching
+tenants cannot reuse another API identity's cached review. Raw values are
+never written to cache metadata.
+
+OpenAI Responses API:
+
+```yaml
+review:
+  llm:
+    enabled: true
+    provider: openai_api
+    model: gpt-5.6-sol
+    effort: medium
+    api:
+      api_key_env: OPENAI_API_KEY
+      max_output_tokens: 4096
+      max_retries: 2
+```
+
+The native OpenAI provider always sends `store: false`, so review source is
+not retained as Responses application state. This does not override the
+account's abuse-monitoring policy; OpenAI documents the applicable retention
+and Zero Data Retention controls in its
+[data controls guide](https://developers.openai.com/api/docs/guides/your-data).
+
+Native Anthropic Messages API:
+
+```yaml
+review:
+  llm:
+    enabled: true
+    provider: anthropic_api
+    model: claude-sonnet-5
+    effort: medium
+    api:
+      api_key_env: ANTHROPIC_API_KEY
+      max_output_tokens: 4096
+```
+
+Anthropic API effort levels are passed through as
+`low`/`medium`/`high`/`xhigh`/`max`; Apex Ray maps its portable `minimal`
+level to Anthropic's `low`.
+
+The built-in API providers pin their documented service hosts, use native
+structured output where the provider supports it, normalize usage metadata,
+honor `Retry-After`, and retry only transient network/rate-limit/server
+failures. Authentication, quota, refusal, truncation, and malformed-output
+failures remain distinct in reports and gates.
+
+The Chinese flagship presets use OpenAI-compatible transports with their
+provider-specific endpoint, key variable, structured-output capability, and
+reasoning controls:
+
+| Provider | Config value | Default key variable | Current flagship model example (July 2026) |
+|---|---|---|---|
+| DeepSeek | `deepseek_api` | `DEEPSEEK_API_KEY` | `deepseek-v4-pro` |
+| Alibaba Qwen/DashScope | `qwen_api` | `DASHSCOPE_API_KEY` | `qwen3.7-max` |
+| Moonshot Kimi | `kimi_api` | `MOONSHOT_API_KEY` | `kimi-k3` |
+| Z.ai GLM | `zai_api` | `ZAI_API_KEY` | `glm-5.2` |
+
+Model catalogs change faster than Apex Ray releases. Treat these as examples,
+confirm the model ID in the provider's current documentation, and set it
+explicitly. A provider preset never silently substitutes a model.
+See the official [DeepSeek](https://api-docs.deepseek.com/quick_start/pricing),
+[Qwen](https://help.aliyun.com/en/model-studio/text-generation-model/),
+[Kimi](https://platform.kimi.ai/docs/api/chat), and
+[Z.ai](https://docs.z.ai/guides/overview/overview) catalogs.
+
+`effort` is translated conservatively to each Chat Completions dialect:
+DeepSeek uses its documented `high`/`max` levels, Qwen uses the thinking
+toggle, Kimi K3 maps to `low`/`high`/`max` while K2 models use their thinking
+toggle, and GLM 5.2 receives a reasoning level while older GLM models receive
+only the supported toggle.
+
+```yaml
+review:
+  llm:
+    enabled: true
+    provider: deepseek_api
+    model: deepseek-v4-pro
+    effort: medium
+    api:
+      api_key_env: DEEPSEEK_API_KEY
+```
+
+## Custom Compatible Endpoints
+
+Custom endpoints require an explicit protocol and structured-output mode:
+
+```yaml
+review:
+  llm:
+    enabled: true
+    provider: openai_compatible
+    model: company-review-model
+    api:
+      protocol: openai_chat
+      structured_output: json_schema
+      base_url_env: COMPANY_LLM_BASE_URL
+      api_key_env: COMPANY_LLM_API_KEY
+      allowed_hosts_env: APEX_RAY_API_ALLOWED_HOSTS
+      headers_from_env:
+        X-Tenant-ID: COMPANY_LLM_TENANT
+```
+
+Supported protocols are `openai_responses`, `anthropic_messages`, and
+`openai_chat`. Supported output modes are `json_schema`, `json_object`, and
+`prompt_only`; prefer `json_schema` when the endpoint implements it.
+
+HTTPS is mandatory except for loopback integration tests. Redirects are not
+followed, credentials cannot appear in the URL, reserved authentication
+headers cannot be overridden, and response bodies are size-limited. In CI, a
+custom endpoint must come from `base_url_env` and its normalized hostname must
+also appear in the CI-controlled allowlist variable. For example:
+
+```yaml
+env:
+  COMPANY_LLM_BASE_URL: https://llm.example.internal/v1
+  APEX_RAY_API_ALLOWED_HOSTS: llm.example.internal
+```
 
 ## Provider Setup Checklist
 
@@ -61,8 +195,10 @@ review:
         model: "<cheap-codex-model>"
         effort: low
       strong:
-        provider: claude_code_cli
-        model: "<strong-claude-model-or-alias>"
+        provider: openai_api
+        model: gpt-5.6-sol
+        api:
+          api_key_env: OPENAI_API_KEY
         effort: medium
     routing:
       review_profile: cheap
@@ -77,13 +213,26 @@ review:
 
 Do not use near-sunset model IDs in shared defaults. Team members can override provider choice, executable paths, jobs, timeout, token budget, reasoning effort, and model cost locally in `.apex-ray/config.local.yml`.
 
-Codex and Claude can be used in the same project by assigning different providers to routing profiles. Keep shared config focused on team review policy; put personal provider/model choices in local config when team members have different CLI subscriptions or credentials.
+CLI subscriptions and APIs can be mixed in the same project by assigning
+different providers to routing profiles. A profile may override its `api`
+configuration. When a profile changes the provider, unspecified API settings
+start from that provider's safe defaults instead of inheriting another
+provider's endpoint or credential environment variables. Keep shared config
+focused on team review policy; put personal provider/model choices in local
+config when team members have different subscriptions or credentials.
 
 `effort` maps to Codex CLI `model_reasoning_effort` (`low`, `medium`, `high`, `xhigh`) and Claude Code CLI `--effort` (`low`, `medium`, `high`, `xhigh`, `max`). Configure it at `review.llm.effort` for the default route or inside each profile for routed review/verify calls.
 
-Both providers receive Apex Ray's generated context pack through stdin and must return JSON matching Apex Ray's schema. Claude Code runs with tools disabled for these provider calls; review context comes from Apex Ray, not from letting the provider inspect or edit the repository directly.
+CLI providers receive Apex Ray's generated context pack through stdin; API
+providers receive the same bounded prompt in the request body. Claude Code
+runs with tools disabled for these calls. Review context comes from Apex Ray,
+not from letting a provider inspect or edit the repository directly.
 
-Apex Ray records provider-reported usage when the CLI exposes it. Claude Code JSON output can include token usage and estimated cost metadata. Codex CLI JSON events can include token count events in supported versions. If provider usage is absent, reports and telemetry still include Apex Ray's estimated input-token counts.
+Apex Ray records provider-reported usage when available. Direct APIs normalize
+input, cached-input, output, reasoning, cache-read, and cache-creation tokens.
+If provider usage is absent, reports and telemetry retain a conservative,
+provider-aware input estimate. The configured token budget is a preflight
+guard; provider-reported usage remains the accounting source of truth.
 
 ## Disable LLM Locally
 
@@ -103,7 +252,11 @@ apex-ray review --worktree --no-llm
 
 ## Privacy And Cost
 
-With `--llm`, Apex Ray sends selected diff and context-pack content to the configured local CLI provider. Review that provider's privacy and retention policy before using Apex Ray on private code.
+With `--llm`, Apex Ray sends selected diff and context-pack content to the
+configured CLI or API provider. Review that provider's privacy, data
+residency, training, and retention policy before using Apex Ray on private
+code. Never commit keys, tenant headers, literal private endpoints, or local
+provider overrides.
 
 Use routing profiles when you want cheaper broad review and stronger verification:
 

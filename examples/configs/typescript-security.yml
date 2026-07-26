@@ -1,0 +1,150 @@
+# Security-heavy TypeScript review. Keep the broad correctness pass bounded;
+# the deeper security pass runs only where built-in or project risk tags match.
+review:
+  base: main
+  ignore:
+    - "**/*.lock"
+    - "**/generated/**"
+    - "**/dist/**"
+    - "**/build/**"
+    - "**/coverage/**"
+    - "**/node_modules/**"
+  local_data:
+    root: git_common
+  analyzer:
+    index_cache_enabled: true
+    adaptive_sharding: true
+  risk:
+    built_in_enabled: true
+    rules:
+      - id: identity-and-session
+        title: Identity, session, and authorization state
+        severity: critical
+        score: 100
+        paths:
+          - "src/auth/**"
+          - "src/identity/**"
+          - "src/session/**"
+          - "src/permissions/**"
+        exclude_paths:
+          - "**/*.test.ts"
+          - "**/*.spec.ts"
+        languages: [typescript, javascript]
+        file_kinds: [source]
+        categories: [security, identity]
+        reviewer_tags: [security-critical]
+        guidance: Prove identity binding, authorization order, revocation, expiry, and tenant isolation remain fail-closed.
+      - id: untrusted-input-boundary
+        title: Untrusted input reaches an external or privileged boundary
+        severity: high
+        score: 90
+        paths:
+          - "src/api/**"
+          - "src/webhooks/**"
+          - "src/uploads/**"
+          - "src/integrations/**"
+        exclude_paths:
+          - "**/*.test.ts"
+          - "**/*.spec.ts"
+        languages: [typescript, javascript]
+        file_kinds: [source]
+        risk: [external_io, shell]
+        categories: [security, input-validation]
+        reviewer_tags: [security-critical]
+        guidance: Trace validation and canonicalization through to the sink; check SSRF, injection, replay, and signature verification.
+      - id: ci-and-release-trust
+        title: CI and release trust boundary
+        severity: high
+        score: 88
+        paths:
+          - ".github/workflows/**"
+          - ".github/actions/**"
+          - "scripts/release/**"
+        file_kinds: [config, source]
+        categories: [security, supply-chain]
+        reviewer_tags: [security-critical]
+        guidance: Check untrusted event data, token permissions, secret exposure, immutable action pins, and artifact provenance.
+  llm:
+    enabled: true
+    provider: codex_cli
+    profiles:
+      broad:
+        provider: codex_cli
+        model: gpt-5.6-terra
+        effort: low
+      security:
+        provider: codex_cli
+        model: gpt-5.6-sol
+        effort: high
+      verify:
+        provider: codex_cli
+        model: gpt-5.6-sol
+        effort: medium
+    routing:
+      review_profile: broad
+      verify_profile: verify
+      escalated_review_profile: security
+      escalated_verify_profile: security
+      escalate_review_when:
+        risk: [auth, shell, external_io]
+        rule_severity: [high, critical]
+        strict_rule: true
+      escalate_verify_when:
+        finding_severity: [medium, high, critical]
+        finding_confidence: [low, medium]
+    coverage_mode: balanced
+    max_packs: 44
+    max_deep_packs: 16
+    max_input_tokens: 180000
+    timeout_seconds: 900
+    jobs: 2
+    max_consecutive_provider_failures: 3
+    verify: true
+    cache_dir: ${local_data}/cache/llm
+  reviewers:
+    - id: correctness
+      name: Correctness
+      focus: Concrete behavioral regressions, broken contracts, and error-handling failures.
+      profile: broad
+      verify_profile: verify
+      review_depth: balanced
+      max_packs: 30
+      max_deep_packs: 8
+      max_input_tokens: 100000
+      verify: true
+      required: true
+    - id: security
+      name: Security
+      focus: Exploitable authentication, authorization, injection, supply-chain, secrets, and trust-boundary failures.
+      instructions:
+        - Follow attacker-controlled data to the privileged operation.
+        - State the violated boundary and a realistic exploitation precondition.
+        - Do not report defense-in-depth suggestions as defects.
+      risk: [auth, shell, external_io]
+      risk_tags: [security-critical]
+      profile: security
+      verify_profile: security
+      review_depth: deep
+      max_packs: 14
+      max_deep_packs: 14
+      max_input_tokens: 80000
+      verify: true
+  telemetry:
+    enabled: true
+    path: ${local_data}/telemetry/review-runs.jsonl
+    path_mode: anonymized
+  reports:
+    archive: true
+    archive_dir: ${local_data}/reports/runs
+    retention: 20
+    compression: auto
+  gates:
+    pre_push:
+      enabled: true
+      min_finding_severity: high
+      require_verified_findings: true
+      fail_on_quality_gate: true
+      fail_on_partial_severity: critical
+      auto_followup_p0: true
+      incremental_retry:
+        enabled: true

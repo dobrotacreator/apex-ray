@@ -52,7 +52,7 @@ export function analyze(args: Args): AnalyzerResult {
   const warnings: string[] = [];
   const budgetExhausted = analysisBudget(args.analysisTimeBudgetMs);
   const contextsByFile = createProgramContexts(args, warnings);
-  const repoIndex = buildRepoIndex(args);
+  const repoIndex = buildRepoIndex(args, warnings);
   const syntheticReferenceScanCache = new Map<string, ReferenceScanResult>();
   const failedFileSet = new Set<string>();
   const failedFiles: string[] = [];

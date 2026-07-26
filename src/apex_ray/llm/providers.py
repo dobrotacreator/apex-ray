@@ -1,10 +1,11 @@
 import json
 import subprocess
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Protocol, cast
 
+from apex_ray.llm.api import APILLMProvider
 from apex_ray.llm.cli import (
     build_claude_command,
     build_codex_command,
@@ -13,6 +14,7 @@ from apex_ray.llm.cli import (
     resolve_codex_path,
 )
 from apex_ray.llm.errors import LLMProviderError
+from apex_ray.llm.http import JSONTransport
 from apex_ray.llm.prompts import (
     build_resolution_prompt,
     build_review_prompt,
@@ -377,13 +379,36 @@ class ClaudeCodeCLIProvider:
             return parse_resolution_response(response_text, finding)
 
 
-def provider_from_config(config: LLMConfig) -> LLMProvider:
+def provider_from_config(
+    config: LLMConfig,
+    *,
+    api_transport: JSONTransport | None = None,
+    environment: Mapping[str, str] | None = None,
+    sleep_fn: Callable[[float], None] | None = None,
+) -> LLMProvider:
     if config.provider == LLMProviderName.FAKE:
         return FakeLLMProvider()
     if config.provider == LLMProviderName.CODEX_CLI:
         return CodexCLIProvider(config)
     if config.provider == LLMProviderName.CLAUDE_CODE_CLI:
         return ClaudeCodeCLIProvider(config)
+    if config.provider in {
+        LLMProviderName.OPENAI_API,
+        LLMProviderName.ANTHROPIC_API,
+        LLMProviderName.DEEPSEEK_API,
+        LLMProviderName.QWEN_API,
+        LLMProviderName.KIMI_API,
+        LLMProviderName.ZAI_API,
+        LLMProviderName.OPENAI_COMPATIBLE,
+    }:
+        if sleep_fn is None:
+            return APILLMProvider(config, transport=api_transport, environment=environment)
+        return APILLMProvider(
+            config,
+            transport=api_transport,
+            environment=environment,
+            sleep_fn=sleep_fn,
+        )
     raise LLMProviderError(f"Unsupported LLM provider: {config.provider}")
 
 

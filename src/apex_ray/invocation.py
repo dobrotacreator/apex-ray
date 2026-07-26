@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from apex_ray.models import (
+    LLMAPIConfig,
     LLMCoverageMode,
     LLMProviderName,
     LLMRoutingConfig,
@@ -36,14 +37,30 @@ def apply_review_overrides(config: ReviewConfig, overrides: ReviewOverrides) -> 
     if overrides.llm_enabled is not None:
         effective.llm.enabled = overrides.llm_enabled
     if overrides.provider is not None:
+        inherited_provider = effective.llm.provider
         effective.llm.provider = overrides.provider
+        if inherited_provider != overrides.provider:
+            effective.llm.api = LLMAPIConfig()
+        for profile in effective.llm.profiles.values():
+            profile_provider = profile.provider or inherited_provider
+            profile.provider = overrides.provider
+            if profile_provider != overrides.provider:
+                profile.api = None
     if overrides.model is not None:
         effective.llm.model = overrides.model
         if overrides.clear_routing_on_model:
             effective.llm.profiles = {}
             effective.llm.routing = LLMRoutingConfig()
+            for reviewer in effective.reviewers:
+                reviewer.profile = None
+                reviewer.verify_profile = None
+            for rule in effective.rule_definitions:
+                rule.model = None
+                rule.verify = None
     if overrides.verify is not None:
         effective.llm.verify = overrides.verify
+        for reviewer in effective.reviewers:
+            reviewer.verify = overrides.verify
     if overrides.cache_allowed is not None:
         effective.llm.cache_enabled = overrides.cache_allowed and effective.llm.cache_enabled
     if overrides.refresh_cache:
@@ -56,10 +73,16 @@ def apply_review_overrides(config: ReviewConfig, overrides: ReviewOverrides) -> 
         effective.llm.jobs = overrides.llm_jobs
     if overrides.coverage_mode is not None:
         effective.llm.coverage_mode = overrides.coverage_mode
+        for reviewer in effective.reviewers:
+            reviewer.coverage_mode = overrides.coverage_mode
     if overrides.max_deep_packs is not None:
         effective.llm.max_deep_packs = overrides.max_deep_packs
+        for reviewer in effective.reviewers:
+            reviewer.max_deep_packs = overrides.max_deep_packs
     if overrides.max_input_tokens is not None:
         effective.llm.max_input_tokens = overrides.max_input_tokens
+        for reviewer in effective.reviewers:
+            reviewer.max_input_tokens = overrides.max_input_tokens
     if overrides.analyzer_cache_allowed is not None:
         effective.analyzer.index_cache_enabled = (
             overrides.analyzer_cache_allowed and effective.analyzer.index_cache_enabled

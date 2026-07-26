@@ -5,12 +5,12 @@ from typing import Literal
 from apex_ray.llm.usage import aggregate_actual_usage
 from apex_ray.models import (
     ContextPack,
-    FileKind,
     LLMContextSelection,
     LLMCoverageSummary,
     LLMCoverageTodo,
     LLMPackReviewStatus,
     LLMResidualRiskSummary,
+    LLMReviewerCoverageSummary,
     LLMRouteSummary,
     LLMRun,
     ReviewConfig,
@@ -25,12 +25,17 @@ from apex_ray.report.coverage_breakdown import (
     _pack_scope,
     _pack_symbol_names,
     _source_line_coverage_ratio,
+    pack_residual_priority,
 )
 from apex_ray.report.coverage_breakdown import (
     _format_pack_symbols as _format_pack_symbols,
 )
 from apex_ray.report.coverage_breakdown import (
     _line_range_count as _line_range_count,
+)
+from apex_ray.report.run_state import (
+    EffectiveLLMPackRunState,
+    reduce_llm_pack_run_states,
 )
 
 
@@ -39,18 +44,56 @@ def _build_llm_coverage(
     context_packs: list[ContextPack],
     llm_runs: list[LLMRun],
     llm_selection: LLMContextSelection | None = None,
+    reviewer_selections: dict[str, LLMContextSelection] | None = None,
 ) -> LLMCoverageSummary:
+    if llm_selection is not None:
+        scoped_pack_ids = set(llm_selection.total_context_pack_ids)
+        context_packs = [pack for pack in context_packs if pack.id in scoped_pack_ids]
     review_runs = [run for run in llm_runs if run.kind in {"review", "review_shallow"}]
-    deep_review_runs = [run for run in llm_runs if run.kind == "review"]
-    shallow_review_runs = [run for run in llm_runs if run.kind == "review_shallow"]
     verify_runs = [run for run in llm_runs if run.kind == "verify"]
-    successful_review_runs = [run for run in review_runs if run.status == "ok"]
     failed_review_runs = [run for run in review_runs if run.status != "ok"]
     failed_verify_runs = [run for run in verify_runs if run.status != "ok"]
+    effective_run_states = reduce_llm_pack_run_states(llm_runs)
+    current_reviewer_selections = reviewer_selections or {}
+    configured_reviewer_ids = (
+        {reviewer.id for reviewer in config.reviewers if reviewer.enabled} if config.reviewers else None
+    )
+    scoped_effective_run_states = {
+        key: state
+        for key, state in effective_run_states.items()
+        if _run_state_in_reviewer_scope(
+            state,
+            current_reviewer_selections,
+            configured_reviewer_ids,
+        )
+    }
+    effective_review_runs = [state.review for state in scoped_effective_run_states.values() if state.review is not None]
+    effective_verify_runs = [
+        run
+        for state in scoped_effective_run_states.values()
+        if _reviewer_verify_enabled(config, state.reviewer_id)
+        for run in state.verify_runs
+    ]
+    successful_review_runs = [run for run in effective_review_runs if run.status == "ok"]
+    active_failed_review_runs = [run for run in effective_review_runs if run.status != "ok"]
+    active_failed_verify_runs = [run for run in effective_verify_runs if run.status != "ok"]
+    reviewer_coverage = _build_reviewer_coverage(
+        config,
+        current_reviewer_selections,
+        llm_runs,
+        scoped_effective_run_states,
+    )
+    effective_verify_enabled = (
+        any(reviewer.verify_enabled for reviewer in reviewer_coverage) if reviewer_coverage else config.llm.verify
+    )
     reviewed_ids = {run.context_pack_id for run in successful_review_runs}
-    deep_reviewed_ids = {run.context_pack_id for run in deep_review_runs if run.status == "ok"}
-    shallow_reviewed_ids = {run.context_pack_id for run in shallow_review_runs if run.status == "ok"}
-    failed_review_by_pack_id = {run.context_pack_id: run for run in failed_review_runs}
+    deep_reviewed_ids = {
+        run.context_pack_id for run in effective_review_runs if run.kind == "review" and run.status == "ok"
+    }
+    shallow_reviewed_ids = {
+        run.context_pack_id for run in effective_review_runs if run.kind == "review_shallow" and run.status == "ok"
+    }
+    failed_review_by_pack_id = {run.context_pack_id: run for run in active_failed_review_runs}
     reviewed_pack_ids = [pack.id for pack in context_packs if pack.id in reviewed_ids]
     unreviewed_pack_ids = [pack.id for pack in context_packs if pack.id not in reviewed_ids]
     over_budget_pack_ids = [
@@ -120,12 +163,23 @@ def _build_llm_coverage(
         residual_p0_count=len(residual_p0_ids),
         residual_p1_count=len(residual_p1_ids),
         shallow_only_high_risk_count=len(shallow_only_high_risk_ids),
-        failed_review_runs=len(failed_review_runs),
-        failed_verify_runs=len(failed_verify_runs),
-        failed_review_status_counts=dict(sorted(Counter(run.status for run in failed_review_runs).items())),
-        failed_verify_status_counts=dict(sorted(Counter(run.status for run in failed_verify_runs).items())),
+        failed_review_runs=len(active_failed_review_runs),
+        failed_verify_runs=len(active_failed_verify_runs),
+        failed_review_status_counts=dict(sorted(Counter(run.status for run in active_failed_review_runs).items())),
+        failed_verify_status_counts=dict(sorted(Counter(run.status for run in active_failed_verify_runs).items())),
         unreviewed_count=len(unreviewed_pack_ids),
     )
+    required_reviewer_failures = [
+        reason
+        for reviewer in reviewer_coverage
+        if reviewer.required and reviewer.status == "fail"
+        for reason in reviewer.reasons
+    ]
+    if required_reviewer_failures:
+        quality_gate_status = "fail"
+        quality_gate_reasons = [*quality_gate_reasons, *required_reviewer_failures]
+        partial_severity = "critical"
+        partial_reasons = [*partial_reasons, *required_reviewer_failures]
     pack_statuses = _build_pack_statuses(
         context_packs,
         reviewed_ids,
@@ -135,17 +189,48 @@ def _build_llm_coverage(
         residual_risks,
         failed_review_by_pack_id,
     )
-    coverage_todos = _build_coverage_todos(residual_risks, context_packs)
+    reviewer_coverage_todos = _build_reviewer_coverage_todos(
+        reviewer_coverage,
+        context_packs,
+        scoped_effective_run_states,
+    )
+    reviewer_debt_pack_ids = {todo.context_pack_id for todo in reviewer_coverage_todos}
+    coverage_todos = [
+        *(
+            todo
+            for todo in _build_coverage_todos(residual_risks, context_packs)
+            if todo.context_pack_id not in reviewer_debt_pack_ids
+        ),
+        *reviewer_coverage_todos,
+    ]
+    coverage_todos.sort(
+        key=lambda todo: (
+            {"p0": 0, "p1": 1, "p2": 2}.get(todo.priority, 9),
+            todo.reviewer_id or "",
+            todo.file,
+            todo.context_pack_id,
+        )
+    )
 
-    routes: dict[tuple[str, str, str | None, str | None, str | None, str | None, str], LLMRouteSummary] = {}
+    routes: dict[tuple[str, str, str, str | None, str | None, str | None, str | None, str], LLMRouteSummary] = {}
     for run in llm_runs:
         cache_hits = _run_cache_hits(run)
         cache_misses = _run_cache_misses(run)
-        key = (run.kind, run.provider, run.model, run.effort, run.profile, run.route_reason, run.status)
+        key = (
+            run.kind,
+            run.reviewer_id,
+            run.provider,
+            run.model,
+            run.effort,
+            run.profile,
+            run.route_reason,
+            run.status,
+        )
         route = routes.get(key)
         if route is None:
             route = LLMRouteSummary(
                 kind=run.kind,
+                reviewer_id=run.reviewer_id,
                 provider=run.provider,
                 model=run.model,
                 effort=run.effort,
@@ -178,7 +263,7 @@ def _build_llm_coverage(
     usage_totals = aggregate_actual_usage(llm_runs)
     return LLMCoverageSummary(
         enabled=config.llm.enabled,
-        verify_enabled=config.llm.verify,
+        verify_enabled=effective_verify_enabled,
         max_packs=config.llm.max_packs,
         coverage_mode=config.llm.coverage_mode,
         max_deep_packs=config.llm.max_deep_packs,
@@ -219,6 +304,7 @@ def _build_llm_coverage(
         residual_risk_context_packs=residual_risks,
         file_coverage=file_coverage,
         slice_coverage=slice_coverage,
+        reviewers=reviewer_coverage,
         cluster_context_packs=sum(1 for pack in context_packs if _pack_scope(pack) == "cluster"),
         file_context_packs=sum(1 for pack in context_packs if _pack_scope(pack) == "file"),
         symbol_context_packs=sum(1 for pack in context_packs if _pack_scope(pack) == "symbol"),
@@ -247,6 +333,113 @@ def _build_llm_coverage(
             ),
         ),
     )
+
+
+def _build_reviewer_coverage(
+    config: ReviewConfig,
+    reviewer_selections: dict[str, LLMContextSelection],
+    llm_runs: list[LLMRun],
+    effective_run_states: dict[tuple[str, str], EffectiveLLMPackRunState],
+) -> list[LLMReviewerCoverageSummary]:
+    configured = {reviewer.id: reviewer for reviewer in config.reviewers}
+    summaries: list[LLMReviewerCoverageSummary] = []
+    for reviewer_id, selection in reviewer_selections.items():
+        reviewer = configured.get(reviewer_id)
+        required = reviewer.required if reviewer is not None else False
+        verify_enabled = reviewer.verify if reviewer is not None and reviewer.verify is not None else config.llm.verify
+        runs = [run for run in llm_runs if run.reviewer_id == reviewer_id]
+        review_runs = [run for run in runs if run.kind in {"review", "review_shallow"}]
+        verify_runs = [run for run in runs if run.kind == "verify"]
+        reviewer_states = [
+            state
+            for (state_reviewer_id, _pack_id), state in effective_run_states.items()
+            if state_reviewer_id == reviewer_id
+        ]
+        effective_review_runs = [state.review for state in reviewer_states if state.review is not None]
+        effective_verify_runs = (
+            [run for state in reviewer_states for run in state.verify_runs] if verify_enabled else []
+        )
+        reviewed = {
+            run.context_pack_id
+            for run in effective_review_runs
+            if run.status == "ok" and run.context_pack_id is not None
+        }
+        matching_ids = list(selection.total_context_pack_ids)
+        selected_ids = list(selection.selected_context_pack_ids)
+        reviewed_ids = [pack_id for pack_id in matching_ids if pack_id in reviewed]
+        missing_ids = [pack_id for pack_id in selected_ids if pack_id not in reviewed]
+        active_failed_verify_runs = [run for run in effective_verify_runs if run.status != "ok"]
+        failed_review_runs = [run for run in review_runs if run.status != "ok"]
+        failed_verify_runs = [run for run in verify_runs if run.status != "ok"]
+        reasons: list[str] = []
+        if matching_ids and not selected_ids:
+            reasons.append(
+                f"{'Required reviewer' if required else 'Reviewer'} {reviewer_id} selected no "
+                f"context packs from {len(matching_ids)} matching pack(s)."
+            )
+        elif missing_ids:
+            reasons.append(
+                f"{'Required reviewer' if required else 'Reviewer'} {reviewer_id} did not review "
+                f"{len(missing_ids)} of {len(selected_ids)} selected context pack(s)."
+            )
+        if active_failed_verify_runs:
+            reasons.append(
+                f"{'Required reviewer' if required else 'Reviewer'} {reviewer_id} had "
+                f"{len(active_failed_verify_runs)} failed verification run(s)."
+            )
+        if not matching_ids:
+            status: Literal["not_applicable", "pass", "warn", "fail"] = "not_applicable"
+        elif reasons:
+            status = "fail" if required else "warn"
+        else:
+            status = "pass"
+        usage = aggregate_actual_usage(runs)
+        summaries.append(
+            LLMReviewerCoverageSummary(
+                reviewer_id=reviewer_id,
+                required=required,
+                verify_enabled=verify_enabled,
+                status=status,
+                reasons=reasons,
+                matching_context_packs=len(matching_ids),
+                selected_context_packs=len(selected_ids),
+                reviewed_context_packs=len(reviewed_ids),
+                failed_review_runs=len(failed_review_runs),
+                failed_verify_runs=len(failed_verify_runs),
+                matching_context_pack_ids=matching_ids,
+                selected_context_pack_ids=selected_ids,
+                reviewed_context_pack_ids=reviewed_ids,
+                estimated_input_tokens=sum(run.estimated_input_tokens for run in runs),
+                actual_total_tokens=usage["actual_total_tokens"],
+                estimated_cost_usd=usage["estimated_cost_usd"],
+            )
+        )
+    return summaries
+
+
+def _reviewer_verify_enabled(config: ReviewConfig, reviewer_id: str) -> bool:
+    reviewer = next(
+        (candidate for candidate in config.reviewers if candidate.id == reviewer_id),
+        None,
+    )
+    if reviewer is not None and reviewer.verify is not None:
+        return reviewer.verify
+    return config.llm.verify
+
+
+def _run_state_in_reviewer_scope(
+    state: EffectiveLLMPackRunState,
+    reviewer_selections: dict[str, LLMContextSelection],
+    configured_reviewer_ids: set[str] | None,
+) -> bool:
+    selection = reviewer_selections.get(state.reviewer_id)
+    if selection is not None:
+        return state.context_pack_id in selection.total_context_pack_ids
+    if reviewer_selections:
+        return False
+    if configured_reviewer_ids is not None:
+        return state.reviewer_id in configured_reviewer_ids
+    return True
 
 
 def _run_cache_hits(run: LLMRun) -> int:
@@ -389,7 +582,7 @@ def _residual_risk_summary(pack: ContextPack, reason: str) -> LLMResidualRiskSum
     risk_by_severity = _pack_risk_by_severity(pack)
     rule_modes = Counter(str(rule.mode) for rule in pack.rule_matches)
     rule_severities = Counter(str(rule.severity) for rule in pack.rule_matches)
-    priority = _residual_priority(pack, risk_by_severity, rule_modes, rule_severities)
+    priority = pack_residual_priority(pack)
     return LLMResidualRiskSummary(
         context_pack_id=pack.id,
         file=pack.file,
@@ -402,28 +595,6 @@ def _residual_risk_summary(pack: ContextPack, reason: str) -> LLMResidualRiskSum
         estimated_chars=pack.stats.estimated_chars,
         truncated=pack.stats.truncated,
     )
-
-
-def _residual_priority(
-    pack: ContextPack,
-    risk_by_severity: Counter[str],
-    rule_modes: Counter[str],
-    rule_severities: Counter[str],
-) -> str:
-    if (
-        risk_by_severity.get("high", 0)
-        or rule_modes.get("strict", 0)
-        or rule_severities.get("critical", 0)
-        or rule_severities.get("high", 0)
-    ):
-        return "p0"
-    if (
-        risk_by_severity.get("medium", 0)
-        or pack.file_kind in {FileKind.SOURCE, FileKind.SCHEMA, FileKind.MIGRATION, FileKind.CONFIG}
-        or pack.stats.truncated
-    ):
-        return "p1"
-    return "p2"
 
 
 def _build_pack_statuses(
@@ -524,5 +695,73 @@ def _build_coverage_todos(
     return todos
 
 
-def continue_command_for_pack(pack_id: str, report_path: str = "<report.json>") -> str:
-    return f"apex-ray review --continue-from {quote(report_path)} --only-pack {quote(pack_id)} --llm"
+def _build_reviewer_coverage_todos(
+    reviewer_coverage: list[LLMReviewerCoverageSummary],
+    context_packs: list[ContextPack],
+    effective_run_states: dict[tuple[str, str], EffectiveLLMPackRunState],
+) -> list[LLMCoverageTodo]:
+    packs_by_id = {pack.id: pack for pack in context_packs}
+    priority_rank = {"p0": 0, "p1": 1, "p2": 2}
+    todos: list[LLMCoverageTodo] = []
+    for reviewer in reviewer_coverage:
+        reviewer_states = {
+            pack_id: state
+            for (reviewer_id, pack_id), state in effective_run_states.items()
+            if reviewer_id == reviewer.reviewer_id
+        }
+        failed_verify_ids = {
+            pack_id
+            for pack_id, state in reviewer_states.items()
+            if reviewer.verify_enabled and any(run.status != "ok" for run in state.verify_runs)
+        }
+        debt_ids = set(reviewer.selected_context_pack_ids).difference(reviewer.reviewed_context_pack_ids)
+        if reviewer.matching_context_pack_ids and not reviewer.selected_context_pack_ids:
+            debt_ids.update(reviewer.matching_context_pack_ids)
+        debt_ids.update(failed_verify_ids)
+        for pack_id in debt_ids:
+            pack = packs_by_id.get(pack_id)
+            if pack is None:
+                continue
+            reason = (
+                f"Reviewer {reviewer.reviewer_id} has an active failed verification run."
+                if pack_id in failed_verify_ids
+                else f"Reviewer {reviewer.reviewer_id} did not complete its selected review."
+            )
+            todos.append(
+                LLMCoverageTodo(
+                    context_pack_id=pack.id,
+                    file=pack.file,
+                    reviewer_id=reviewer.reviewer_id,
+                    file_kind=pack.file_kind,
+                    priority=pack_residual_priority(pack),
+                    slice=_pack_review_slice(pack),
+                    reason=reason,
+                    suggested_command=continue_command_for_pack(
+                        pack.id,
+                        reviewer_id=reviewer.reviewer_id,
+                    ),
+                    estimated_chars=pack.stats.estimated_chars,
+                    changed_lines=pack.changed_lines,
+                    changed_symbols=_pack_symbol_names([pack]),
+                )
+            )
+    return sorted(
+        todos,
+        key=lambda todo: (
+            priority_rank.get(todo.priority, 9),
+            todo.reviewer_id or "",
+            todo.file,
+            todo.context_pack_id,
+        ),
+    )
+
+
+def continue_command_for_pack(
+    pack_id: str,
+    report_path: str = "<report.json>",
+    reviewer_id: str | None = None,
+) -> str:
+    command = f"apex-ray review --continue-from {quote(report_path)} --only-pack {quote(pack_id)} --llm"
+    if reviewer_id is not None:
+        command += f" --reviewer {quote(reviewer_id)}"
+    return command

@@ -1,13 +1,18 @@
 from pathlib import Path
 
 from apex_ray.invocation import ReviewOverrides, apply_review_overrides
+from apex_ray.llm import review_config_for_pack
 from apex_ray.models import (
+    ContextPack,
+    LLMAPIConfig,
     LLMCoverageMode,
     LLMProfile,
     LLMProviderName,
     LLMRoutingConfig,
     ReviewConfig,
+    ReviewerConfig,
 )
+from apex_ray.reviewers import llm_config_for_reviewer
 
 
 def test_apply_review_overrides_sets_review_options(tmp_path: Path) -> None:
@@ -42,6 +47,100 @@ def test_apply_review_overrides_sets_review_options(tmp_path: Path) -> None:
     assert effective.llm.coverage_mode == LLMCoverageMode.EXHAUSTIVE
     assert effective.llm.max_deep_packs == 7
     assert effective.llm.max_input_tokens == 50_000
+
+
+def test_explicit_llm_overrides_remain_final_after_reviewer_resolution() -> None:
+    reviewer = ReviewerConfig(
+        id="security",
+        profile="specialist",
+        verify_profile="specialist",
+        verify=True,
+        coverage_mode=LLMCoverageMode.EXHAUSTIVE,
+        max_deep_packs=40,
+        max_input_tokens=200_000,
+    )
+    config = ReviewConfig(
+        reviewers=[reviewer],
+    )
+    config.llm.provider = LLMProviderName.CODEX_CLI
+    config.llm.profiles = {
+        "specialist": LLMProfile(
+            provider=LLMProviderName.CODEX_CLI,
+            model="profile-model",
+        )
+    }
+
+    effective = apply_review_overrides(
+        config,
+        ReviewOverrides(
+            provider=LLMProviderName.OPENAI_API,
+            model="forced-model",
+            verify=False,
+            coverage_mode=LLMCoverageMode.FAST,
+            max_deep_packs=3,
+            max_input_tokens=10_000,
+        ),
+    )
+    reviewer_config = llm_config_for_reviewer(effective.llm, effective.reviewers[0])
+    resolved, _profile, _reason = review_config_for_pack(
+        reviewer_config,
+        ContextPack(id="src/auth.ts#authorize:1", file="src/auth.ts"),
+    )
+
+    assert resolved.provider == LLMProviderName.OPENAI_API
+    assert resolved.model == "forced-model"
+    assert resolved.verify is False
+    assert resolved.coverage_mode == LLMCoverageMode.FAST
+    assert resolved.max_deep_packs == 3
+    assert resolved.max_input_tokens == 10_000
+    assert effective.reviewers[0].profile is None
+    assert effective.reviewers[0].verify_profile is None
+
+
+def test_same_provider_override_preserves_custom_api_profile_endpoint() -> None:
+    config = ReviewConfig(reviewers=[ReviewerConfig(id="security", profile="gateway")])
+    config.llm.provider = LLMProviderName.OPENAI_COMPATIBLE
+    config.llm.profiles = {
+        "gateway": LLMProfile(
+            provider=LLMProviderName.OPENAI_COMPATIBLE,
+            model="private-review-model",
+            api=LLMAPIConfig(
+                base_url="https://gateway.example/v1",
+                api_key_env="PRIVATE_LLM_API_KEY",
+            ),
+        )
+    }
+
+    effective = apply_review_overrides(
+        config,
+        ReviewOverrides(provider=LLMProviderName.OPENAI_COMPATIBLE),
+    )
+    reviewer_config = llm_config_for_reviewer(effective.llm, effective.reviewers[0])
+    resolved, _profile, _reason = review_config_for_pack(
+        reviewer_config,
+        ContextPack(id="src/auth.ts#authorize:1", file="src/auth.ts"),
+    )
+
+    assert resolved.api is not None
+    assert resolved.api.base_url == "https://gateway.example/v1"
+    assert resolved.api.api_key_env == "PRIVATE_LLM_API_KEY"
+
+
+def test_switching_provider_resets_base_api_to_valid_defaults() -> None:
+    config = ReviewConfig()
+    config.llm.provider = LLMProviderName.OPENAI_COMPATIBLE
+    config.llm.api = LLMAPIConfig(
+        base_url="https://old-gateway.example/v1",
+        api_key_env="OLD_GATEWAY_API_KEY",
+    )
+
+    effective = apply_review_overrides(
+        config,
+        ReviewOverrides(provider=LLMProviderName.ANTHROPIC_API),
+    )
+
+    assert effective.llm.api == LLMAPIConfig()
+    assert effective.llm.model_dump(mode="json")["api"] is not None
 
 
 def test_model_override_clears_profiles_and_routing_by_default() -> None:

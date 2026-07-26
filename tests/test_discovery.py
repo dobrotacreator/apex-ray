@@ -1,7 +1,10 @@
 import subprocess
+from collections.abc import Iterator
 from pathlib import Path
 
-from apex_ray.discovery import discover_project
+import pytest
+
+from apex_ray.discovery import discover_project, list_project_files
 
 
 def test_discovery_prunes_large_generated_and_worktree_directories(tmp_path: Path) -> None:
@@ -9,6 +12,8 @@ def test_discovery_prunes_large_generated_and_worktree_directories(tmp_path: Pat
     (tmp_path / "src" / "app.ts").write_text("export const app = true;\n", encoding="utf-8")
     (tmp_path / "src" / "generated").mkdir()
     (tmp_path / "src" / "generated" / "model.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (tmp_path / "generated").mkdir()
+    (tmp_path / "generated" / "model.go").write_text("package generated\n", encoding="utf-8")
     (tmp_path / ".worktrees" / "old").mkdir(parents=True)
     (tmp_path / ".worktrees" / "old" / "main.py").write_text("VALUE = 1\n", encoding="utf-8")
     (tmp_path / "node_modules" / "pkg").mkdir(parents=True)
@@ -41,3 +46,42 @@ def test_discovery_uses_git_inventory_with_untracked_files(tmp_path: Path) -> No
 
     assert profile.is_git_repo is True
     assert profile.detected_languages == ["python", "typescript"]
+
+
+def test_git_inventory_preserves_unicode_paths(tmp_path: Path) -> None:
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "core.quotePath", "true"], cwd=tmp_path, check=True)
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "café.ts").write_text("export const café = true;\n", encoding="utf-8")
+    subprocess.run(["git", "add", "src/café.ts"], cwd=tmp_path, check=True)
+
+    assert list_project_files(tmp_path) == [Path("src/café.ts")]
+
+
+def test_non_git_inventory_prunes_review_ignored_directories(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entered_directories: list[str] = []
+
+    def fake_walk(root: str | Path) -> Iterator[tuple[str, list[str], list[str]]]:
+        root_path = Path(root)
+        dirnames = ["generated", "src"]
+        yield str(root_path), dirnames, []
+        if "generated" in dirnames:
+            entered_directories.append("generated")
+            yield str(root_path / "generated"), [], ["client.ts"]
+        if "src" in dirnames:
+            entered_directories.append("src")
+            yield str(root_path / "src"), [], ["app.ts"]
+
+    monkeypatch.setattr("apex_ray.discovery.os.walk", fake_walk)
+
+    files = list_project_files(
+        tmp_path,
+        ignored_patterns=["**/generated/**"],
+        is_git_repo=False,
+    )
+
+    assert files == [Path("src/app.ts")]
+    assert entered_directories == ["src"]

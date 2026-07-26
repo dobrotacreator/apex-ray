@@ -19,6 +19,7 @@ Apex Ray reads a git diff, builds compact context packs around changed code, run
 | Choose review targets, understand reports, and continue partial coverage | [Review Workflow](review-workflow.md) |
 | Configure shared policy, gates, reports, and coverage | [Configuration](configuration.md) |
 | Set up Codex CLI or Claude Code CLI provider routing | [LLM Providers](providers.md) |
+| Tune TypeScript quality, latency, memory, and token cost | [Tuning](tuning.md) |
 | Add project-specific review rules and team memory | [Rules And Memory](memory.md) |
 | Understand internals and contribution workflow | [Architecture](architecture.md) and [Development](development.md) |
 
@@ -89,6 +90,7 @@ See [Quick Start](quickstart.md) for the full first-run sequence.
 - [LLM Providers](providers.md): Codex CLI, Claude Code CLI, profiles, routing, effort, usage, and privacy boundary.
 - [Rules And Memory](memory.md): project-specific review rules and curated repo memory.
 - [Telemetry](telemetry.md): local JSONL metrics for cost, latency, routing, and coverage tuning.
+- [Tuning](tuning.md): TypeScript-oriented presets and an evidence-driven loop for risk, reviewer, route, and budget calibration.
 - [Historical PR Replay Evals](pr-eval.md): capture and replay historical PR review comments for quality calibration.
 - [Architecture](architecture.md): implementation map, review flow, init flow, gate flow, eval flow, and benchmark flow.
 - [Development](development.md): contributor setup, checks, docs build, and release hygiene.

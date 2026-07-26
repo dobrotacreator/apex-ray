@@ -20,7 +20,15 @@ from apex_ray.analyzers import (
     run_typescript_analyzer,
     typescript_analyzer_script,
 )
-from apex_ray.models import AnalyzerConfig, AnalyzerFile, AnalyzerResult, ChangedFile, FileKind
+from apex_ray.models import (
+    AnalyzerConfig,
+    AnalyzerFile,
+    AnalyzerResult,
+    ChangedFile,
+    FileKind,
+    RiskSeverity,
+    RiskSignal,
+)
 
 
 def test_analyzers_public_exports_keep_legacy_python_constants() -> None:
@@ -131,6 +139,117 @@ def test_typescript_analyzer_passes_internal_time_budget(
     assert seen_command is not None
     budget_index = seen_command.index("--analysis-time-budget-ms")
     assert seen_command[budget_index + 1] == "9500"
+
+
+def test_typescript_analyzer_manifest_respects_project_ignore(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    script = tmp_path / "analyze.js"
+    script.write_text("console.log('{}')\n", encoding="utf-8")
+    (tmp_path / "src").mkdir()
+    (tmp_path / "vendor").mkdir()
+    (tmp_path / "generated").mkdir()
+    (tmp_path / "src" / "cart.ts").write_text("export const cart = true;\n", encoding="utf-8")
+    (tmp_path / "vendor" / "generated.ts").write_text("export const generated = true;\n", encoding="utf-8")
+    (tmp_path / "generated" / "client.ts").write_text("export const client = true;\n", encoding="utf-8")
+    changed = ChangedFile(
+        old_path="src/cart.ts",
+        new_path="src/cart.ts",
+        language="typescript",
+        file_kind=FileKind.SOURCE,
+    )
+    seen_manifest: dict[str, object] | None = None
+
+    monkeypatch.setattr("apex_ray.analyzers.typescript.shutil.which", lambda name: "/usr/bin/node")
+
+    def fake_run(
+        args: list[str],
+        *,
+        cwd: Path,
+        timeout: float,
+    ) -> subprocess.CompletedProcess[str]:
+        nonlocal seen_manifest
+        manifest_index = args.index("--file-manifest") + 1
+        seen_manifest = json.loads(Path(args[manifest_index]).read_text(encoding="utf-8"))
+        payload = {
+            "language": "typescript",
+            "projectRoot": str(tmp_path),
+            "tsconfigPath": None,
+            "files": [],
+            "warnings": [],
+            "indexCache": None,
+        }
+        return subprocess.CompletedProcess(args, 0, stdout=json.dumps(payload), stderr="")
+
+    monkeypatch.setattr("apex_ray.analyzers.typescript._run_analyzer_process", fake_run)
+
+    result = run_typescript_analyzer(
+        tmp_path,
+        [changed],
+        AnalyzerConfig(script_path=str(script)),
+        ignored_patterns=["vendor/**", "**/generated/**"],
+    )
+
+    assert result is not None
+    assert seen_manifest is not None
+    assert seen_manifest["version"] == 1
+    assert seen_manifest["files"] == ["analyze.js", "src/cart.ts"]
+
+
+def test_run_analyzers_reuses_supplied_project_inventory_for_typescript_manifest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    script = tmp_path / "analyze.js"
+    script.write_text("console.log('{}')\n", encoding="utf-8")
+    changed = ChangedFile(
+        old_path="src/cart.ts",
+        new_path="src/cart.ts",
+        language="typescript",
+        file_kind=FileKind.SOURCE,
+    )
+    seen_manifest: dict[str, object] | None = None
+
+    monkeypatch.setattr("apex_ray.analyzers.typescript.shutil.which", lambda name: "/usr/bin/node")
+    monkeypatch.setattr(
+        "apex_ray.analyzers.typescript.list_project_files",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("unexpected second inventory scan")),
+    )
+
+    def fake_run(
+        args: list[str],
+        *,
+        cwd: Path,
+        timeout: float,
+    ) -> subprocess.CompletedProcess[str]:
+        nonlocal seen_manifest
+        manifest_index = args.index("--file-manifest") + 1
+        seen_manifest = json.loads(Path(args[manifest_index]).read_text(encoding="utf-8"))
+        payload = {
+            "language": "typescript",
+            "projectRoot": str(tmp_path),
+            "tsconfigPath": None,
+            "files": [],
+            "warnings": [],
+            "indexCache": None,
+        }
+        return subprocess.CompletedProcess(args, 0, stdout=json.dumps(payload), stderr="")
+
+    monkeypatch.setattr("apex_ray.analyzers.typescript._run_analyzer_process", fake_run)
+
+    result = run_analyzers(
+        tmp_path,
+        [changed],
+        AnalyzerConfig(script_path=str(script)),
+        project_files=[Path("src/cart.ts"), Path("src/helper.ts"), Path("README.md")],
+    )
+
+    assert result.results
+    assert seen_manifest == {
+        "version": 1,
+        "files": ["src/cart.ts", "src/helper.ts"],
+    }
 
 
 def test_go_analyzer_prefers_bundled_runtime_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1943,6 +2062,124 @@ def test_typescript_analyzer_respects_total_timeout_across_shards(
     assert any("total timeout after 2s" in warning for warning in result.warnings)
     assert result.partial is True
     assert result.failed_files == ["src/file-1.ts", "src/file-2.ts"]
+
+
+def test_typescript_analyzer_total_timeout_includes_manifest_generation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    script = tmp_path / "analyze.js"
+    script.write_text("console.log('{}')\n", encoding="utf-8")
+    changed = ChangedFile(
+        old_path="src/cart.ts",
+        new_path="src/cart.ts",
+        language="typescript",
+        file_kind=FileKind.SOURCE,
+    )
+    clock = [0.0]
+
+    monkeypatch.setattr("apex_ray.analyzers.typescript.shutil.which", lambda name: "/usr/bin/node")
+    monkeypatch.setattr("apex_ray.analyzers.typescript.time.monotonic", lambda: clock[0])
+
+    def slow_manifest(
+        _repo_root: Path,
+        manifest_path: Path,
+        _ignored_patterns: list[str] | None = None,
+        *,
+        project_files: list[Path] | None = None,
+    ) -> None:
+        clock[0] = 2.1
+        manifest_path.write_text('{"version":1,"files":[]}', encoding="utf-8")
+
+    monkeypatch.setattr("apex_ray.analyzers.typescript._write_typescript_file_manifest", slow_manifest)
+    monkeypatch.setattr(
+        "apex_ray.analyzers.typescript._run_analyzer_process",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("analyzer should not start")),
+    )
+
+    with pytest.raises(AnalyzerError, match="total timeout after 2s"):
+        run_typescript_analyzer(
+            tmp_path,
+            [changed],
+            AnalyzerConfig(script_path=str(script), timeout_seconds=2),
+        )
+
+
+def test_typescript_analyzer_prioritizes_critical_policy_risk_before_medium(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    script = tmp_path / "analyze.js"
+    script.write_text("console.log('{}')\n", encoding="utf-8")
+    medium = ChangedFile(
+        old_path="src/medium.ts",
+        new_path="src/medium.ts",
+        language="typescript",
+        file_kind=FileKind.SOURCE,
+        risk_signals=[
+            RiskSignal(
+                kind=kind,
+                severity=RiskSeverity.MEDIUM,
+                reason="Medium-risk boundary changed.",
+                file="src/medium.ts",
+            )
+            for kind in ("validation", "persistence", "public_api")
+        ],
+    )
+    critical = ChangedFile(
+        old_path="src/critical.ts",
+        new_path="src/critical.ts",
+        language="typescript",
+        file_kind=FileKind.SOURCE,
+        risk_signals=[
+            RiskSignal(
+                kind="policy:money",
+                severity=RiskSeverity.CRITICAL,
+                reason="Settlement policy changed.",
+                file="src/critical.ts",
+            )
+        ],
+    )
+    seen_shards: list[list[str]] = []
+    monotonic_values = iter([0.0, 0.0, 2.1])
+
+    monkeypatch.setattr("apex_ray.analyzers.typescript.shutil.which", lambda name: "/usr/bin/node")
+    monkeypatch.setattr("apex_ray.analyzers.typescript.time.monotonic", lambda: next(monotonic_values))
+
+    def fake_run(
+        args: list[str],
+        *,
+        cwd: Path,
+        timeout: float,
+    ) -> subprocess.CompletedProcess[str]:
+        changed_index = args.index("--changed") + 1
+        option_index = next(
+            (index for index in range(changed_index, len(args)) if args[index].startswith("--")),
+            len(args),
+        )
+        shard_files = args[changed_index:option_index]
+        seen_shards.append(shard_files)
+        payload = {
+            "language": "typescript",
+            "projectRoot": str(tmp_path),
+            "tsconfigPath": None,
+            "files": [{"path": path, "symbols": [], "imports": [], "exports": []} for path in shard_files],
+            "warnings": [],
+            "indexCache": None,
+        }
+        return subprocess.CompletedProcess(args, 0, stdout=json.dumps(payload), stderr="")
+
+    monkeypatch.setattr("apex_ray.analyzers.typescript._run_analyzer_process", fake_run)
+
+    result = run_typescript_analyzer(
+        tmp_path,
+        [medium, critical],
+        AnalyzerConfig(script_path=str(script), timeout_seconds=2, changed_file_shard_size=1),
+    )
+
+    assert result is not None
+    assert seen_shards == [["src/critical.ts"]]
+    assert result.failed_files == ["src/medium.ts"]
 
 
 def test_typescript_analyzer_scales_total_timeout_for_large_adaptive_shards(

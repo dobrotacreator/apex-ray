@@ -19,6 +19,7 @@ from apex_ray.models import (
     ReviewConfig,
     ReviewReport,
 )
+from apex_ray.reviewers import effective_reviewers
 
 STATE_SCHEMA_VERSION = "pre-push-state/v1"
 
@@ -83,10 +84,29 @@ def write_pre_push_state(path: Path, state: PrePushGateState) -> None:
     path.write_text(state.model_dump_json(indent=2), encoding="utf-8")
 
 
-def config_fingerprint(config: ReviewConfig, gate_config: PrePushGateConfig) -> str:
+def config_fingerprint(
+    config: ReviewConfig,
+    gate_config: PrePushGateConfig,
+    *,
+    reviewer_ids: list[str] | None = None,
+) -> str:
+    review_config = config.model_dump(mode="json")
+    reviewers = effective_reviewers(config.reviewers, reviewer_ids)
+    # Reviewer execution is a set operation: requested/configured ordering only
+    # controls traversal order and must not invalidate otherwise reusable state.
+    # Replace the raw configured list so disabled or unselected reviewers do not
+    # accidentally participate in the effective retry identity.
+    review_config["reviewers"] = []
     payload = {
         "version": __version__,
-        "review_config": config.model_dump(mode="json"),
+        "review_config": review_config,
+        "reviewer_scope": {
+            "ids": sorted(reviewer.id for reviewer in reviewers),
+            "reviewers": sorted(
+                (reviewer.model_dump(mode="json") for reviewer in reviewers),
+                key=lambda item: item["id"],
+            ),
+        },
         "gate_policy": gate_config.model_dump(mode="json"),
         "prompt_versions": {
             "review": REVIEW_PROMPT_VERSION,
@@ -118,7 +138,10 @@ def check_incremental_eligibility(
     if state.merge_base_sha != merge_base_sha:
         return IncrementalEligibility(False, "merge-base changed")
     if state.config_fingerprint != config_hash:
-        return IncrementalEligibility(False, "review config, rules, memory, prompt, model, or gate policy changed")
+        return IncrementalEligibility(
+            False,
+            "review config, reviewer scope, rules, memory, prompt, model, or gate policy changed",
+        )
     if not previous_head_exists:
         return IncrementalEligibility(False, "previous gate HEAD is not available locally")
     return IncrementalEligibility(True)

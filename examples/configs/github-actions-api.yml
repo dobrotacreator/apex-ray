@@ -1,0 +1,124 @@
+# API-backed review intended for the Apex Ray GitHub composite action.
+# Store OPENAI_API_KEY in GitHub Secrets; never put its value in this file.
+review:
+  base: main
+  ignore:
+    - "**/*.lock"
+    - "**/generated/**"
+    - "**/dist/**"
+    - "**/build/**"
+    - "**/coverage/**"
+    - "**/node_modules/**"
+  risk:
+    built_in_enabled: true
+    rules:
+      - id: security-boundary
+        title: Security-sensitive application boundary
+        severity: critical
+        score: 96
+        paths:
+          - "src/auth/**"
+          - "src/security/**"
+          - "src/api/**"
+          - ".github/workflows/**"
+        exclude_paths:
+          - "**/*.test.ts"
+          - "**/*.spec.ts"
+        categories: [security]
+        reviewer_tags: [security]
+        guidance: Verify authentication, authorization, untrusted input handling, token scope, and fail-closed behavior.
+      - id: user-visible-flow
+        title: User-visible application flow
+        severity: high
+        score: 80
+        paths:
+          - "apps/web/src/**"
+          - "src/ui/**"
+        exclude_paths:
+          - "**/*.test.ts"
+          - "**/*.spec.ts"
+        categories: [ux]
+        reviewer_tags: [ux]
+        guidance: Check loading, empty, error, retry, accessibility, and irreversible-action states.
+  llm:
+    enabled: true
+    provider: openai_api
+    model: gpt-5.6-terra
+    effort: low
+    api:
+      api_key_env: OPENAI_API_KEY
+      max_output_tokens: 4096
+      max_retries: 2
+    profiles:
+      broad:
+        provider: openai_api
+        model: gpt-5.6-terra
+        effort: low
+      strong:
+        provider: openai_api
+        model: gpt-5.6-sol
+        effort: medium
+    routing:
+      review_profile: broad
+      verify_profile: strong
+      escalated_review_profile: strong
+      escalated_verify_profile: strong
+      escalate_review_when:
+        risk: [auth, shell, migration]
+        rule_severity: [high, critical]
+        strict_rule: true
+      escalate_verify_when:
+        finding_severity: [high, critical]
+    coverage_mode: balanced
+    max_packs: 40
+    max_deep_packs: 12
+    max_input_tokens: 140000
+    timeout_seconds: 600
+    jobs: 3
+    max_consecutive_provider_failures: 3
+    verify: true
+    cache_enabled: false
+  reviewers:
+    - id: correctness
+      name: Correctness
+      focus: Concrete behavioral regressions, broken contracts, and failure handling.
+      profile: broad
+      verify_profile: strong
+      review_depth: balanced
+      max_packs: 28
+      max_deep_packs: 8
+      max_input_tokens: 90000
+      verify: true
+      required: true
+    - id: security
+      name: Security
+      focus: Authentication, authorization, injection, secrets, SSRF, and CI trust boundaries.
+      risk: [auth, shell, external_io]
+      risk_tags: [security]
+      profile: strong
+      verify_profile: strong
+      review_depth: deep
+      max_packs: 10
+      max_deep_packs: 10
+      max_input_tokens: 55000
+      verify: true
+    - id: ux
+      name: UX and accessibility
+      focus: User-visible state, feedback, accessibility, destructive actions, and recovery.
+      risk_tags: [ux]
+      profile: broad
+      verify_profile: strong
+      review_depth: balanced
+      max_packs: 8
+      max_deep_packs: 4
+      max_input_tokens: 35000
+      verify: true
+  telemetry:
+    enabled: false
+    path_mode: anonymized
+  reports:
+    archive: false
+    compression: none
+  gates:
+    pre_push:
+      enabled: false

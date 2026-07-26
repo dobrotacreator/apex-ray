@@ -1,4 +1,6 @@
+import hashlib
 import json
+import sys
 import uuid
 from collections import Counter
 from collections.abc import Mapping
@@ -7,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from apex_ray import __version__
+from apex_ray.findings import finding_matches_any
 from apex_ray.models import ReviewReport
 
 DEFAULT_REVIEW_TELEMETRY_PATH = ".apex-ray/telemetry/review-runs.jsonl"
@@ -28,24 +31,31 @@ def append_review_telemetry(
     triage_counts: Mapping[str, int] | None = None,
 ) -> Path:
     coverage = report.llm_coverage
+    path_mode = report.config.telemetry.path_mode
+    reviewers = _reviewer_telemetry(report)
+    approved_verifications = [verification for verification in report.verifications if verification.approved]
+    approved_findings = [verification.finding for verification in approved_verifications]
+    verified_findings = [finding for finding in report.findings if finding_matches_any(finding, approved_findings)]
     entry: dict[str, Any] = {
-        "schema_version": "review-telemetry/v1",
+        "schema_version": "review-telemetry/v2",
         "run_id": uuid.uuid4().hex,
         "created_at": _now_iso(),
         "version": __version__,
-        "source_repo": str(source_repo),
+        "repo_id": _repo_id(source_repo),
         "target_mode": report.diff.target_mode,
         "base": report.diff.base,
         "duration_ms": duration_ms,
-        "output_path": str(output_path) if output_path else None,
-        "json_output_path": str(json_output_path) if json_output_path else None,
-        "html_output_path": str(html_output_path) if html_output_path else None,
+        "output_path": _artifact_path(source_repo, output_path, path_mode),
+        "json_output_path": _artifact_path(source_repo, json_output_path, path_mode),
+        "html_output_path": _artifact_path(source_repo, html_output_path, path_mode),
         "files_changed": report.diff.stats.files_changed,
         "additions": report.diff.stats.additions,
         "deletions": report.diff.stats.deletions,
         "ignored_files": report.diff.stats.ignored_files,
         "findings_count": len(report.findings),
-        "verified_findings_count": sum(1 for verification in report.verifications if verification.approved),
+        "verified_findings_count": len(verified_findings),
+        "verification_decisions_count": len(report.verifications),
+        "approved_verification_decisions_count": len(approved_verifications),
         "context_packs_count": len(report.context_packs),
         "llm_enabled": coverage.enabled,
         "llm_verify_enabled": coverage.verify_enabled,
@@ -84,9 +94,23 @@ def append_review_telemetry(
         "llm_cache_hits": coverage.cache_hits,
         "llm_cache_misses": coverage.cache_misses,
         "llm_run_status_counts": coverage.run_status_counts,
+        "llm_input_estimate_ratio": _input_estimate_ratio(
+            _effective_actual_input_tokens(
+                actual_input_tokens=coverage.actual_input_tokens,
+                actual_output_tokens=coverage.actual_output_tokens,
+                actual_total_tokens=coverage.actual_total_tokens,
+            ),
+            coverage.estimated_input_tokens,
+        ),
         "pack_status_counts": dict(sorted(Counter(status.status for status in coverage.pack_statuses).items())),
+        "risk_by_severity": report.summary.risk_by_severity,
+        "reviewers": reviewers,
+        "stage_durations_ms": dict(sorted(report.stage_durations_ms.items())),
         "routes": [route.model_dump(mode="json", exclude_none=True) for route in coverage.routes],
     }
+    if path_mode == "full":
+        entry["source_repo"] = str(source_repo)
+    entry.update(_memory_telemetry())
     if triage_counts:
         entry.update(triage_counts)
     try:
@@ -129,6 +153,8 @@ def render_review_telemetry_summary(entries: list[dict[str, Any]]) -> str:
     latest = entries[-1]
     tokens = sum(_int(entry.get("llm_estimated_input_tokens")) for entry in entries)
     actual_tokens = sum(_int(entry.get("llm_actual_total_tokens")) for entry in entries)
+    estimated_input_tokens = sum(_int(entry.get("llm_estimated_input_tokens")) for entry in entries)
+    actual_input_tokens = sum(_entry_effective_actual_input_tokens(entry) for entry in entries)
     saved_tokens = sum(_int(entry.get("llm_estimated_saved_input_tokens")) for entry in entries)
     duration_ms = sum(_int(entry.get("duration_ms")) for entry in entries)
     llm_duration_ms = sum(_int(entry.get("llm_duration_ms")) for entry in entries)
@@ -150,6 +176,8 @@ def render_review_telemetry_summary(entries: list[dict[str, Any]]) -> str:
             f"- Latest actual LLM tokens: `{latest.get('llm_actual_total_tokens', 0)}`",
             f"- Total LLM tokens: `~{tokens}`",
             f"- Total actual LLM tokens: `{actual_tokens}`",
+            f"- Aggregate input estimate ratio: "
+            f"`{_input_estimate_ratio(actual_input_tokens, estimated_input_tokens) or 0:.2f}x`",
             f"- Estimated saved input tokens: `~{saved_tokens}`",
             f"- Average LLM tokens/run: `~{tokens // len(entries)}`",
             f"- Total wall time: `{duration_ms}ms`",
@@ -178,6 +206,83 @@ def render_review_telemetry_summary(entries: list[dict[str, Any]]) -> str:
 
 def _now_iso() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _repo_id(source_repo: Path) -> str:
+    normalized = str(source_repo.resolve(strict=False)).encode("utf-8")
+    return hashlib.sha256(normalized).hexdigest()[:16]
+
+
+def _artifact_path(
+    source_repo: Path,
+    path: Path | None,
+    path_mode: str,
+) -> str | None:
+    if path is None:
+        return None
+    if path_mode == "full":
+        return str(path)
+    absolute = path.resolve(strict=False)
+    try:
+        return absolute.relative_to(source_repo.resolve(strict=False)).as_posix()
+    except ValueError:
+        return path.name
+
+
+def _input_estimate_ratio(actual_input_tokens: int, estimated_input_tokens: int) -> float | None:
+    if actual_input_tokens <= 0 or estimated_input_tokens <= 0:
+        return None
+    return round(actual_input_tokens / estimated_input_tokens, 4)
+
+
+def _entry_effective_actual_input_tokens(entry: Mapping[str, object]) -> int:
+    return _effective_actual_input_tokens(
+        actual_input_tokens=_int(entry.get("llm_actual_input_tokens")),
+        actual_output_tokens=_int(entry.get("llm_actual_output_tokens")),
+        actual_total_tokens=_int(entry.get("llm_actual_total_tokens")),
+    )
+
+
+def _effective_actual_input_tokens(
+    *,
+    actual_input_tokens: int,
+    actual_output_tokens: int,
+    actual_total_tokens: int,
+) -> int:
+    return max(actual_input_tokens, actual_total_tokens - actual_output_tokens, 0)
+
+
+def _reviewer_telemetry(report: ReviewReport) -> dict[str, dict[str, int | bool]]:
+    reviewer_ids = sorted({run.reviewer_id for run in report.llm_runs})
+    coverage_by_id = {reviewer.reviewer_id: reviewer for reviewer in report.llm_coverage.reviewers}
+    return {
+        reviewer_id: {
+            "runs": len(runs),
+            "failed_runs": sum(run.status != "ok" for run in runs),
+            "findings": sum(run.findings_count for run in runs if run.kind in {"review", "review_shallow"}),
+            "verify_enabled": (
+                coverage_by_id[reviewer_id].verify_enabled
+                if reviewer_id in coverage_by_id
+                else report.llm_coverage.verify_enabled
+            ),
+        }
+        for reviewer_id in reviewer_ids
+        if (runs := [run for run in report.llm_runs if run.reviewer_id == reviewer_id])
+    }
+
+
+def _memory_telemetry() -> dict[str, int]:
+    try:
+        import resource
+    except ImportError:
+        return {}
+    scale = 1 if sys.platform == "darwin" else 1024
+    process = resource.getrusage(resource.RUSAGE_SELF)
+    children = resource.getrusage(resource.RUSAGE_CHILDREN)
+    return {
+        "process_max_rss_bytes": int(process.ru_maxrss * scale),
+        "children_max_rss_bytes": int(children.ru_maxrss * scale),
+    }
 
 
 def _int(value: object) -> int:

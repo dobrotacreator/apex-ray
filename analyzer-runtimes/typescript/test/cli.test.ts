@@ -7,6 +7,7 @@ import { parseArgs } from "../dist/cli.js";
 
 test("parseArgs normalizes analyzer CLI options", () => {
   const repo = path.join(os.tmpdir(), "apex-ray-parse-args");
+  const manifest = path.join(repo, "typescript-files.json");
 
   const args = parseArgs([
     "--repo",
@@ -28,6 +29,8 @@ test("parseArgs normalizes analyzer CLI options", () => {
     "12",
     "--analysis-time-budget-ms",
     "2500",
+    "--file-manifest",
+    manifest,
   ]);
 
   assert.equal(args.repo, path.resolve(repo));
@@ -39,4 +42,5 @@ test("parseArgs normalizes analyzer CLI options", () => {
   assert.equal(args.refreshIndexCache, true);
   assert.equal(args.largeChangeSetSize, 12);
   assert.equal(args.analysisTimeBudgetMs, 2500);
+  assert.equal(args.fileManifestPath, manifest);
 });

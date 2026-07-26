@@ -1,3 +1,4 @@
+import gzip
 import json
 import shutil
 import uuid
@@ -31,14 +32,25 @@ def archive_report_artifacts(
     run_dir = _unique_run_dir(archive_root, archive_id)
     run_dir.mkdir(parents=True)
 
-    written: list[dict[str, str]] = []
+    written: list[dict[str, str | int]] = []
     for artifact in artifacts:
-        artifact_path = run_dir / artifact.path.name
-        artifact_path.write_text(artifact.content, encoding="utf-8")
+        content = artifact.content.encode("utf-8")
+        compress = config.compression == "gzip" or (
+            config.compression == "auto" and len(content) >= config.compression_min_bytes
+        )
+        artifact_name = f"{artifact.path.name}.gz" if compress else artifact.path.name
+        artifact_path = run_dir / artifact_name
+        if compress:
+            artifact_path.write_bytes(gzip.compress(content, compresslevel=6, mtime=0))
+        else:
+            artifact_path.write_bytes(content)
         written.append(
             {
                 "file": artifact_path.name,
-                "source_path": str(artifact.path),
+                "source_path": _manifest_source_path(root, artifact.path),
+                "encoding": "gzip" if compress else "identity",
+                "original_bytes": len(content),
+                "stored_bytes": artifact_path.stat().st_size,
             }
         )
 
@@ -57,6 +69,14 @@ def _resolve_archive_root(root: Path, archive_dir: str) -> Path:
     if configured.is_absolute():
         return configured
     return root / configured
+
+
+def _manifest_source_path(root: Path, source_path: Path) -> str:
+    absolute = source_path.resolve(strict=False)
+    try:
+        return absolute.relative_to(root.resolve(strict=False)).as_posix()
+    except ValueError:
+        return source_path.name
 
 
 def _archive_timestamp(value: datetime) -> str:

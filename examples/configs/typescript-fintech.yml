@@ -1,0 +1,195 @@
+# Multi-reviewer TypeScript API configuration for a financial application.
+# All paths and domain terms are generic examples; replace them with your own
+# trust boundaries and invariants.
+review:
+  base: main
+  languages: [typescript, javascript, sql]
+  ignore:
+    - "**/*.lock"
+    - "**/generated/**"
+    - "**/dist/**"
+    - "**/build/**"
+    - "**/coverage/**"
+    - "**/node_modules/**"
+  local_data:
+    root: git_common
+  analyzer:
+    index_cache_enabled: true
+    adaptive_sharding: true
+  risk:
+    built_in_enabled: true
+    rules:
+      - id: money-movement
+        title: Money movement and settlement
+        severity: critical
+        score: 100
+        paths:
+          - "src/payments/**"
+          - "src/transfers/**"
+          - "src/settlement/**"
+        exclude_paths:
+          - "**/*.test.ts"
+          - "**/*.spec.ts"
+        languages: [typescript, javascript]
+        file_kinds: [source]
+        categories: [financial, money-movement]
+        reviewer_tags: [finance]
+        guidance: Verify authorization, idempotency, units, precision, limits, atomicity, and reconciliation.
+      - id: ledger-integrity
+        title: Ledger and balance integrity
+        severity: critical
+        score: 100
+        paths:
+          - "src/ledger/**"
+          - "src/balances/**"
+          - "migrations/**"
+        exclude_paths:
+          - "**/*.test.ts"
+          - "**/*.spec.ts"
+        languages: [typescript, javascript, sql]
+        file_kinds: [source, migration, schema]
+        categories: [financial, accounting, persistence]
+        reviewer_tags: [finance, data-integrity]
+        guidance: Preserve double-entry balance, uniqueness, transaction boundaries, replay safety, and migration compatibility.
+      - id: privileged-financial-operation
+        title: Privileged financial operation
+        severity: critical
+        score: 98
+        paths:
+          - "src/admin/**"
+          - "src/approvals/**"
+          - "src/limits/**"
+        exclude_paths:
+          - "**/*.test.ts"
+          - "**/*.spec.ts"
+        languages: [typescript, javascript]
+        file_kinds: [source]
+        categories: [security, financial, authorization]
+        reviewer_tags: [security, finance]
+        guidance: Check actor authorization, segregation of duties, auditability, limits, and fail-closed state transitions.
+      - id: customer-financial-ui
+        title: Customer-visible financial state
+        severity: high
+        score: 84
+        paths:
+          - "apps/web/src/payments/**"
+          - "apps/web/src/transfers/**"
+          - "apps/web/src/balances/**"
+        exclude_paths:
+          - "**/*.test.ts"
+          - "**/*.spec.ts"
+        languages: [typescript, javascript]
+        file_kinds: [source]
+        categories: [financial, ux]
+        reviewer_tags: [finance, ux]
+        guidance: Check amount units, stale state, double submission, pending/error recovery, accessibility, and irreversible-action confirmation.
+  llm:
+    enabled: true
+    provider: openai_api
+    model: gpt-5.6-terra
+    effort: low
+    api:
+      api_key_env: OPENAI_API_KEY
+      max_output_tokens: 4096
+      max_retries: 2
+    profiles:
+      broad:
+        provider: openai_api
+        model: gpt-5.6-terra
+        effort: low
+      strong:
+        provider: openai_api
+        model: gpt-5.6-sol
+        effort: medium
+      financial:
+        provider: openai_api
+        model: gpt-5.6-sol
+        effort: high
+    routing:
+      review_profile: broad
+      verify_profile: strong
+      escalated_review_profile: strong
+      escalated_verify_profile: strong
+      escalate_review_when:
+        risk: [auth, persistence, migration, external_io]
+        rule_severity: [high, critical]
+        strict_rule: true
+      escalate_verify_when:
+        finding_severity: [high, critical]
+    coverage_mode: balanced
+    max_packs: 52
+    max_deep_packs: 18
+    max_input_tokens: 200000
+    timeout_seconds: 600
+    jobs: 3
+    max_consecutive_provider_failures: 3
+    verify: true
+    cache_dir: ${local_data}/cache/llm
+  reviewers:
+    - id: correctness
+      name: Correctness
+      focus: Diff-caused regressions, broken contracts, concurrency failures, and incorrect state transitions.
+      profile: broad
+      verify_profile: strong
+      review_depth: balanced
+      max_packs: 34
+      max_deep_packs: 10
+      max_input_tokens: 110000
+      verify: true
+      required: true
+    - id: finance
+      name: Financial risk
+      focus: Direct or indirect loss exposure from units, rounding, limits, idempotency, accounting, settlement, or reconciliation.
+      instructions:
+        - Trace value units and state transitions end to end.
+        - State the financial invariant and the concrete loss or reconciliation failure.
+      risk_tags: [finance, data-integrity]
+      profile: financial
+      verify_profile: financial
+      review_depth: deep
+      max_packs: 12
+      max_deep_packs: 12
+      max_input_tokens: 70000
+      verify: true
+    - id: security
+      name: Security
+      focus: Authorization bypass, tenant isolation, injection, replay, and trust-boundary failures.
+      risk: [auth, shell, external_io]
+      risk_tags: [security]
+      profile: strong
+      verify_profile: financial
+      review_depth: deep
+      max_packs: 8
+      max_deep_packs: 8
+      max_input_tokens: 45000
+      verify: true
+    - id: ux
+      name: Financial UX
+      focus: Misleading amounts or status, duplicate actions, unsafe confirmation, accessibility, and recoverability.
+      risk_tags: [ux]
+      profile: broad
+      verify_profile: strong
+      review_depth: balanced
+      max_packs: 8
+      max_deep_packs: 4
+      max_input_tokens: 35000
+      verify: true
+  telemetry:
+    enabled: true
+    path: ${local_data}/telemetry/review-runs.jsonl
+    path_mode: anonymized
+  reports:
+    archive: true
+    archive_dir: ${local_data}/reports/runs
+    retention: 30
+    compression: auto
+  gates:
+    pre_push:
+      enabled: true
+      min_finding_severity: high
+      require_verified_findings: true
+      fail_on_quality_gate: true
+      fail_on_partial_severity: critical
+      auto_followup_p0: true
+      incremental_retry:
+        enabled: true

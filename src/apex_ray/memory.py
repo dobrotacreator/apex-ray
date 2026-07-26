@@ -245,6 +245,7 @@ def pack_prompt_payload(pack: ContextPack, audience: str, depth: str = "deep") -
                 "rules",
                 "rule_matches",
                 "memory_matches",
+                "reviewer",
                 "warnings",
                 "stats",
             )

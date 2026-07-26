@@ -34,19 +34,24 @@ review:
     enabled: true
     provider: codex_cli
     effort: medium
+    jobs: 2
     coverage_mode: balanced
-    max_packs: 64
-    max_deep_packs: 48
-    max_input_tokens: 300000
+    max_packs: 48
+    max_deep_packs: 16
+    max_input_tokens: 180000
+    max_consecutive_provider_failures: 3
     verify: true
     cache_dir: ${local_data}/cache/llm
   telemetry:
     enabled: true
     path: ${local_data}/telemetry/review-runs.jsonl
+    path_mode: anonymized
   reports:
     archive: true
     archive_dir: ${local_data}/reports/runs
     retention: 20
+    compression: auto
+    compression_min_bytes: 65536
   triage:
     enabled: true
     state_path: ${local_data}/triage/suppressions.json
@@ -164,6 +169,121 @@ Memory cards are Markdown files with YAML frontmatter under `.apex-ray/memory/`.
 
 Use memory for known false positives, recurring review patterns, severity calibration, and project-specific vocabulary.
 
+## Project Risk Policy
+
+Built-in signals identify common auth, persistence, API, shell, I/O, schema,
+migration, validation, and concurrency surfaces. `review.risk.rules` adds
+project-specific, explainable risk without hard-coding domain knowledge into
+Apex Ray:
+
+```yaml
+review:
+  risk:
+    built_in_enabled: true
+    rules:
+      - id: settlement-boundary
+        title: Money movement and ledger settlement
+        severity: critical
+        score: 98
+        paths:
+          - "src/settlement/**"
+          - "src/ledger/**"
+        exclude_paths:
+          - "**/*.test.ts"
+        languages: [typescript]
+        file_kinds: [source, migration]
+        statuses: [added, modified, renamed]
+        text:
+          - transfer
+          - rounding
+          - idempotency
+        risk:
+          - persistence
+          - external_io
+        categories: [financial, money_movement]
+        reviewer_tags: [finance]
+        guidance: Preserve authorization, idempotency, currency precision, and ledger balance.
+```
+
+Path/language/kind/status filters are combined with AND. `text` tokens match
+changed lines and localize the signal to those lines. `risk` tokens match
+built-in signals on the file. Within `text` and `risk`, any listed token can
+trigger the rule. If neither trigger list is present, matching scope alone
+creates one file-level signal.
+
+`severity` drives residual P0/P1 coverage. `score` (0–100) refines pack
+priority within that policy; an explicit zero is respected. Categories,
+reviewer tags, and guidance are preserved in context packs and reports so an
+agent can explain why a change was routed and what invariant to inspect.
+
+Keep these rules about business impact, not coding style. Use project rules
+and memory cards for detailed behavioral constraints; use risk policy to
+decide attention, depth, and specialist routing.
+
+## Focused Reviewers
+
+`review.reviewers` runs independent passes with distinct focus, scope, model
+profile, verification profile, depth, and budget. Findings retain reviewer
+provenance and duplicate findings from multiple specialists are merged
+without losing attribution.
+
+```yaml
+review:
+  reviewers:
+    - id: correctness
+      name: General correctness
+      focus: Diff-caused behavioral regressions and concrete failure modes.
+      max_packs: 48
+      max_deep_packs: 16
+
+    - id: security
+      name: Security reviewer
+      focus: Authentication, authorization, injection, secrets, SSRF, and trust boundaries.
+      instructions:
+        - Report an exploit path and affected trust boundary.
+        - Do not duplicate generic maintainability feedback.
+      paths:
+        - "src/**"
+        - ".github/workflows/**"
+      exclude_paths:
+        - "**/*.test.ts"
+      risk: [auth, shell, external_io]
+      risk_tags: [security]
+      profile: broad
+      verify_profile: strong
+      review_depth: balanced
+      max_packs: 20
+      max_deep_packs: 10
+      max_input_tokens: 120000
+      verify: true
+
+    - id: finance
+      name: Financial risk reviewer
+      focus: Money movement, precision, idempotency, reconciliation, and loss exposure.
+      risk_tags: [finance]
+      review_depth: deep
+      max_packs: 12
+```
+
+`paths`, `exclude_paths`, `file_kinds`, `risk`, and `risk_tags` scope which
+context packs a reviewer receives. A reviewer with no scope filters sees all
+packs. `review_depth` is:
+
+- `balanced`: selected high-value packs are deep-reviewed and remaining
+  selected packs receive the compact shallow pass;
+- `deep`: only the deep selection is run;
+- `shallow`: all selected packs receive the compact pass.
+
+Run every enabled reviewer by default, or select one or more explicitly:
+
+```bash
+apex-ray review --base main --reviewer security --reviewer finance
+apex-ray gate pre-push --reviewer security
+```
+
+Repeated `--reviewer` is useful for local investigation and CI matrices.
+Unknown and disabled reviewer IDs fail before provider calls.
+
 ## Coverage
 
 `review.llm.coverage_mode` controls how much of a diff receives LLM review:
@@ -176,12 +296,24 @@ Reports show partial severity, reviewed/unreviewed packs, residual P0/P1 work, a
 
 Tune coverage with:
 
-- `max_packs`: total LLM-reviewable pack cap.
+- `max_packs`: hard total cap across deep and shallow passes.
 - `max_deep_packs`: cap for full deep review.
 - `max_input_tokens`: approximate total LLM review input-token budget.
 - `coverage_mode`: breadth/depth strategy.
+- `max_consecutive_provider_failures`: open the provider circuit after this
+  many consecutive infrastructure failures; auth and quota failures open it
+  immediately.
 
 Prefer `balanced` for normal team use. Use `fast` for cheap smoke review and `exhaustive` for high-risk changes when provider cost and latency are acceptable.
+
+Token estimates include provider-specific prompt/scaffold overhead. They are
+deliberately conservative for CLI providers because observed CLI usage
+includes a fixed agent scaffold that a simple characters/4 estimate misses.
+Provider-reported usage remains authoritative in reports and telemetry.
+
+See [Tuning](tuning.md) for TypeScript-oriented starting presets and a
+measurement loop for pack caps, route escalation, risk policy, specialist
+reviewers, concurrency, and CI cost.
 
 ## Reports
 
@@ -195,9 +327,22 @@ review:
     archive: true
     archive_dir: ${local_data}/reports/runs
     retention: 20
+    compression: auto
+    compression_min_bytes: 65536
 ```
 
-`retention` keeps the newest run directories and prunes older ones. Set `retention: null` to disable pruning. Report archives may contain source snippets, findings, file paths, and provider metadata; keep generated reports ignored unless the team intentionally curates a specific artifact.
+`retention` keeps the newest run directories and prunes older ones. Set
+`retention: null` to disable pruning. Newly generated configurations explicitly
+use `compression: auto`, which stores artifacts at
+or above the threshold as deterministic `.gz` files and records encoding and
+sizes in `manifest.json`; `none` and `gzip` force either behavior. Older
+configurations that omit `compression` retain the legacy uncompressed behavior. Small
+archives remain directly readable.
+
+Report archives may contain source snippets, findings, file paths, and
+provider metadata; keep generated reports ignored unless the team
+intentionally curates a specific artifact. Manifest source paths are stored
+relative to the repository where possible.
 
 ## Pre-Push Gate
 

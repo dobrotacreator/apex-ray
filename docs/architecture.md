@@ -4,12 +4,17 @@ This document gives a high-level map of how Apex Ray works. It focuses on produc
 
 ## What Apex Ray Is
 
-Apex Ray is a local CLI-first review engine. It reads a git diff, builds compact TypeScript/JavaScript/Python context around changed code, optionally asks a local LLM CLI provider to review that context, verifies findings, and writes local reports and telemetry.
+Apex Ray is a CLI-first review engine. It reads a git diff, builds compact
+TypeScript/JavaScript/Python context around changed code, optionally asks one
+or more focused reviewers through a local LLM CLI or direct API, verifies
+findings, and writes reports and local telemetry. The same pipeline runs in a
+developer checkout or CI.
 
 The core design goal is local review intelligence:
 
 - deterministic diff, analyzer, context, report, telemetry, benchmark, and eval flows run without hosted services;
-- LLM calls go through locally configured Codex CLI or Claude Code CLI providers;
+- LLM calls go through configured Codex CLI, Claude Code CLI, native API, or
+  explicitly allowlisted compatible providers;
 - project-specific rules and memory stay in the repository when the team chooses to commit them;
 - local config, provider credentials, caches, telemetry, and generated reports stay uncommitted by default.
 
@@ -123,12 +128,20 @@ The pack builder tries to include enough context to evaluate behavior without se
 
 LLM review is optional. Without `--llm`, Apex Ray still produces analyzer/context/report output and can run deterministic benchmark checks.
 
-When LLM review is enabled, provider routing can choose profiles for broad review, verification, and escalation. Profiles can point to Codex CLI, Claude Code CLI, or a fake provider used by tests.
+When LLM review is enabled, provider routing can choose profiles for broad
+review, verification, and escalation. Profiles can point to Codex CLI,
+Claude Code CLI, OpenAI, Anthropic, DeepSeek, Qwen, Kimi, Z.ai, a custom
+compatible endpoint, or a fake provider used by tests. Focused reviewers add
+an orthogonal routing layer: each reviewer first scopes packs by path, kind,
+risk, or project risk tag, then applies its own profile, depth, budget, and
+verification policy.
 
 The LLM layer owns:
 
 - prompt construction;
 - provider subprocess calls;
+- bounded HTTP calls with endpoint validation, secret redaction, retries, and
+  provider usage normalization;
 - response parsing;
 - finding validation and filtering;
 - cache keys and response cache;
@@ -142,6 +155,8 @@ Like the other Python packages, `apex_ray.llm` is a thin public export surface. 
 Reports are written as Markdown, JSON, and optionally HTML. They include:
 
 - findings with severity, confidence, evidence, suggested fix, and suggested test;
+- project risk scores/guidance and reviewer provenance;
+- per-reviewer selection and failure summaries;
 - analyzer results and warnings;
 - LLM runs and routes;
 - reviewed and unreviewed context packs;
@@ -172,7 +187,7 @@ sequenceDiagram
   alt LLM disabled
     Context-->>Report: analyzer/context-only report
   else LLM enabled
-    Context->>Provider: review selected packs
+    Context->>Provider: review selected packs per focused reviewer
     Provider-->>Context: findings and usage
     Context->>Provider: verify findings when configured
     Provider-->>Context: verifier decisions

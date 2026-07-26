@@ -45,6 +45,7 @@ from apex_ray.report import (
     render_markdown,
 )
 from apex_ray.report.coverage import continue_command_for_pack
+from apex_ray.reviewers import ReviewerConfigError, effective_reviewers
 from apex_ray.telemetry import TelemetryError, append_review_telemetry
 from apex_ray.triage import (
     StaleSuppression,
@@ -73,6 +74,10 @@ def pre_push(
     ),
     html_output: Annotated[Path | None, typer.Option("--html", help="Optional HTML report path.")] = None,
     config: Annotated[Path | None, typer.Option("--config", help="Path to config file.")] = None,
+    reviewer: Annotated[
+        list[str] | None,
+        typer.Option("--reviewer", help="Run only this configured reviewer. May be repeated."),
+    ] = None,
     telemetry: Annotated[
         bool,
         typer.Option("--telemetry", help="Append this gate run to review telemetry JSONL."),
@@ -95,6 +100,11 @@ def pre_push(
     try:
         review_config = resolve_runtime_config_paths(root, review_config)
     except LocalDataPathError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    try:
+        if reviewer:
+            effective_reviewers(review_config.reviewers, reviewer)
+    except ReviewerConfigError as exc:
         raise typer.BadParameter(str(exc)) from exc
 
     gate_config = review_config.gates.pre_push
@@ -129,7 +139,7 @@ def pre_push(
             merge_base_sha = git.merge_base(root, target_base, "HEAD")
         except git.GitError as exc:
             raise typer.BadParameter(str(exc)) from exc
-        config_hash = config_fingerprint(review_config, gate_config)
+        config_hash = config_fingerprint(review_config, gate_config, reviewer_ids=reviewer)
         retry_state = load_pre_push_state(state_path)
         previous_head_exists = bool(retry_state and git.object_exists(root, retry_state.head_sha))
         eligibility = check_incremental_eligibility(
@@ -163,6 +173,7 @@ def pre_push(
             base=report_base,
             config_path=config_path,
             progress=progress,
+            reviewer_ids=reviewer,
         )
         if gate_config.auto_followup_p0 and report.llm_coverage.partial_severity == "critical":
             report, selected_packs = continue_review_from_report(
@@ -173,6 +184,7 @@ def pre_push(
                 only_unreviewed=True,
                 review_depth="deep",
                 progress=progress,
+                reviewer_ids=reviewer,
             )
             if selected_packs:
                 progress.event(f"auto-followup reviewed {len(selected_packs)} residual P0 context pack(s)", force=True)
@@ -438,7 +450,11 @@ def _load_previous_report(path: Path) -> ReviewReport | None:
 
 def _set_continue_commands(report: ReviewReport, json_output: Path) -> None:
     for todo in report.llm_coverage.coverage_todos:
-        todo.suggested_command = continue_command_for_pack(todo.context_pack_id, str(json_output))
+        todo.suggested_command = continue_command_for_pack(
+            todo.context_pack_id,
+            str(json_output),
+            todo.reviewer_id,
+        )
 
 
 def _replace_blocking_findings(

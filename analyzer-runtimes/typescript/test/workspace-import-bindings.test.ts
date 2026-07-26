@@ -128,7 +128,11 @@ function identifier(name: string, namespaceQualifier: string | null): Identifier
   return {
     name,
     namespaceQualifier,
-    reference: reference(`${namespaceQualifier ? `${namespaceQualifier}.` : ""}${name}`),
+    reference: {
+      file: "src/consumer.ts",
+      line: 1,
+      kind: "read",
+    },
   };
 }
 

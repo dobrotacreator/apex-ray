@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 
 import { analyze } from "../dist/analyzer.js";
 import { parseArgs } from "../dist/cli.js";
+import { repoIndexCachePath } from "../dist/indexes/repo-cache.js";
 import type { AnalyzerResult } from "../dist/types.js";
 import { writeFile } from "./helpers.js";
 
@@ -148,6 +149,37 @@ test("analyzer library API matches the CLI JSON contract", () => {
     );
   } finally {
     fs.rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("analyzer exposes repo index cache write failures as warnings", () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "apex-ray-ts-analyzer-cache-warning-"));
+  const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "apex-ray-ts-analyzer-cache-warning-home-"));
+  try {
+    writeFile(
+      repo,
+      "tsconfig.json",
+      JSON.stringify({
+        compilerOptions: { target: "ES2022" },
+        include: ["src/**/*.ts"],
+      }),
+    );
+    writeFile(repo, "src/cart.ts", "export const cart = true;\n");
+    fs.mkdirSync(repoIndexCachePath(repo, cacheDir));
+
+    const result = runAnalyzerInProcess(repo, [
+      "src/cart.ts",
+      "--range",
+      "src/cart.ts:1-1",
+      "--index-cache-dir",
+      cacheDir,
+    ]);
+
+    assert.equal(result.indexCache?.written, false);
+    assert.ok(result.warnings.some((warning) => warning.includes("repo index cache") && warning.includes("could not be written")));
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
+    fs.rmSync(cacheDir, { recursive: true, force: true });
   }
 });
 

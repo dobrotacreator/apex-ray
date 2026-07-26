@@ -197,7 +197,6 @@ function identifier(
     reference: {
       file: "src/cart.ts",
       line,
-      text: `${namespaceQualifier ? `${namespaceQualifier}.` : ""}${name}();`,
       kind,
     },
   };

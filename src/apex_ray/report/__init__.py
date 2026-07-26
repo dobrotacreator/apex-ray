@@ -5,6 +5,7 @@ from apex_ray.report.core import render_markdown as render_markdown
 from apex_ray.report.html import render_html as render_html
 from apex_ray.report.loading import ReviewReportLoadError as ReviewReportLoadError
 from apex_ray.report.loading import load_review_report as load_review_report
+from apex_ray.report.sarif import render_sarif as render_sarif
 
 __all__ = [
     "ReportArtifact",
@@ -14,4 +15,5 @@ __all__ = [
     "load_review_report",
     "render_html",
     "render_markdown",
+    "render_sarif",
 ]

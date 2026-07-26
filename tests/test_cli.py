@@ -71,9 +71,10 @@ def test_init_creates_config(tmp_path: Path, monkeypatch) -> None:
     assert "apex-ray gate pre-push" in (tmp_path / "lefthook.yml").read_text(encoding="utf-8")
     assert "--no-llm" not in (tmp_path / "lefthook.yml").read_text(encoding="utf-8")
     config_text = (tmp_path / ".apex-ray" / "config.yml").read_text(encoding="utf-8")
-    assert "max_packs: 64" in config_text
-    assert "max_deep_packs: 48" in config_text
-    assert "max_input_tokens: 300000" in config_text
+    assert "max_packs: 48" in config_text
+    assert "max_deep_packs: 16" in config_text
+    assert "max_input_tokens: 180000" in config_text
+    assert "jobs: 2" in config_text
     assert "progress: auto" in config_text
     assert "Next: inspect and commit Apex Ray setup files" in result.stdout
 
@@ -901,6 +902,140 @@ def test_gate_pre_push_incremental_retry_reviews_previous_head_delta(tmp_path: P
     assert "Mode: incremental" in second.stdout
 
 
+def test_gate_pre_push_incremental_retry_tracks_reviewer_set_not_order(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    config = tmp_path / ".apex-ray" / "config.yml"
+    config.parent.mkdir(parents=True)
+    config.write_text(
+        """
+review:
+  reviewers:
+    - id: security
+      paths: [src/auth/**]
+    - id: finance
+      paths: [src/payments/**]
+  gates:
+    pre_push:
+      incremental_retry:
+        enabled: true
+""".lstrip(),
+        encoding="utf-8",
+    )
+    diff_calls: list[str] = []
+    heads = iter(["head-1", "head-2", "head-3", "head-4"])
+
+    def fake_run_review_pipeline(root, diff_text, target_mode, review_config, **kwargs):
+        diff_calls.append(diff_text)
+        return build_report(
+            ProjectProfile(root=str(root), is_git_repo=True),
+            review_config,
+            parse_unified_diff(diff_text, target_mode=target_mode, base=kwargs.get("base")),
+        )
+
+    monkeypatch.setattr("apex_ray.cli.gate.git.repo_root", lambda _cwd: tmp_path)
+    monkeypatch.setattr("apex_ray.cli.gate.git.is_git_repo", lambda _root: True)
+    monkeypatch.setattr("apex_ray.cli.gate.git.rev_parse", lambda _root, _ref: next(heads))
+    monkeypatch.setattr("apex_ray.cli.gate.git.merge_base", lambda _root, _base, _head: "base-1")
+    monkeypatch.setattr("apex_ray.cli.gate.git.object_exists", lambda _root, _ref: True)
+    monkeypatch.setattr(
+        "apex_ray.cli.gate.git.diff_base",
+        lambda _root, _base: _diff_for("src/orders.ts", "old", "full"),
+    )
+    monkeypatch.setattr(
+        "apex_ray.cli.gate.git.diff_range",
+        lambda _root, old, new: _diff_for("src/orders.ts", old, new),
+    )
+    monkeypatch.setattr("apex_ray.cli.gate.run_review_pipeline", fake_run_review_pipeline)
+    monkeypatch.setattr("apex_ray.cli.gate.continue_review_from_report", lambda report, **_kwargs: (report, []))
+
+    first = runner.invoke(app, ["gate", "pre-push", "--reviewer", "security"], catch_exceptions=False)
+    second = runner.invoke(app, ["gate", "pre-push", "--reviewer", "finance"], catch_exceptions=False)
+    third = runner.invoke(
+        app,
+        ["gate", "pre-push", "--reviewer", "security", "--reviewer", "finance"],
+        catch_exceptions=False,
+    )
+    fourth = runner.invoke(
+        app,
+        ["gate", "pre-push", "--reviewer", "finance", "--reviewer", "security"],
+        catch_exceptions=False,
+    )
+
+    assert first.exit_code == 0
+    assert second.exit_code == 0
+    assert third.exit_code == 0
+    assert fourth.exit_code == 0
+    assert diff_calls == [
+        _diff_for("src/orders.ts", "old", "full"),
+        _diff_for("src/orders.ts", "old", "full"),
+        _diff_for("src/orders.ts", "old", "full"),
+        _diff_for("src/orders.ts", "head-3", "HEAD"),
+    ]
+    assert "Fallback reason: review config, reviewer scope," in second.stdout
+    assert "Mode: incremental" in fourth.stdout
+
+
+def test_gate_pre_push_auto_followup_preserves_reviewer_scope(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    config = tmp_path / ".apex-ray" / "config.yml"
+    config.parent.mkdir(parents=True)
+    config.write_text(
+        """
+review:
+  reviewers:
+    - id: security
+      focus: Security boundaries.
+  gates:
+    pre_push:
+      auto_followup_p0: true
+""".lstrip(),
+        encoding="utf-8",
+    )
+    seen: dict[str, object] = {}
+
+    def fake_run_review_pipeline(root, _diff_text, _target_mode, review_config, **kwargs):
+        seen["initial_reviewer_ids"] = kwargs["reviewer_ids"]
+        report = build_report(
+            ProjectProfile(root=str(root), is_git_repo=True),
+            review_config,
+            DiffSummary(target_mode=TargetMode.BASE, stats=DiffStats(files_changed=1)),
+        )
+        report.llm_coverage.partial_severity = "critical"
+        return report
+
+    def fake_continue(report, **kwargs):
+        seen["followup_reviewer_ids"] = kwargs["reviewer_ids"]
+        report.llm_coverage.partial_severity = "none"
+        return report, [object()]
+
+    monkeypatch.setattr("apex_ray.cli.gate.git.repo_root", lambda _cwd: tmp_path)
+    monkeypatch.setattr("apex_ray.cli.gate.git.is_git_repo", lambda _root: True)
+    monkeypatch.setattr(
+        "apex_ray.cli.gate.git.diff_base",
+        lambda _root, _base: _diff_for("src/auth.ts", "old", "new"),
+    )
+    monkeypatch.setattr("apex_ray.cli.gate.run_review_pipeline", fake_run_review_pipeline)
+    monkeypatch.setattr("apex_ray.cli.gate.continue_review_from_report", fake_continue)
+
+    result = runner.invoke(
+        app,
+        ["gate", "pre-push", "--reviewer", "security"],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert seen == {
+        "initial_reviewer_ids": ["security"],
+        "followup_reviewer_ids": ["security"],
+    }
+
+
 def test_gate_pre_push_incremental_retry_carries_blocker_when_unrelated_delta(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
     _write_incremental_gate_config(tmp_path)
@@ -1339,6 +1474,54 @@ def test_review_patch_reports_explicit_config_path(tmp_path: Path, monkeypatch) 
     assert f"- Config: `{config}`" in output.read_text(encoding="utf-8")
 
 
+def test_review_passes_repeatable_reviewer_selection_to_pipeline(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    patch = tmp_path / "sample.diff"
+    patch.write_text((FIXTURE_DIR / "sample.diff").read_text(encoding="utf-8"), encoding="utf-8")
+    config_path = tmp_path / "reviewers.yml"
+    config_path.write_text(
+        """
+review:
+  reviewers:
+    - id: security
+      focus: Security boundaries.
+    - id: finance
+      focus: Financial correctness.
+""",
+        encoding="utf-8",
+    )
+    seen: dict[str, object] = {}
+
+    def fake_run_review_pipeline(root, diff_text, target_mode, config, **kwargs):
+        seen["reviewer_ids"] = kwargs.get("reviewer_ids")
+        return build_report(
+            ProjectProfile(root=str(root), is_git_repo=False),
+            config,
+            parse_unified_diff(diff_text, target_mode=target_mode),
+        )
+
+    monkeypatch.setattr("apex_ray.cli.main.run_review_pipeline", fake_run_review_pipeline)
+
+    result = runner.invoke(
+        app,
+        [
+            "review",
+            "--diff",
+            str(patch),
+            "--config",
+            str(config_path),
+            "--reviewer",
+            "finance",
+            "--reviewer",
+            "security",
+        ],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert seen["reviewer_ids"] == ["finance", "security"]
+
+
 def test_review_rejects_base_with_diff(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
     patch = tmp_path / "sample.diff"
@@ -1385,6 +1568,51 @@ def test_review_rejects_same_markdown_and_html_output(tmp_path: Path, monkeypatc
 
     assert result.exit_code != 0
     assert "Markdown and HTML output paths must be different" in result.output
+
+
+def test_review_writes_sarif_and_rejects_duplicate_output_path(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    patch = tmp_path / "sample.diff"
+    patch.write_text((FIXTURE_DIR / "sample.diff").read_text(encoding="utf-8"), encoding="utf-8")
+    sarif_output = tmp_path / "review.sarif"
+
+    result = runner.invoke(
+        app,
+        [
+            "review",
+            "--diff",
+            str(patch),
+            "--output",
+            str(tmp_path / "review.md"),
+            "--json",
+            str(tmp_path / "review.json"),
+            "--sarif",
+            str(sarif_output),
+        ],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert json.loads(sarif_output.read_text(encoding="utf-8"))["version"] == "2.1.0"
+    duplicate = runner.invoke(
+        app,
+        [
+            "review",
+            "--diff",
+            str(patch),
+            "--output",
+            str(tmp_path / "duplicate.md"),
+            "--json",
+            str(tmp_path / "duplicate.json"),
+            "--sarif",
+            str(tmp_path / "duplicate.json"),
+        ],
+    )
+    assert duplicate.exit_code != 0
+    assert "JSON and SARIF output paths must be different" in duplicate.output
 
 
 def test_review_continue_from_respects_configured_llm_default(tmp_path: Path, monkeypatch) -> None:
@@ -1450,6 +1678,120 @@ def test_review_continue_from_can_enable_llm_explicitly(tmp_path: Path, monkeypa
 
     assert result.exit_code == 0
     assert seen["llm_enabled"] is True
+
+
+def test_review_continue_from_preserves_explicit_config_and_repeatable_reviewers(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    prior = build_report(
+        ProjectProfile(root=str(tmp_path), is_git_repo=True),
+        ReviewConfig(),
+        DiffSummary(target_mode=TargetMode.PATCH, stats=DiffStats(files_changed=1)),
+    )
+    report_path = tmp_path / "review.json"
+    report_path.write_text(prior.model_dump_json(indent=2), encoding="utf-8")
+    config_path = tmp_path / "continued.yml"
+    config_path.write_text(
+        """
+review:
+  reviewers:
+    - id: security
+      focus: Authorization boundaries.
+    - id: finance
+      focus: Financial correctness.
+""",
+        encoding="utf-8",
+    )
+    seen: dict[str, object] = {}
+
+    def fake_continue(*args, **kwargs):
+        seen["configured_reviewers"] = [item.id for item in kwargs["config"].reviewers]
+        seen["reviewer_ids"] = kwargs["reviewer_ids"]
+        return prior, [object()]
+
+    monkeypatch.setattr("apex_ray.cli.main.continue_review_from_report", fake_continue)
+
+    result = runner.invoke(
+        app,
+        [
+            "review",
+            "--continue-from",
+            str(report_path),
+            "--config",
+            str(config_path),
+            "--reviewer",
+            "finance",
+            "--reviewer",
+            "security",
+            "--output",
+            str(tmp_path / "continued.md"),
+            "--json",
+            str(tmp_path / "continued.json"),
+        ],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert seen == {
+        "configured_reviewers": ["security", "finance"],
+        "reviewer_ids": ["finance", "security"],
+    }
+
+
+def test_review_auto_followup_preserves_explicit_reviewer_scope(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    patch = tmp_path / "sample.diff"
+    patch.write_text((FIXTURE_DIR / "sample.diff").read_text(encoding="utf-8"), encoding="utf-8")
+    config_path = tmp_path / "reviewers.yml"
+    config_path.write_text(
+        """
+review:
+  reviewers:
+    - id: security
+      focus: Authorization boundaries.
+""",
+        encoding="utf-8",
+    )
+    seen: dict[str, object] = {}
+
+    def fake_run_review_pipeline(root, _diff_text, _target_mode, config, **_kwargs):
+        report = build_report(
+            ProjectProfile(root=str(root), is_git_repo=False),
+            config,
+            DiffSummary(target_mode=TargetMode.PATCH, stats=DiffStats(files_changed=1)),
+        )
+        report.llm_coverage.partial_severity = "critical"
+        return report
+
+    def fake_continue(report, **kwargs):
+        seen["reviewer_ids"] = kwargs["reviewer_ids"]
+        return report, [object()]
+
+    monkeypatch.setattr("apex_ray.cli.main.run_review_pipeline", fake_run_review_pipeline)
+    monkeypatch.setattr("apex_ray.cli.main.continue_review_from_report", fake_continue)
+
+    result = runner.invoke(
+        app,
+        [
+            "review",
+            "--diff",
+            str(patch),
+            "--config",
+            str(config_path),
+            "--reviewer",
+            "security",
+            "--auto-followup",
+            "--output",
+            str(tmp_path / "review.md"),
+            "--json",
+            str(tmp_path / "review.json"),
+        ],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert seen["reviewer_ids"] == ["security"]
 
 
 def test_review_continue_from_accepts_legacy_context_pack_symbols_without_line_ranges(

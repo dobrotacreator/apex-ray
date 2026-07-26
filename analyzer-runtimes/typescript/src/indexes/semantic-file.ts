@@ -7,7 +7,12 @@ import {
   propertyNameText,
   unwrapExpression,
 } from "../ast-utils.js";
-import { hasAncestor, referenceForIdentifier, referenceForNode } from "../references/utils.js";
+import {
+  hasAncestor,
+  indexedReferenceForIdentifier,
+  indexedReferenceForNode,
+  referenceForNode,
+} from "../references/utils.js";
 import type {
   ClassHeritageIndexEntry,
   IdentifierIndexEntry,
@@ -26,7 +31,7 @@ export function collectIdentifierIndex(repo: string, source: ts.SourceFile): Ide
       identifiers.push({
         name: node.text,
         namespaceQualifier: namespaceQualifierForIdentifier(node),
-        reference: referenceForIdentifier(repo, source, node),
+        reference: indexedReferenceForIdentifier(repo, source, node),
       });
     }
     if (ts.isStringLiteralLike(node)) {
@@ -35,7 +40,7 @@ export function collectIdentifierIndex(repo: string, source: ts.SourceFile): Ide
         identifiers.push({
           name: node.text,
           namespaceQualifier,
-          reference: referenceForNode(repo, source, node, referenceKindForElementAccessArgument(node)),
+          reference: indexedReferenceForNode(repo, source, node, referenceKindForElementAccessArgument(node)),
         });
       }
     }

@@ -3,12 +3,14 @@ import os
 import shutil
 import signal
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 from typing import Literal
 
 from pydantic import ValidationError
 
+from apex_ray.discovery import list_project_files
 from apex_ray.models import (
     AnalyzerConfig,
     AnalyzerIndexCacheStats,
@@ -16,11 +18,14 @@ from apex_ray.models import (
     AnalyzerShardFailure,
     ChangedFile,
     FileKind,
+    RiskSeverity,
 )
+from apex_ray.risk import risk_signal_score
 
 from .common import AnalyzerError, _collapse_ranges
 
 TS_JS_LANGUAGES = {"typescript", "javascript"}
+TS_JS_INDEX_SUFFIXES = {".js", ".jsx", ".ts", ".tsx"}
 
 
 def has_ts_js_changes(files: list[ChangedFile]) -> bool:
@@ -42,6 +47,9 @@ def run_typescript_analyzer(
     repo_root: Path,
     files: list[ChangedFile],
     config: AnalyzerConfig | None = None,
+    *,
+    ignored_patterns: list[str] | None = None,
+    project_files: list[Path] | None = None,
 ) -> AnalyzerResult | None:
     changed_files = ts_js_changed_files(files)
     if not changed_files:
@@ -54,14 +62,42 @@ def run_typescript_analyzer(
     if not script.exists():
         raise AnalyzerError(f"TypeScript analyzer is not built: {script}")
 
+    started_at = time.monotonic()
+    with tempfile.TemporaryDirectory(prefix="apex-ray-typescript-inventory-") as inventory_dir:
+        file_manifest_path = Path(inventory_dir) / "files.json"
+        _write_typescript_file_manifest(
+            repo_root,
+            file_manifest_path,
+            ignored_patterns,
+            project_files=project_files,
+        )
+        return _run_typescript_analyzer_shards(
+            repo_root,
+            changed_files,
+            config,
+            script,
+            file_manifest_path,
+            started_at=started_at,
+        )
+
+
+def _run_typescript_analyzer_shards(
+    repo_root: Path,
+    changed_files: list[ChangedFile],
+    config: AnalyzerConfig,
+    script: Path,
+    file_manifest_path: Path,
+    *,
+    started_at: float,
+) -> AnalyzerResult:
     results: list[AnalyzerResult] = []
     failures: list[AnalyzerShardFailure] = []
     shards = list(_shard_changed_files(changed_files, config))
     large_change_set_size = len(changed_files) if len(changed_files) >= config.large_change_file_threshold else None
     total_timeout_seconds = _typescript_total_timeout_seconds(changed_files, shards, config)
-    deadline = time.monotonic() + total_timeout_seconds
+    deadline = started_at + total_timeout_seconds
     for index, shard in enumerate(shards, start=1):
-        remaining_seconds = config.timeout_seconds if len(shards) == 1 else deadline - time.monotonic()
+        remaining_seconds = deadline - time.monotonic()
         if remaining_seconds <= 0:
             timeout_error = AnalyzerError(
                 f"TypeScript analyzer total timeout after {_format_seconds(total_timeout_seconds)}"
@@ -86,6 +122,7 @@ def run_typescript_analyzer(
                     config,
                     timeout_seconds=min(config.timeout_seconds, remaining_seconds),
                     large_change_set_size=large_change_set_size,
+                    file_manifest_path=file_manifest_path,
                 )
             )
         except AnalyzerError as exc:
@@ -118,6 +155,7 @@ def _run_typescript_analyzer_shard(
     config: AnalyzerConfig,
     timeout_seconds: float | None = None,
     large_change_set_size: int | None = None,
+    file_manifest_path: Path | None = None,
 ) -> AnalyzerResult:
     actual_timeout = config.timeout_seconds if timeout_seconds is None else max(0.001, timeout_seconds)
     args = _typescript_analyzer_args(
@@ -127,6 +165,7 @@ def _run_typescript_analyzer_shard(
         config,
         large_change_set_size=large_change_set_size,
         analysis_time_budget_ms=_analysis_time_budget_ms(actual_timeout),
+        file_manifest_path=file_manifest_path,
     )
     try:
         proc = _run_analyzer_process(
@@ -153,6 +192,7 @@ def _typescript_analyzer_args(
     *,
     large_change_set_size: int | None = None,
     analysis_time_budget_ms: int | None = None,
+    file_manifest_path: Path | None = None,
 ) -> list[str]:
     args = ["node", str(script), "--repo", str(repo_root), "--changed"]
     args.extend(file.new_path for file in changed_files if file.new_path)
@@ -160,6 +200,8 @@ def _typescript_analyzer_args(
         args.extend(["--large-change-set-size", str(large_change_set_size)])
     if analysis_time_budget_ms is not None:
         args.extend(["--analysis-time-budget-ms", str(analysis_time_budget_ms)])
+    if file_manifest_path is not None:
+        args.extend(["--file-manifest", str(file_manifest_path)])
     if not config.index_cache_enabled:
         args.append("--no-index-cache")
     if config.index_cache_dir:
@@ -172,6 +214,25 @@ def _typescript_analyzer_args(
         for line, content in _deleted_lines(file):
             args.extend(["--deleted-line", file.path, str(line), content])
     return args
+
+
+def _write_typescript_file_manifest(
+    repo_root: Path,
+    manifest_path: Path,
+    ignored_patterns: list[str] | None = None,
+    *,
+    project_files: list[Path] | None = None,
+) -> None:
+    inventory = project_files if project_files is not None else list_project_files(repo_root, ignored_patterns)
+    files = sorted(
+        path.as_posix()
+        for path in inventory
+        if path.suffix.lower() in TS_JS_INDEX_SUFFIXES and not path.name.lower().endswith(".d.ts")
+    )
+    manifest_path.write_text(
+        json.dumps({"version": 1, "files": files}, separators=(",", ":")),
+        encoding="utf-8",
+    )
 
 
 def _run_analyzer_process(
@@ -245,9 +306,18 @@ def _typescript_total_timeout_seconds(
     return config.timeout_seconds * min(len(shards), 4)
 
 
-def _changed_file_shard_priority(file: ChangedFile) -> tuple[int, int, int]:
-    high_risk = sum(1 for signal in file.risk_signals if str(signal.severity) == "high")
-    medium_risk = sum(1 for signal in file.risk_signals if str(signal.severity) == "medium")
+def _changed_file_shard_priority(file: ChangedFile) -> tuple[int, int, int, int]:
+    severity_rank = {
+        RiskSeverity.CRITICAL: 4,
+        RiskSeverity.HIGH: 3,
+        RiskSeverity.MEDIUM: 2,
+        RiskSeverity.LOW: 1,
+    }
+    risk_band = max(
+        (severity_rank.get(signal.severity, 0) for signal in file.risk_signals),
+        default=0,
+    )
+    risk_score = sum(risk_signal_score(signal) for signal in file.risk_signals)
     kind_score = {
         FileKind.SOURCE: 6,
         FileKind.SCHEMA: 5,
@@ -257,7 +327,7 @@ def _changed_file_shard_priority(file: ChangedFile) -> tuple[int, int, int]:
         FileKind.UNKNOWN: 2,
         FileKind.TEST: 1,
     }.get(file.file_kind, 2)
-    return (high_risk * 100 + medium_risk * 10, kind_score, -len(file.path))
+    return (risk_band, risk_score, kind_score, -len(file.path))
 
 
 def _format_seconds(seconds: float) -> str:

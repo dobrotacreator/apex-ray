@@ -583,7 +583,11 @@ def _replace_output_directory(source: Path, destination: Path) -> None:
 
 def _set_report_continue_commands(report: ReviewReport, report_json_path: Path) -> None:
     for todo in report.llm_coverage.coverage_todos:
-        todo.suggested_command = continue_command_for_pack(todo.context_pack_id, str(report_json_path))
+        todo.suggested_command = continue_command_for_pack(
+            todo.context_pack_id,
+            str(report_json_path),
+            todo.reviewer_id,
+        )
 
 
 @contextmanager

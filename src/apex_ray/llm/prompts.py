@@ -17,6 +17,7 @@ def build_review_prompt(pack: ContextPack) -> str:
     return (
         "You are Apex Ray, a strict senior code reviewer.\n"
         "Review exactly one context pack from a code diff.\n"
+        f"{_focused_reviewer_guidance(pack)}"
         f"{_language_review_guidance(pack)}\n"
         "Report only concrete issues caused by the diff. Do not report style nits, generic advice, or CI/linter findings.\n"
         "Start from diff_snippet and changed_snippets, then use impact_notes only as navigation hints.\n"
@@ -41,6 +42,7 @@ def build_shallow_review_prompt(pack: ContextPack) -> str:
     return (
         "You are Apex Ray's fast shallow code-review pass.\n"
         "Review exactly one compact code context pack from a diff.\n"
+        f"{_focused_reviewer_guidance(pack)}"
         f"{_language_shallow_review_guidance(pack)}\n"
         "Use only the supplied diff_snippet, changed_snippets, risk_signals, rules, and memory hints.\n"
         "This pass optimizes breadth and recall on large PRs; report only concrete diff-caused issues visible in this compact context.\n"
@@ -161,6 +163,26 @@ def _language_review_guidance(pack: ContextPack) -> str:
         "For fallback or unknown-language packs, prioritize generic boundary, auth, validation, persistence, "
         "serialization, path, shell, cache, and concurrency risks that are directly visible in the supplied context."
     )
+
+
+def _focused_reviewer_guidance(pack: ContextPack) -> str:
+    reviewer = pack.reviewer
+    if reviewer is None:
+        return ""
+    lines = [
+        f"Focused reviewer: {reviewer.name or reviewer.id} (`{reviewer.id}`).",
+        f"Primary focus: {reviewer.focus or 'Concrete correctness issues within the configured scope.'}",
+    ]
+    if reviewer.instructions:
+        lines.append("Reviewer-specific instructions:")
+        lines.extend(f"- {instruction}" for instruction in reviewer.instructions)
+    lines.extend(
+        [
+            "Stay within this focus unless another directly evidenced issue is blocking or critical.",
+            "Do not turn the focused pass into a duplicate general review.",
+        ]
+    )
+    return "\n".join(lines) + "\n"
 
 
 def _language_shallow_review_guidance(pack: ContextPack) -> str:

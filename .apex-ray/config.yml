@@ -29,59 +29,159 @@ review:
     enabled: true
     paths:
       - .apex-ray/memory
+  risk:
+    built_in_enabled: true
+    rules:
+      - id: provider-and-ci-trust-boundary
+        title: LLM provider and CI trust boundary
+        severity: critical
+        score: 98
+        paths:
+          - "src/apex_ray/llm/api.py"
+          - "src/apex_ray/llm/http.py"
+          - "src/apex_ray/llm/providers.py"
+          - ".github/actions/**"
+          - ".github/workflows/**"
+        exclude_paths:
+          - "tests/**"
+        categories: [security, external-io, ci]
+        reviewer_tags: [security]
+        guidance: Check credential isolation, endpoint trust, redaction, untrusted PR input, token permissions, and fail-closed behavior.
+      - id: configuration-and-report-contract
+        title: Configuration and report compatibility contract
+        severity: high
+        score: 88
+        paths:
+          - "src/apex_ray/config.py"
+          - "src/apex_ray/models.py"
+          - "src/apex_ray/invocation.py"
+          - "src/apex_ray/report/**"
+          - "src/apex_ray/telemetry.py"
+        exclude_paths:
+          - "tests/**"
+        categories: [compatibility, public-api]
+        reviewer_tags: [compatibility]
+        guidance: Preserve config precedence, strict validation, prior report loading, stable defaults, and machine-readable schema behavior.
+      - id: typescript-analyzer-core
+        title: TypeScript analyzer performance and correctness
+        severity: high
+        score: 86
+        paths:
+          - "analyzer-runtimes/typescript/src/**"
+          - "src/apex_ray/analyzers/typescript.py"
+        exclude_paths:
+          - "analyzer-runtimes/typescript/test/**"
+          - "tests/**"
+        categories: [typescript, performance, analyzer]
+        reviewer_tags: [typescript-core]
+        guidance: Check symbol/reference completeness, cache invalidation, bounded memory, workspace scale, and fallback behavior.
   llm:
     enabled: true
     provider: codex_cli
     profiles:
-      cheap:
+      broad:
         provider: codex_cli
-        model: gpt-5.3-codex-spark
-        effort: xhigh
+        model: gpt-5.6-terra
+        effort: low
       strong:
         provider: codex_cli
-        model: gpt-5.4
-        effort: medium
-      frontier:
-        provider: codex_cli
-        model: gpt-5.5
+        model: gpt-5.6-sol
         effort: medium
     routing:
-      review_profile: cheap
+      review_profile: broad
       verify_profile: strong
-      escalated_review_profile: frontier
-      escalated_verify_profile: frontier
+      escalated_review_profile: strong
+      escalated_verify_profile: strong
       escalate_review_when:
         risk:
           - auth
           - shell
-          - persistence
-          - public_api
-          - external_io
           - migration
         rule_severity:
           - high
           - critical
         strict_rule: true
-        pack_truncated: true
       escalate_verify_when:
         finding_severity:
           - high
           - critical
     coverage_mode: balanced
-    max_packs: 96
-    max_deep_packs: 64
-    max_input_tokens: 450000
+    max_packs: 48
+    max_deep_packs: 16
+    max_input_tokens: 180000
     timeout_seconds: 900
-    jobs: 4
+    jobs: 2
+    max_consecutive_provider_failures: 3
     verify: true
     cache_dir: ${local_data}/cache/llm
+  reviewers:
+    - id: correctness
+      name: Correctness
+      focus: Diff-caused behavioral regressions, broken contracts, and concrete failure modes.
+      profile: broad
+      verify_profile: strong
+      review_depth: balanced
+      max_packs: 36
+      max_deep_packs: 12
+      max_input_tokens: 130000
+      verify: true
+      required: true
+    - id: security
+      name: Security
+      focus: Credential exposure, endpoint trust, injection, authorization, CI permissions, and untrusted input boundaries.
+      instructions:
+        - State the violated trust boundary and a concrete exploit or leak path.
+        - Do not report generic defense-in-depth suggestions as defects.
+      risk:
+        - auth
+        - shell
+        - external_io
+      risk_tags:
+        - security
+      profile: strong
+      verify_profile: strong
+      review_depth: deep
+      max_packs: 10
+      max_deep_packs: 10
+      max_input_tokens: 55000
+      verify: true
+    - id: typescript
+      name: TypeScript analyzer
+      focus: Analyzer correctness, symbol/reference coverage, cache invalidation, memory growth, and large-workspace performance.
+      instructions:
+        - Check both analyzer runtime behavior and the Python integration contract.
+        - Require bounded behavior on generated, minified, dependency, and large-workspace inputs.
+      risk_tags:
+        - typescript-core
+      profile: broad
+      verify_profile: strong
+      review_depth: balanced
+      max_packs: 12
+      max_deep_packs: 8
+      max_input_tokens: 65000
+      verify: true
+    - id: compatibility
+      name: Configuration and report compatibility
+      focus: Config precedence, schema evolution, archive loading, report stability, and safe defaults.
+      risk_tags:
+        - compatibility
+      profile: broad
+      verify_profile: strong
+      review_depth: balanced
+      max_packs: 10
+      max_deep_packs: 6
+      max_input_tokens: 50000
+      verify: true
   telemetry:
     enabled: true
     path: ${local_data}/telemetry/review-runs.jsonl
+    path_mode: anonymized
   reports:
     archive: true
     archive_dir: ${local_data}/reports/runs
     retention: 20
+    compression: auto
+    compression_min_bytes: 65536
   gates:
     pre_push:
       enabled: true

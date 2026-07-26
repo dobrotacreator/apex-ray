@@ -8,9 +8,11 @@ from apex_ray.models import (
     DiffLineKind,
     DiffSummary,
     FileKind,
+    RiskConfig,
     RiskSeverity,
     RiskSignal,
 )
+from apex_ray.risk import RISK_SEVERITY_SCORES, apply_project_risk_policy, current_line_anchor
 
 LOCKFILE_NAMES = {
     "package-lock.json",
@@ -109,7 +111,12 @@ RISK_KEYWORDS: dict[str, tuple[RiskSeverity, tuple[str, ...], str]] = {
 }
 
 
-def classify_diff(diff: DiffSummary, ignore_patterns: list[str]) -> DiffSummary:
+def classify_diff(
+    diff: DiffSummary,
+    ignore_patterns: list[str],
+    risk: RiskConfig | None = None,
+) -> DiffSummary:
+    risk = risk or RiskConfig()
     test_changed = False
     for file in diff.files:
         classify_file(file, ignore_patterns)
@@ -119,16 +126,19 @@ def classify_diff(diff: DiffSummary, ignore_patterns: list[str]) -> DiffSummary:
     for file in diff.files:
         if file.is_ignored:
             continue
-        add_risk_signals(file)
-        if file.file_kind == FileKind.SOURCE and not test_changed:
+        if risk.built_in_enabled:
+            add_risk_signals(file)
+        if risk.built_in_enabled and file.file_kind == FileKind.SOURCE and not test_changed:
             file.risk_signals.append(
                 RiskSignal(
                     kind="test_gap",
                     severity=RiskSeverity.LOW,
                     reason="Source changed without test files in the same diff.",
                     file=file.path,
+                    score=RISK_SEVERITY_SCORES[RiskSeverity.LOW],
                 )
             )
+        apply_project_risk_policy(file, risk)
 
     diff.stats.ignored_files = sum(1 for file in diff.files if file.is_ignored)
     return diff
@@ -208,11 +218,11 @@ def add_risk_signals(file: ChangedFile) -> None:
         _append_signal(file, seen, "dependency", RiskSeverity.LOW, "Dependency manifest changed.", None)
 
     for hunk in file.hunks:
-        for line in hunk.lines:
+        for index, line in enumerate(hunk.lines):
             if line.kind == DiffLineKind.CONTEXT:
                 continue
             content = line.content.lower()
-            target_line = line.new_line or line.old_line
+            target_line = current_line_anchor(hunk, index)
             for kind, (severity, keywords, reason) in RISK_KEYWORDS.items():
                 if any(_matches_risk_keyword(content, keyword) for keyword in keywords):
                     signal = _append_signal(file, seen, kind, severity, reason, target_line)
@@ -238,7 +248,14 @@ def _append_signal(
     if key in seen:
         return None
     seen.add(key)
-    signal = RiskSignal(kind=kind, severity=severity, reason=reason, file=file.path, line=line)
+    signal = RiskSignal(
+        kind=kind,
+        severity=severity,
+        reason=reason,
+        file=file.path,
+        line=line,
+        score=RISK_SEVERITY_SCORES[str(severity)],
+    )
     file.risk_signals.append(signal)
     return signal
 

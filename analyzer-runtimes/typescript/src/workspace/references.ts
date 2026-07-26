@@ -5,6 +5,7 @@ import ts from "typescript";
 import { identifierFromExpression, propertyAssignmentNamed } from "../ast-utils.js";
 import { findIndexedPackageForFile } from "../module-resolution.js";
 import { addReference } from "../references/merge.js";
+import { materializeIdentifierReference } from "../references/utils.js";
 import {
   inferredMemberIdentifiers,
   isMemberReferenceForTarget,
@@ -47,7 +48,7 @@ export function collectWorkspaceImportReferences(repo: string, repoIndex: RepoIn
     for (const identifier of entry.identifiers) {
       if (refs.length >= limit) break;
       if (isIdentifierMatchedByImportedBindings(identifier, importedBindings)) {
-        addReference(refs, seen, identifier.reference, limit);
+        addReference(refs, seen, materializeIdentifierReference(repoIndex, entry, identifier), limit);
       }
     }
   }
@@ -90,7 +91,7 @@ export function collectWorkspaceMemberReferences(repo: string, repoIndex: RepoIn
     for (const identifier of entry.identifiers) {
       if (refs.length >= limit) break;
       if (isMemberReferenceForTarget(identifier, target.analysis.name, entry, importedBindings)) {
-        addReference(refs, seen, identifier.reference, limit);
+        addReference(refs, seen, materializeIdentifierReference(repoIndex, entry, identifier), limit);
       }
     }
   }
@@ -108,7 +109,7 @@ export function collectWorkspaceMemberReferences(repo: string, repoIndex: RepoIn
     for (const identifier of entry.identifiers) {
       if (refs.length >= limit) break;
       if (isIdentifierMatchedByImportedBindings(identifier, importedBindings)) {
-        addReference(refs, seen, identifier.reference, limit);
+        addReference(refs, seen, materializeIdentifierReference(repoIndex, entry, identifier), limit);
       }
     }
 
@@ -149,8 +150,7 @@ export function filterInvalidWorkspaceMemberReferences(
       (identifier) =>
         identifier.name === target.analysis.name &&
         identifier.namespaceQualifier !== null &&
-        identifier.reference.line === reference.line &&
-        identifier.reference.text === reference.text,
+        identifier.reference.line === reference.line,
     );
     const identifiers =
       indexedIdentifiers.length > 0
