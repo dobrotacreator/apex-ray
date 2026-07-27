@@ -285,7 +285,7 @@ test("repo inventory skips manifest symlinks outside the repository and reports 
   }
 });
 
-test("repo inventory retains a changed source symlink only as a failed partial path", () => {
+test("repo inventory excludes a changed source symlink from readable paths", () => {
   const repo = fs.mkdtempSync(
     path.join(os.tmpdir(), "apex-ray-ts-index-manifest-internal-symlink-"),
   );
@@ -309,18 +309,24 @@ test("repo inventory retains a changed source symlink only as a failed partial p
     ]);
 
     const inventory = loadRepoFileInventory(args);
-    const warnings: string[] = [];
-    const index = buildRepoIndex(args, warnings, inventory);
+    const index = buildRepoIndex(args, [], inventory);
 
     assert.equal(inventory.partial, true);
-    assert.ok(inventory.absPaths.includes(path.join(repo, "src", "link.ts")));
+    assert.match(inventory.partialReason ?? "", /could not be read safely/);
+    assert.equal(
+      inventory.absPaths.includes(path.join(repo, "src", "link.ts")),
+      false,
+    );
+    assert.equal(
+      inventory.pathKeys.has(path.join(repo, "src", "link.ts")),
+      false,
+    );
     assert.equal(
       inventory.pathKeys.has(path.join(repo, "src", "real.ts")),
       false,
     );
     assert.deepEqual(index.files, []);
     assert.equal(index.partial, true);
-    assert.ok(warnings.some((warning) => warning.includes("could not be read safely")));
   } finally {
     fs.rmSync(repo, { recursive: true, force: true });
   }
@@ -668,17 +674,116 @@ test("fallback repo inventory reports changed external symlinks as partial witho
     ]);
 
     const inventory = loadRepoFileInventory(args);
+    const earlyStoppedInventory = loadRepoFileInventory(args, {
+      shouldStop: () => true,
+    });
+    let stopChecks = 0;
+    const midScanStoppedInventory = loadRepoFileInventory(args, {
+      shouldStop: () => {
+        stopChecks += 1;
+        return stopChecks >= 2;
+      },
+    });
     const warnings: string[] = [];
     const index = buildRepoIndex(args, warnings, inventory);
 
     assert.equal(inventory.partial, true);
-    assert.ok(inventory.absPaths.includes(path.join(repo, "src", "changed.ts")));
+    assert.equal(
+      inventory.absPaths.includes(path.join(repo, "src", "changed.ts")),
+      false,
+    );
+    assert.equal(
+      inventory.pathKeys.has(path.join(repo, "src", "changed.ts")),
+      false,
+    );
     assert.equal(
       inventory.pathKeys.has(path.join(outsideRoot, "secret.ts")),
       false,
     );
     assert.equal(JSON.stringify(index).includes("TOP_SECRET_TOKEN"), false);
     assert.equal(index.partial, true);
+    for (const stoppedInventory of [
+      earlyStoppedInventory,
+      midScanStoppedInventory,
+    ]) {
+      assert.equal(stoppedInventory.absPaths.length, 0);
+      assert.match(
+        stoppedInventory.partialReason ?? "",
+        /could not be read safely/,
+      );
+      assert.match(
+        stoppedInventory.partialReason ?? "",
+        /analysis time budget/,
+      );
+    }
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
+    fs.rmSync(outsideRoot, { recursive: true, force: true });
+  }
+});
+
+test("manifest early partial inventory excludes unsafe changed symlinks", () => {
+  const repo = fs.mkdtempSync(
+    path.join(os.tmpdir(), "apex-ray-ts-index-manifest-early-symlink-"),
+  );
+  const outsideRoot = fs.mkdtempSync(
+    path.join(os.tmpdir(), "apex-ray-ts-index-manifest-early-target-"),
+  );
+  try {
+    writeFile(
+      outsideRoot,
+      "secret.ts",
+      'export const PRIVATE_EARLY_NAME = "PRIVATE_EARLY_LITERAL";\n',
+    );
+    fs.mkdirSync(path.join(repo, "src"), { recursive: true });
+    fs.symlinkSync(
+      path.join(outsideRoot, "secret.ts"),
+      path.join(repo, "src", "changed.ts"),
+    );
+    writeFile(repo, "src/first.ts", "export const first = true;\n");
+    writeFile(repo, "src/second.ts", "export const second = true;\n");
+    const manifestPath = path.join(repo, "typescript-files.json");
+    fs.writeFileSync(
+      manifestPath,
+      JSON.stringify({
+        version: 2,
+        files: ["src/first.ts", "src/second.ts"],
+      }),
+      "utf8",
+    );
+    const args = parseArgs([
+      "--repo",
+      repo,
+      "--changed",
+      "src/changed.ts",
+      "--file-manifest",
+      manifestPath,
+      "--no-index-cache",
+    ]);
+
+    const inventory = loadRepoFileInventory(args, {
+      shouldStop: () => true,
+    });
+    const limitedInventory = loadRepoFileInventory(args, {
+      maxFiles: 1,
+    });
+
+    assert.equal(inventory.partial, true);
+    assert.match(inventory.partialReason ?? "", /could not be read safely/);
+    assert.equal(inventory.absPaths.length, 0);
+    assert.equal(
+      inventory.pathKeys.has(path.join(repo, "src", "changed.ts")),
+      false,
+    );
+    assert.equal(
+      inventory.pathKeys.has(path.join(outsideRoot, "secret.ts")),
+      false,
+    );
+    assert.match(
+      limitedInventory.partialReason ?? "",
+      /could not be read safely/,
+    );
+    assert.match(limitedInventory.partialReason ?? "", /1 source files/);
   } finally {
     fs.rmSync(repo, { recursive: true, force: true });
     fs.rmSync(outsideRoot, { recursive: true, force: true });

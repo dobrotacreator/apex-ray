@@ -204,8 +204,10 @@ function loadManifestRepoFileInventory(
   }
   for (const value of parsed.files) {
     if (shouldStop()) {
-      partialReason =
-        "TypeScript manifest inventory scan stopped because the analysis time budget was exhausted; repository context is partial.";
+      partialReason = combinePartialReasons(
+        partialReason,
+        "TypeScript manifest inventory scan stopped because the analysis time budget was exhausted; repository context is partial.",
+      );
       break;
     }
     if (typeof value !== "string") {
@@ -215,9 +217,11 @@ function loadManifestRepoFileInventory(
     const relPathKey = canonicalPathKey(path.resolve(args.repo, relPath));
     if (relPathSet.has(relPathKey)) continue;
     if (relPathSet.size >= maxFiles) {
-      partialReason =
+      partialReason = combinePartialReasons(
+        partialReason,
         `TypeScript manifest inventory scan reached the safety limit of ${maxFiles} source files; ` +
-        "repository context is partial.";
+          "repository context is partial.",
+      );
       break;
     }
     relPathSet.add(relPathKey);
@@ -243,8 +247,10 @@ function loadManifestRepoFileInventory(
     : [];
   for (const value of packageFiles) {
     if (shouldStop()) {
-      partialReason =
-        "TypeScript manifest inventory scan stopped because the analysis time budget was exhausted; repository context is partial.";
+      partialReason = combinePartialReasons(
+        partialReason,
+        "TypeScript manifest inventory scan stopped because the analysis time budget was exhausted; repository context is partial.",
+      );
       break;
     }
     if (typeof value !== "string") {
@@ -285,8 +291,10 @@ function loadManifestRepoFileInventory(
     : [];
   for (const value of configFiles) {
     if (shouldStop()) {
-      partialReason =
-        "TypeScript manifest inventory scan stopped because the analysis time budget was exhausted; repository context is partial.";
+      partialReason = combinePartialReasons(
+        partialReason,
+        "TypeScript manifest inventory scan stopped because the analysis time budget was exhausted; repository context is partial.",
+      );
       break;
     }
     if (typeof value !== "string") {
@@ -382,8 +390,10 @@ function loadFallbackRepoFileInventory(
 
   scan: while (pendingDirectories.length > 0) {
     if (shouldStop()) {
-      partialReason =
-        "TypeScript fallback inventory scan stopped because the analysis time budget was exhausted; repository context is partial.";
+      partialReason = combinePartialReasons(
+        partialReason,
+        "TypeScript fallback inventory scan stopped because the analysis time budget was exhausted; repository context is partial.",
+      );
       break;
     }
     const directoryPath = pendingDirectories.pop();
@@ -422,17 +432,21 @@ function loadFallbackRepoFileInventory(
     try {
       while (true) {
         if (shouldStop()) {
-          partialReason =
-            "TypeScript fallback inventory scan stopped because the analysis time budget was exhausted; repository context is partial.";
+          partialReason = combinePartialReasons(
+            partialReason,
+            "TypeScript fallback inventory scan stopped because the analysis time budget was exhausted; repository context is partial.",
+          );
           break scan;
         }
         const entry = directory.readSync();
         if (!entry) break;
         visitedEntries += 1;
         if (visitedEntries > maxEntries) {
-          partialReason =
+          partialReason = combinePartialReasons(
+            partialReason,
             `TypeScript fallback inventory scan reached the safety limit of ${maxEntries} filesystem entries; ` +
-            "repository context is partial.";
+              "repository context is partial.",
+          );
           break scan;
         }
         if (isIgnoredDirectory(entry.name)) continue;
@@ -441,9 +455,11 @@ function loadFallbackRepoFileInventory(
           const relPath = normalizeRelPath(path.relative(args.repo, absPath));
           const pathBytes = Buffer.byteLength(relPath, "utf8") + 1;
           if (retainedPathBytes + pathBytes > maxPathBytes) {
-            partialReason =
+            partialReason = combinePartialReasons(
+              partialReason,
               `TypeScript fallback inventory scan reached the retained-path byte safety limit of ${maxPathBytes}; ` +
-              "repository context is partial.";
+                "repository context is partial.",
+            );
             break scan;
           }
           retainedPathBytes += pathBytes;
@@ -459,9 +475,11 @@ function loadFallbackRepoFileInventory(
         const relPath = normalizeRelPath(path.relative(args.repo, absPath));
         const pathBytes = Buffer.byteLength(relPath, "utf8") + 1;
         if (retainedPathBytes + pathBytes > maxPathBytes) {
-          partialReason =
+          partialReason = combinePartialReasons(
+            partialReason,
             `TypeScript fallback inventory scan reached the retained-path byte safety limit of ${maxPathBytes}; ` +
-            "repository context is partial.";
+              "repository context is partial.",
+          );
           break scan;
         }
         retainedPathBytes += pathBytes;
@@ -516,9 +534,11 @@ function loadFallbackRepoFileInventory(
           continue;
         }
         if (absPathSet.size >= maxFiles) {
-          partialReason =
+          partialReason = combinePartialReasons(
+            partialReason,
             `TypeScript fallback inventory scan reached the safety limit of ${maxFiles} source files; ` +
-            "repository context is partial.";
+              "repository context is partial.",
+          );
           break scan;
         }
         absPathSet.add(validation.absPath);
@@ -717,7 +737,9 @@ function validatedChangedAbsPaths(
     );
     const absPath = validation.absPath;
     if (isTypeScriptOrJavaScriptFileName(absPath)) {
-      changedByKey.set(canonicalPathKey(absPath), absPath);
+      if (validation.status !== "unsafe") {
+        changedByKey.set(canonicalPathKey(absPath), absPath);
+      }
       if (validation.status !== "safe") {
         partialReason ??= validationPartialReason(
           "TypeScript changed path",
