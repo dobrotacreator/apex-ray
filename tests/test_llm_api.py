@@ -2081,6 +2081,43 @@ def test_http_5xx_free_text_terminal_tokens_remain_retryable(message: str) -> No
     assert sleeps == [0.5]
 
 
+@pytest.mark.parametrize(
+    ("message", "category"),
+    [
+        pytest.param(" INVALID_API_KEY ", "auth", id="auth"),
+        pytest.param(" insufficient_quota\n", "quota", id="quota"),
+    ],
+)
+def test_http_5xx_exact_message_terminal_marker_is_not_retried(
+    message: str,
+    category: str,
+) -> None:
+    transport = StubTransport(
+        JSONHTTPResponse(
+            status_code=503,
+            headers={},
+            data={"error": {"message": message}},
+        ),
+        responses_success_response(),
+    )
+    config = LLMConfig(
+        provider=LLMProviderName.OPENAI_API,
+        model="gpt-5.6",
+        api=LLMAPIConfig(max_retries=1),
+    )
+
+    with pytest.raises(LLMProviderError) as caught:
+        provider(
+            config,
+            transport,
+            {"OPENAI_API_KEY": "secret"},
+        ).review_context_pack(make_pack(), Path("."))
+
+    assert caught.value.category == category
+    assert caught.value.retryable is False
+    assert len(transport.calls) == 1
+
+
 def test_http_5xx_explicit_structured_terminal_code_remains_terminal() -> None:
     transport = StubTransport(
         JSONHTTPResponse(

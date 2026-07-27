@@ -449,6 +449,7 @@ class APILLMProvider:
         )
         structured_code = " ".join(structured_values)
         message_code = str(details.get("message", "")).lower()
+        explicit_terminal_values = (*structured_values, message_code.strip())
         code = f"{structured_code} {message_code}"
         retry_after = _parse_retry_after(response.headers)
 
@@ -466,10 +467,10 @@ class APILLMProvider:
         rate_limit_tokens = ("overloaded", "rate_limit", "rate limit", "ratequota")
         auth_tokens = ("authentication", "invalid_api_key", "unauthorized")
         if status >= 500:
-            if any(value in _EXPLICIT_TERMINAL_AUTH_CODES for value in structured_values):
+            if any(value in _EXPLICIT_TERMINAL_AUTH_CODES for value in explicit_terminal_values):
                 category = "auth"
                 retryable = False
-            elif any(value in _EXPLICIT_TERMINAL_QUOTA_CODES for value in structured_values):
+            elif any(value in _EXPLICIT_TERMINAL_QUOTA_CODES for value in explicit_terminal_values):
                 category = "quota"
                 retryable = False
             elif any(token in structured_code for token in rate_limit_tokens):
