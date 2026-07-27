@@ -1171,6 +1171,45 @@ def test_review_context_pack_uses_cache_on_second_run(tmp_path: Path) -> None:
     assert second_findings == first_findings
 
 
+def test_review_rejects_routed_kimi_k3_none_before_reading_legacy_cache(
+    tmp_path: Path,
+) -> None:
+    pack = make_pack()
+    config = LLMConfig(
+        provider=LLMProviderName.FAKE,
+        cache_dir=str(tmp_path / "llm-cache"),
+        profiles={
+            "kimi": LLMProfile(
+                provider=LLMProviderName.KIMI_API,
+                model="kimi-k3",
+                effort=LLMReasoningEffort.NONE,
+            )
+        },
+        routing=LLMRoutingConfig(review_profile="kimi"),
+    )
+    effective_config, _, _ = review_config_for_pack(config, pack)
+    cache = LLMCache(Path(config.cache_dir or ""))
+    cache.write_review(
+        review_cache_key(pack, effective_config),
+        effective_config,
+        [],
+    )
+
+    findings, runs = review_context_packs(
+        [pack],
+        config,
+        tmp_path,
+        provider=FakeLLMProvider(),
+    )
+
+    assert findings == []
+    assert len(runs) == 1
+    assert runs[0].status == "failed_provider"
+    assert runs[0].cache_hit is False
+    assert runs[0].cache_hits == 0
+    assert "Kimi K3 always reasons" in (runs[0].error or "")
+
+
 def test_llm_cache_parallel_writes_to_same_key_use_distinct_temp_files(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1858,6 +1897,66 @@ def test_verify_findings_uses_cache_on_second_run(tmp_path: Path) -> None:
     assert second_runs[0].cache_misses == 0
     assert second_runs[0].input_chars == 0
     assert cached_approved == [finding]
+
+
+def test_verification_rejects_routed_kimi_k3_none_before_reading_legacy_cache(
+    tmp_path: Path,
+) -> None:
+    pack = make_pack()
+    finding = Finding(
+        title="Cart totals ignore item quantity",
+        severity=FindingSeverity.HIGH,
+        confidence=FindingConfidence.HIGH,
+        file="src/cart.ts",
+        line=7,
+        failure_mode="Totals are undercounted.",
+        evidence="Quantity is removed.",
+        suggested_fix="Multiply by quantity.",
+        suggested_test="Add quantity > 1 test.",
+        context_pack_id=pack.id,
+    )
+    config = LLMConfig(
+        provider=LLMProviderName.FAKE,
+        cache_dir=str(tmp_path / "llm-cache"),
+        profiles={
+            "kimi": LLMProfile(
+                provider=LLMProviderName.KIMI_API,
+                model="kimi-k3",
+                effort=LLMReasoningEffort.NONE,
+            )
+        },
+        routing=LLMRoutingConfig(verify_profile="kimi"),
+    )
+    effective_config, _, _ = verification_config_for_finding(config, finding, pack)
+    cache = LLMCache(Path(config.cache_dir or ""))
+    cache.write_verification(
+        verification_cache_key(finding, pack, effective_config),
+        effective_config,
+        FindingVerification(
+            finding=finding,
+            approved=True,
+            confidence=FindingConfidence.HIGH,
+            reason="Legacy cached approval.",
+        ),
+    )
+
+    approved, verifications, runs = verify_findings(
+        [finding],
+        [pack],
+        config,
+        tmp_path,
+        provider=FakeLLMProvider(verification_approvals=[True]),
+    )
+
+    assert approved == []
+    assert len(verifications) == 1
+    assert verifications[0].approved is False
+    assert verifications[0].superseded is True
+    assert len(runs) == 1
+    assert runs[0].status == "failed_provider"
+    assert runs[0].cache_hit is False
+    assert runs[0].cache_hits == 0
+    assert "Kimi K3 always reasons" in (runs[0].error or "")
 
 
 def test_verify_findings_records_partial_batch_cache_hits(tmp_path: Path) -> None:

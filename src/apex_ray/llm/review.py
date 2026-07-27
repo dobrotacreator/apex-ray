@@ -6,6 +6,7 @@ from pathlib import Path
 from threading import Lock
 from typing import Literal
 
+from apex_ray.llm.api import validate_api_model_compatibility
 from apex_ray.llm.cache import (
     VERIFIER_PROMPT_VERSION,
     cache_for_config,
@@ -188,6 +189,7 @@ def review_context_packs(
             provider_called = False
             usage = None
             try:
+                validate_api_model_compatibility(pack_config)
                 cached_findings = None
                 if cache and cache_key and not base_config.refresh_cache:
                     cached_findings = cache.read_review(cache_key)
@@ -501,11 +503,13 @@ def verify_findings(
         cache_misses = 0
         usage = None
         pack_verifications: dict[int, FindingVerification] = {}
-        misses: list[tuple[int, Finding]] = []
+        misses = list(indexed_findings)
         status = "ok"
         error: str | None = None
         provider_called = False
         try:
+            validate_api_model_compatibility(verification_config)
+            misses = []
             for index, finding in indexed_findings:
                 verification = None
                 cache_key = cache_keys[index]

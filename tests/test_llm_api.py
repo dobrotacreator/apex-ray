@@ -1262,6 +1262,13 @@ def test_qwen_preset_allows_official_workspace_dedicated_endpoint() -> None:
             LLMProviderName.KIMI_API,
             "MOONSHOT_API_KEY",
             "kimi-k3",
+            LLMReasoningEffort.MINIMAL,
+            {"reasoning_effort": "low"},
+        ),
+        (
+            LLMProviderName.KIMI_API,
+            "MOONSHOT_API_KEY",
+            "kimi-k3",
             LLMReasoningEffort.MEDIUM,
             {"reasoning_effort": "high"},
         ),
@@ -1271,6 +1278,27 @@ def test_qwen_preset_allows_official_workspace_dedicated_endpoint() -> None:
             "kimi-k2.6",
             LLMReasoningEffort.MEDIUM,
             {"thinking": {"type": "enabled"}},
+        ),
+        (
+            LLMProviderName.KIMI_API,
+            "MOONSHOT_API_KEY",
+            "kimi-k2.6",
+            LLMReasoningEffort.NONE,
+            {"thinking": {"type": "disabled"}},
+        ),
+        (
+            LLMProviderName.KIMI_API,
+            "MOONSHOT_API_KEY",
+            "kimi-k2.7-code",
+            LLMReasoningEffort.HIGH,
+            {"thinking": {"type": "enabled"}},
+        ),
+        (
+            LLMProviderName.KIMI_API,
+            "MOONSHOT_API_KEY",
+            "kimi-k3",
+            LLMReasoningEffort.MAX,
+            {"reasoning_effort": "max"},
         ),
         (
             LLMProviderName.ZAI_API,
@@ -1311,6 +1339,37 @@ def test_openai_chat_presets_use_model_compatible_reasoning_controls(
     assert {
         key: payload[key] for key in ("thinking", "reasoning_effort", "enable_thinking") if key in payload
     } == reasoning_fields
+
+
+@pytest.mark.parametrize(
+    ("model", "message_fragment"),
+    [
+        ("kimi-k3", "effort: low"),
+        ("kimi-k2.7-code", "switchable thinking"),
+    ],
+)
+def test_kimi_always_reasoning_models_reject_explicit_none_before_request(
+    model: str,
+    message_fragment: str,
+) -> None:
+    transport = StubTransport(success_response())
+    config = LLMConfig(
+        provider=LLMProviderName.KIMI_API,
+        model=model,
+        effort=LLMReasoningEffort.NONE,
+    )
+
+    with pytest.raises(
+        LLMProviderError,
+        match=rf"always reasons.*{message_fragment}",
+    ):
+        provider(
+            config,
+            transport,
+            {"MOONSHOT_API_KEY": "provider-secret"},
+        ).review_context_pack(make_pack(), Path("."))
+
+    assert transport.calls == []
 
 
 def test_api_provider_supports_batch_verification_and_resolution_schemas() -> None:

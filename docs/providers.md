@@ -110,9 +110,13 @@ preset still enforces that the resolved host belongs to Alibaba Cloud.
 
 `effort` is translated conservatively to each Chat Completions dialect:
 DeepSeek uses its documented `high`/`max` levels, Qwen uses the thinking
-toggle, Kimi K3 maps to `low`/`high`/`max` while K2 models use their thinking
+toggle, Kimi K3 maps to `low`/`high`/`max`, Kimi K2.6 uses its thinking
 toggle, and GLM 5.2 maps to its supported `high`/`max` reasoning levels while
 older GLM models receive only the supported toggle.
+Kimi K3 and Kimi K2.7 Code always reason, so Apex Ray rejects an explicit
+`effort: none` instead of silently incurring reasoning work or sending an
+invalid payload; use `low` for K3 or select a model with switchable thinking
+such as Kimi K2.6.
 
 ```yaml
 review:

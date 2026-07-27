@@ -172,6 +172,34 @@ def api_key_environment_name(config: LLMConfig) -> str | None:
     return config.api.api_key_env or (preset.api_key_env if preset is not None else None)
 
 
+def validate_api_model_compatibility(config: LLMConfig) -> None:
+    """Reject model options that cannot honor their configured semantics."""
+    model = (config.model or "").strip().lower()
+    if config.provider != LLMProviderName.KIMI_API:
+        return
+    if model.startswith("kimi-k3"):
+        _validate_always_reasoning_effort(
+            "Kimi K3",
+            config.effort,
+            "use effort: low or a model with switchable thinking",
+        )
+    elif model.startswith("kimi-k2.7-code"):
+        _validate_always_reasoning_effort(
+            "Kimi K2.7 Code",
+            config.effort,
+            "use a model with switchable thinking, such as Kimi K2.6",
+        )
+
+
+def _validate_always_reasoning_effort(
+    model: str,
+    effort: LLMReasoningEffort | None,
+    suggestion: str,
+) -> None:
+    if effort == LLMReasoningEffort.NONE:
+        raise LLMProviderError(f"{model} always reasons and cannot honor effort: none; {suggestion}.")
+
+
 class APILLMProvider:
     def __init__(
         self,
@@ -200,6 +228,7 @@ class APILLMProvider:
         if not config.model or not config.model.strip():
             raise LLMProviderError(f"{config.provider} requires an explicit model.")
         self.model = config.model.strip()
+        validate_api_model_compatibility(config)
 
         if self.preset is None:
             self.protocol = self._required_custom_protocol()
@@ -885,8 +914,12 @@ def _malformed_response_error(error: LLMProviderError, secrets: list[str]) -> LL
 
 
 def _map_kimi_reasoning_effort(effort: LLMReasoningEffort) -> str:
+    _validate_always_reasoning_effort(
+        "Kimi K3",
+        effort,
+        "use effort: low or a model with switchable thinking",
+    )
     return {
-        LLMReasoningEffort.NONE: str(LLMReasoningEffort.LOW),
         LLMReasoningEffort.MINIMAL: str(LLMReasoningEffort.LOW),
         LLMReasoningEffort.LOW: str(LLMReasoningEffort.LOW),
         LLMReasoningEffort.MEDIUM: str(LLMReasoningEffort.HIGH),
