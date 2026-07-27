@@ -306,7 +306,7 @@ def test_project_discovery_shares_one_timeout_across_git_and_inventory(
     ]
 
 
-def test_project_discovery_without_deadline_disables_git_root_timeout(
+def test_project_discovery_without_deadline_uses_bounded_git_root_timeout(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -325,7 +325,7 @@ def test_project_discovery_without_deadline_disables_git_root_timeout(
 
     discover_project_with_files(tmp_path, timeout_seconds=None)
 
-    assert seen_timeouts == [None]
+    assert seen_timeouts == [DEFAULT_GIT_ROOT_TIMEOUT_SECONDS]
 
 
 def test_project_discovery_translates_git_root_timeout(
