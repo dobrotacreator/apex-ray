@@ -436,9 +436,17 @@ review:
       incremental_retry:
         enabled: true
         state_path: .apex-ray/reports/pre-push-state.json
+        max_resolution_calls_per_retry: 8
 ```
 
 The first run still reviews `review.base...HEAD`. Later eligible retry runs review only `previous_gate_head..HEAD`, carry forward unresolved blocking findings and coverage debt, and write combined gate state to `state_path`.
+
+`max_resolution_calls_per_retry` bounds sequential LLM resolution calls when a
+new file could affect several carried findings. Apex Ray resolves critical
+findings first and keeps deferred findings blocking for the next retry. At an
+unchanged HEAD, deferred calls reuse only the exact matching evidence report;
+after every deferred finding has been attempted, the same evidence is not sent
+to the provider again.
 
 Incremental retry is fail-closed:
 

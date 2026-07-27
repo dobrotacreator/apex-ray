@@ -73,6 +73,7 @@ def test_init_config_creates_default_file(tmp_path: Path) -> None:
     assert config.gates.pre_push.auto_followup_p0_max_pack_reviews == 16
     assert config.gates.pre_push.incremental_retry.enabled is False
     assert config.gates.pre_push.incremental_retry.state_path == ".apex-ray/reports/pre-push-state.json"
+    assert config.gates.pre_push.incremental_retry.max_resolution_calls_per_retry == 8
 
 
 def test_load_config_parses_analyzer_shard_size(tmp_path: Path) -> None:
@@ -380,7 +381,8 @@ def test_load_config_parses_pre_push_incremental_retry(tmp_path: Path) -> None:
         "    pre_push:\n"
         "      incremental_retry:\n"
         "        enabled: true\n"
-        "        state_path: .apex-ray/reports/custom-pre-push-state.json\n",
+        "        state_path: .apex-ray/reports/custom-pre-push-state.json\n"
+        "        max_resolution_calls_per_retry: 3\n",
         encoding="utf-8",
     )
 
@@ -388,6 +390,7 @@ def test_load_config_parses_pre_push_incremental_retry(tmp_path: Path) -> None:
 
     assert config.gates.pre_push.incremental_retry.enabled is True
     assert config.gates.pre_push.incremental_retry.state_path == ".apex-ray/reports/custom-pre-push-state.json"
+    assert config.gates.pre_push.incremental_retry.max_resolution_calls_per_retry == 3
 
 
 def test_load_config_parses_pre_push_auto_followup_pack_review_cap(tmp_path: Path) -> None:

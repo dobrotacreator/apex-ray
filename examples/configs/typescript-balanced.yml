@@ -139,3 +139,4 @@ review:
       auto_followup_p0_max_pack_reviews: 16
       incremental_retry:
         enabled: true
+        max_resolution_calls_per_retry: 8

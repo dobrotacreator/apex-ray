@@ -433,6 +433,45 @@ def test_render_sarif_redacts_local_paths_embedded_in_urls() -> None:
     assert "https://example.com/review/path?tab=security." in message
 
 
+def test_render_sarif_redacts_remote_url_credentials_and_sensitive_queries() -> None:
+    finding = _finding(
+        title="URL credential evidence",
+        severity=FindingSeverity.MEDIUM,
+        file="src/service.ts",
+        line=5,
+    ).model_copy(
+        update={
+            "evidence": (
+                "Database postgresql://alice:S3cretValue@db.example.com/app. "
+                "Signed artifact "
+                "https://artifacts.example.com/build.zip?"
+                "X-Amz-Algorithm=AWS4-HMAC-SHA256&"
+                "X-Amz-Signature=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef. "
+                "Token callback https://api.example.com/callback?access_token=callback-secret. "
+                "Safe username-only URL https://alice@profiles.example.com/public. "
+                "Safe https://example.com/review/path?tab=security."
+            )
+        }
+    )
+    report = build_report(
+        ProjectProfile(root="/workspace/repo", is_git_repo=True),
+        ReviewConfig(),
+        DiffSummary(target_mode=TargetMode.PATCH, stats=DiffStats(files_changed=1)),
+        findings=[finding],
+    )
+
+    message = json.loads(render_sarif(report))["runs"][0]["results"][0]["message"]["text"]
+
+    assert "postgresql://alice" not in message
+    assert "S3cretValue" not in message
+    assert "0123456789abcdef" not in message
+    assert "callback-secret" not in message
+    assert "<remote-url-with-credentials>" in message
+    assert message.count("<remote-url-with-sensitive-query>") == 2
+    assert "https://alice@profiles.example.com/public." in message
+    assert "https://example.com/review/path?tab=security." in message
+
+
 def test_render_sarif_does_not_redact_remote_urls_for_repo_root_substrings() -> None:
     finding = _finding(
         title="Root substring URL evidence",

@@ -96,6 +96,52 @@ _WINDOWS_DRIVE_RELATIVE_PATH = re.compile(
     r"[^ \t\r\n`\"'<>|\\/:]+"
 )
 _POSIX_ABSOLUTE_PATH = re.compile(r"(?<![/A-Za-z0-9_])/(?:[^ \t\r\n`\"'<>]+)")
+_BEARER_SECRET = re.compile(r"(?i)(\bbearer\s+)[^\s,;]+")
+_NAMED_SECRET_ASSIGNMENT = re.compile(
+    r"(?i)"
+    r"(?P<prefix>"
+    r"[\"']?"
+    r"(?P<name>[A-Za-z_][A-Za-z0-9_-]{0,63})"
+    r"[\"']?\s*[:=]\s*[\"']?"
+    r")"
+    r"(?P<value>[^\s,;}\"']+)"
+)
+_SENSITIVE_ASSIGNMENT_NAMES = frozenset(
+    {
+        "access_token",
+        "api_key",
+        "auth_token",
+        "password",
+        "secret",
+        "token",
+    }
+)
+_SENSITIVE_URL_QUERY_NAMES = _SENSITIVE_ASSIGNMENT_NAMES | frozenset(
+    {
+        "client_secret",
+        "credential",
+        "signature",
+    }
+)
+_BENIGN_USERINFO_REFERENCE_ROOTS = frozenset(
+    {
+        "doc",
+        "docs",
+        "guide",
+        "guides",
+        "help",
+        "reference",
+        "references",
+    }
+)
+_STANDALONE_SECRET_PATTERNS = (
+    re.compile(r"\b(?:sk|rk|pk)-(?:proj-)?[A-Za-z0-9_-]{8,}\b"),
+    re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b"),
+    re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{16,}\b"),
+    re.compile(r"\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\b"),
+    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
+    re.compile(r"\bAIza[0-9A-Za-z_-]{35}\b"),
+)
 
 
 def render_sarif(report: ReviewReport) -> str:
@@ -197,7 +243,7 @@ def _finding_message(finding: Finding, root: str) -> str:
         ("Suggested test", finding.suggested_test),
     )
     parts.extend(f"{label}: {value.strip()}" for label, value in details if value.strip())
-    return _sanitize_text("\n".join(parts), root)
+    return sanitize_external_text("\n".join(parts), root)
 
 
 def _finding_properties(
@@ -208,7 +254,7 @@ def _finding_properties(
     properties: dict[str, Any] = {
         "severity": _enum_value(finding.severity),
         "confidence": _enum_value(finding.confidence),
-        "reviewerIds": _sorted_values(_sanitize_text(reviewer, root) for reviewer in finding.reviewer_ids),
+        "reviewerIds": _sorted_values(sanitize_external_text(reviewer, root) for reviewer in finding.reviewer_ids),
     }
     signals = sorted(
         context_pack.risk_signals if context_pack is not None else [],
@@ -219,14 +265,14 @@ def _finding_properties(
 
     properties.update(
         {
-            "riskKinds": _sorted_values(_sanitize_text(signal.kind, root) for signal in signals),
+            "riskKinds": _sorted_values(sanitize_external_text(signal.kind, root) for signal in signals),
             "riskSeverities": _sorted_values(_enum_value(signal.severity) for signal in signals),
             "riskScore": max(signal.score for signal in signals),
             "riskCategories": _sorted_values(
-                _sanitize_text(category, root) for signal in signals for category in signal.categories
+                sanitize_external_text(category, root) for signal in signals for category in signal.categories
             ),
             "riskReviewerTags": _sorted_values(
-                _sanitize_text(reviewer, root) for signal in signals for reviewer in signal.reviewer_tags
+                sanitize_external_text(reviewer, root) for signal in signals for reviewer in signal.reviewer_tags
             ),
             "riskSignals": [_risk_signal_properties(signal, root) for signal in signals],
         }
@@ -236,15 +282,15 @@ def _finding_properties(
 
 def _risk_signal_properties(signal: RiskSignal, root: str) -> dict[str, Any]:
     properties: dict[str, Any] = {
-        "kind": _sanitize_text(signal.kind, root),
+        "kind": sanitize_external_text(signal.kind, root),
         "severity": _enum_value(signal.severity),
         "score": signal.score,
-        "source": _sanitize_text(signal.source, root),
-        "categories": _sorted_values(_sanitize_text(category, root) for category in signal.categories),
-        "reviewerTags": _sorted_values(_sanitize_text(reviewer, root) for reviewer in signal.reviewer_tags),
+        "source": sanitize_external_text(signal.source, root),
+        "categories": _sorted_values(sanitize_external_text(category, root) for category in signal.categories),
+        "reviewerTags": _sorted_values(sanitize_external_text(reviewer, root) for reviewer in signal.reviewer_tags),
     }
     if signal.rule_id:
-        properties["ruleId"] = _sanitize_text(signal.rule_id, root)
+        properties["ruleId"] = sanitize_external_text(signal.rule_id, root)
     return properties
 
 
@@ -321,6 +367,29 @@ def _looks_windows_path(value: str) -> bool:
     return bool(path.drive) or "\\" in value
 
 
+def sanitize_external_text(value: str, root: str) -> str:
+    return _sanitize_text(_redact_secrets(value), root)
+
+
+def _redact_secrets(value: str) -> str:
+    redacted = _BEARER_SECRET.sub(r"\1[REDACTED]", value)
+    redacted = _NAMED_SECRET_ASSIGNMENT.sub(
+        _redact_named_secret_assignment,
+        redacted,
+    )
+    for pattern in _STANDALONE_SECRET_PATTERNS:
+        redacted = pattern.sub("[REDACTED]", redacted)
+    return redacted
+
+
+def _redact_named_secret_assignment(match: re.Match[str]) -> str:
+    name = match.group("name").casefold().replace("-", "_")
+    is_sensitive = name in _SENSITIVE_ASSIGNMENT_NAMES or any(
+        name.endswith(f"_{suffix}") for suffix in _SENSITIVE_ASSIGNMENT_NAMES
+    )
+    return f"{match.group('prefix')}[REDACTED]" if is_sensitive else match.group(0)
+
+
 def _sanitize_text(value: str, root: str) -> str:
     parts: list[str] = []
     cursor = 0
@@ -338,7 +407,37 @@ def _sanitize_url(value: str, root: str) -> str:
         return "<local-url>"
     if _url_exposes_local_path(value, root):
         return "<remote-url-with-local-path>"
+    parsed = urlsplit(value)
+    if _url_has_sensitive_userinfo(parsed.netloc):
+        return "<remote-url-with-credentials>"
+    if any(_sensitive_url_query_name(name) for name, _ in parse_qsl(parsed.query, keep_blank_values=True)):
+        return "<remote-url-with-sensitive-query>"
     return value
+
+
+def _sensitive_url_query_name(value: str) -> bool:
+    normalized = re.sub(r"[-.\s]+", "_", value.casefold()).strip("_")
+    return normalized in _SENSITIVE_URL_QUERY_NAMES or any(
+        normalized.endswith(f"_{suffix}") for suffix in _SENSITIVE_URL_QUERY_NAMES
+    )
+
+
+def _url_has_sensitive_userinfo(netloc: str) -> bool:
+    userinfo, separator, _ = netloc.rpartition("@")
+    if not separator:
+        return False
+    _, password_separator, password = userinfo.partition(":")
+    if not password_separator or not password:
+        return False
+    decoded_password = unquote(password)
+    reference_parts = PurePosixPath(decoded_password).parts
+    is_benign_reference = (
+        "%2f" in password.casefold()
+        and len(reference_parts) >= 2
+        and reference_parts[0].casefold() in _BENIGN_USERINFO_REFERENCE_ROOTS
+        and ".." not in reference_parts
+    )
+    return not is_benign_reference
 
 
 def _url_exposes_local_path(

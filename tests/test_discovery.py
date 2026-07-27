@@ -310,22 +310,47 @@ def test_project_discovery_without_deadline_uses_bounded_git_root_timeout(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    seen_timeouts: list[float | None] = []
+    timeout_not_provided = object()
+    seen_timeouts: list[tuple[str, float | None | object]] = []
 
-    def fake_repo_root(cwd: Path, *, timeout: float | None = None) -> Path:
+    def fake_discover_repo_root(
+        cwd: Path,
+        *,
+        timeout_seconds: float | None | object = timeout_not_provided,
+    ) -> Path:
         assert cwd == tmp_path
-        seen_timeouts.append(timeout)
+        seen_timeouts.append(("root", timeout_seconds))
         return tmp_path
 
-    monkeypatch.setattr("apex_ray.discovery.git.repo_root", fake_repo_root)
-    monkeypatch.setattr(
-        "apex_ray.discovery.git.is_git_repo",
-        lambda _cwd, *, timeout=None: False,
-    )
+    def fake_is_git_repo(cwd: Path, *, timeout: float | None = None) -> bool:
+        assert cwd == tmp_path
+        seen_timeouts.append(("is_git", timeout))
+        return False
+
+    def fake_list_project_files(
+        root: Path,
+        ignored_patterns: list[str] | None = None,
+        *,
+        is_git_repo: bool | None = None,
+        timeout_seconds: float | None = None,
+    ) -> list[Path]:
+        assert root == tmp_path
+        assert ignored_patterns == []
+        assert is_git_repo is False
+        seen_timeouts.append(("inventory", timeout_seconds))
+        return []
+
+    monkeypatch.setattr("apex_ray.discovery.discover_repo_root", fake_discover_repo_root)
+    monkeypatch.setattr("apex_ray.discovery.git.is_git_repo", fake_is_git_repo)
+    monkeypatch.setattr("apex_ray.discovery.list_project_files", fake_list_project_files)
 
     discover_project_with_files(tmp_path, timeout_seconds=None)
 
-    assert seen_timeouts == [DEFAULT_GIT_ROOT_TIMEOUT_SECONDS]
+    assert seen_timeouts == [
+        ("root", DEFAULT_GIT_ROOT_TIMEOUT_SECONDS),
+        ("is_git", None),
+        ("inventory", None),
+    ]
 
 
 def test_project_discovery_translates_git_root_timeout(

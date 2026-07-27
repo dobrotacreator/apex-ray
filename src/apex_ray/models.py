@@ -420,6 +420,7 @@ class IncrementalPrePushRetryConfig(StrictApexModel):
     enabled: bool = False
     state_path: str = ".apex-ray/reports/pre-push-state.json"
     fallback_on_uncertain_resolution: Literal["block"] = "block"
+    max_resolution_calls_per_retry: int = Field(default=8, ge=1, le=64)
 
 
 DEFAULT_AUTO_FOLLOWUP_P0_MAX_PACK_REVIEWS = 16

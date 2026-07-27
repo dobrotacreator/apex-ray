@@ -10,6 +10,11 @@ from typing import Literal
 from apex_ray.discovery import LANGUAGE_EXTENSIONS
 from apex_ray.memory import pack_prompt_payload
 from apex_ray.models import ChangedFile, ContextPack, Finding, ReviewReport
+from apex_ray.resolution import (
+    context_pack_resolution_paths,
+    novel_resolution_file_is_reviewable,
+    resolution_file_is_reviewable,
+)
 
 LANGUAGE_HINTS = {
     "javascript": "TypeScript/JavaScript",
@@ -18,12 +23,17 @@ LANGUAGE_HINTS = {
 }
 RESOLUTION_PROMPT_MAX_CHARS = 256_000
 _RESOLUTION_FINDING_MAX_CHARS = 24_000
-_RESOLUTION_PREVIOUS_PACK_MAX_CHARS = 56_000
+_RESOLUTION_PREVIOUS_PACK_MAX_CHARS = 48_000
 _RESOLUTION_METADATA_MAX_CHARS = 12_000
 _RESOLUTION_DIFF_MAX_CHARS = 64_000
-_RESOLUTION_CONTEXT_PACKS_MAX_CHARS = 92_000
+_RESOLUTION_CONTEXT_PACKS_MAX_CHARS = 84_000
+_RESOLUTION_DIFF_WARNINGS_MAX_CHARS = 12_000
 _RESOLUTION_DIFF_FILE_LIMIT = 20
 _RESOLUTION_CONTEXT_PACK_LIMIT = 8
+_RESOLUTION_FALLBACK_DIFF_FILE_LIMIT = 4
+_RESOLUTION_FALLBACK_CONTEXT_PACK_LIMIT = 2
+_RESOLUTION_DIFF_WARNING_LIMIT = 8
+_RESOLUTION_DIFF_WARNING_MAX_CHARS = 1_024
 
 
 @dataclass(frozen=True)
@@ -37,6 +47,16 @@ class RenderedReviewPrompt:
         # Keep cached render artifacts immutable to callers. The returned
         # payload is short-lived while deriving the durable LLM cache key.
         return deepcopy(self._prompt_payload)
+
+
+@dataclass(frozen=True)
+class _ResolutionWarningEvidence:
+    text: str
+    total: int
+    omitted: int
+    truncated: int
+    char_truncated: bool
+    incomplete: bool
 
 
 type ReviewPromptCacheKey = tuple[str, Literal["deep", "shallow"], str]
@@ -211,9 +231,6 @@ def build_resolution_prompt(
         previous_pack,
     )
     provenance_ids = _resolution_provenance_ids(finding, previous_pack)
-    previous_identity_tokens = {
-        token for pack_id in provenance_ids for token in _resolution_pack_identity_tokens(pack_id)
-    }
     relevant_diff_files = sorted(
         (
             changed_file
@@ -229,10 +246,58 @@ def build_resolution_prompt(
         ),
         key=lambda changed_file: _resolution_diff_rank(changed_file, primary_paths),
     )
+    relevant_diff_file_ids = {id(changed_file) for changed_file in relevant_diff_files}
+    graph_connected_pack_ids = {
+        id(pack)
+        for pack in delta_report.context_packs
+        if any(
+            _resolution_path_matches(
+                path,
+                relevant_literal_paths,
+                relevant_glob_patterns,
+            )
+            for path in context_pack_resolution_paths(pack)
+        )
+    }
+    graph_connected_file_paths = {
+        _normalize_resolution_path(pack.file)
+        for pack in delta_report.context_packs
+        if id(pack) in graph_connected_pack_ids
+    }
+    unanchored_diff_files = [
+        changed_file for changed_file in delta_report.diff.files if id(changed_file) not in relevant_diff_file_ids
+    ]
+    fallback_diff_files = sorted(
+        (
+            changed_file
+            for changed_file in unanchored_diff_files
+            if resolution_file_is_reviewable(changed_file)
+            and (
+                novel_resolution_file_is_reviewable(changed_file)
+                or bool(graph_connected_file_paths.intersection(_resolution_changed_file_paths(changed_file)))
+            )
+        ),
+        key=lambda changed_file: _resolution_fallback_diff_rank(
+            changed_file,
+            graph_connected_file_paths=graph_connected_file_paths,
+        ),
+    )
+    selected_fallback_diff_files = fallback_diff_files[:_RESOLUTION_FALLBACK_DIFF_FILE_LIMIT]
+    relevant_diff_limit = _RESOLUTION_DIFF_FILE_LIMIT - len(selected_fallback_diff_files)
+    selected_relevant_diff_files = relevant_diff_files[:relevant_diff_limit]
+    selected_diff_files = [*selected_relevant_diff_files, *selected_fallback_diff_files]
     current_relevant_literal_paths = {
         *relevant_literal_paths,
-        *[path for changed_file in relevant_diff_files for path in _resolution_changed_file_paths(changed_file)],
+        *[
+            path
+            for changed_file in selected_relevant_diff_files
+            for path in _resolution_changed_file_paths(changed_file)
+        ],
     }
+    identity_tokens_by_file = _resolution_identity_tokens_by_file(
+        provenance_ids,
+        selected_relevant_diff_files,
+    )
     relevant_packs = sorted(
         (
             pack
@@ -249,11 +314,31 @@ def build_resolution_prompt(
             finding=finding,
             primary_paths=primary_paths,
             provenance_ids=provenance_ids,
-            previous_identity_tokens=previous_identity_tokens,
+            identity_tokens_by_file=identity_tokens_by_file,
         ),
     )
-    selected_diff_files = relevant_diff_files[:_RESOLUTION_DIFF_FILE_LIMIT]
-    selected_packs = relevant_packs[:_RESOLUTION_CONTEXT_PACK_LIMIT]
+    relevant_pack_ids = {id(pack) for pack in relevant_packs}
+    fallback_diff_paths = {
+        path for changed_file in selected_fallback_diff_files for path in _resolution_changed_file_paths(changed_file)
+    }
+    fallback_pack_candidates = sorted(
+        (
+            pack
+            for pack in delta_report.context_packs
+            if id(pack) not in relevant_pack_ids and _normalize_resolution_path(pack.file) in fallback_diff_paths
+        ),
+        key=lambda pack: _resolution_fallback_pack_rank(
+            pack,
+            graph_connected=id(pack) in graph_connected_pack_ids,
+        ),
+    )
+    selected_fallback_packs = _select_resolution_fallback_packs(
+        fallback_pack_candidates,
+        limit=_RESOLUTION_FALLBACK_CONTEXT_PACK_LIMIT,
+    )
+    relevant_pack_limit = _RESOLUTION_CONTEXT_PACK_LIMIT - len(selected_fallback_packs)
+    selected_relevant_packs = relevant_packs[:relevant_pack_limit]
+    selected_packs = [*selected_relevant_packs, *selected_fallback_packs]
     finding_text, finding_char_truncated = _bounded_resolution_json(
         finding.model_dump(mode="json"),
         max_chars=_RESOLUTION_FINDING_MAX_CHARS,
@@ -279,6 +364,7 @@ def build_resolution_prompt(
             else {"context_pack_id": None}
         ),
     )
+    warning_evidence = _build_resolution_warning_evidence(delta_report)
     diff_payload = {
         "base": delta_report.diff.base,
         "target_mode": delta_report.diff.target_mode,
@@ -299,22 +385,26 @@ def build_resolution_prompt(
             ]
         },
     )
+    diff_warning_evidence_incomplete = warning_evidence.incomplete
     pack_payloads = [pack_prompt_payload(pack, "verify") for pack in selected_packs]
     packs_text, packs_char_truncated = _bounded_resolution_json(
         pack_payloads,
         max_chars=_RESOLUTION_CONTEXT_PACKS_MAX_CHARS,
         identity={"selected_context_pack_ids": [pack.id for pack in selected_packs]},
     )
-    excluded_irrelevant_diff_files = len(delta_report.diff.files) - len(relevant_diff_files)
-    excluded_irrelevant_context_packs = len(delta_report.context_packs) - len(relevant_packs)
-    omitted_relevant_diff_files = len(relevant_diff_files) - len(selected_diff_files)
-    omitted_relevant_context_packs = len(relevant_packs) - len(selected_packs)
-    global_diff_warnings_excluded = len(delta_report.diff.warnings)
+    unselected_unanchored_diff_files = len(fallback_diff_files) - len(selected_fallback_diff_files)
+    excluded_ineligible_fallback_diff_files = len(unanchored_diff_files) - len(fallback_diff_files)
+    unselected_unanchored_context_packs = (
+        len(delta_report.context_packs) - len(relevant_packs) - len(selected_fallback_packs)
+    )
+    omitted_relevant_diff_files = len(relevant_diff_files) - len(selected_relevant_diff_files)
+    omitted_relevant_context_packs = len(relevant_packs) - len(selected_relevant_packs)
     char_truncated_sections = [
         name
         for name, truncated in (
             ("current_context_packs", packs_char_truncated),
             ("current_diff", diff_char_truncated),
+            ("current_diff_warnings", warning_evidence.char_truncated),
             ("previous_context_pack", previous_char_truncated),
             ("previous_finding", finding_char_truncated),
         )
@@ -323,11 +413,23 @@ def build_resolution_prompt(
     truncation_reasons = [
         reason
         for reason, applies in (
-            ("irrelevant_diff_files_excluded", excluded_irrelevant_diff_files > 0),
-            ("irrelevant_context_packs_excluded", excluded_irrelevant_context_packs > 0),
+            ("unanchored_diff_files_unselected", unselected_unanchored_diff_files > 0),
+            (
+                "ineligible_fallback_diff_files_excluded",
+                excluded_ineligible_fallback_diff_files > 0,
+            ),
+            (
+                "unanchored_context_packs_unselected",
+                unselected_unanchored_context_packs > 0,
+            ),
             ("relevant_diff_file_count_limited", omitted_relevant_diff_files > 0),
             ("relevant_context_pack_count_limited", omitted_relevant_context_packs > 0),
-            ("global_diff_warnings_excluded", global_diff_warnings_excluded > 0),
+            ("fallback_diff_evidence_included", bool(selected_fallback_diff_files)),
+            ("fallback_context_evidence_included", bool(selected_fallback_packs)),
+            ("global_diff_warnings_present", bool(delta_report.diff.warnings)),
+            ("global_diff_warning_count_limited", warning_evidence.omitted > 0),
+            ("global_diff_warning_chars_limited", warning_evidence.truncated > 0),
+            ("global_diff_warning_evidence_incomplete", diff_warning_evidence_incomplete),
             ("section_char_budget_applied", bool(char_truncated_sections)),
         )
         if applies
@@ -341,11 +443,21 @@ def build_resolution_prompt(
             path for changed_file in selected_diff_files for path in _resolution_changed_file_paths(changed_file)
         ),
         "selected_context_pack_ids": _bounded_resolution_labels(pack.id for pack in selected_packs),
-        "excluded_irrelevant_diff_files": excluded_irrelevant_diff_files,
-        "excluded_irrelevant_context_packs": excluded_irrelevant_context_packs,
+        "selected_fallback_diff_files": _bounded_resolution_labels(
+            path
+            for changed_file in selected_fallback_diff_files
+            for path in _resolution_changed_file_paths(changed_file)
+        ),
+        "selected_fallback_context_pack_ids": _bounded_resolution_labels(pack.id for pack in selected_fallback_packs),
+        "unselected_unanchored_diff_files": unselected_unanchored_diff_files,
+        "excluded_ineligible_fallback_diff_files": excluded_ineligible_fallback_diff_files,
+        "unselected_unanchored_context_packs": unselected_unanchored_context_packs,
         "omitted_relevant_diff_files": omitted_relevant_diff_files,
         "omitted_relevant_context_packs": omitted_relevant_context_packs,
-        "global_diff_warnings_excluded": global_diff_warnings_excluded,
+        "global_diff_warnings_count": warning_evidence.total,
+        "omitted_global_diff_warnings": warning_evidence.omitted,
+        "truncated_global_diff_warnings": warning_evidence.truncated,
+        "diff_warning_evidence_incomplete": diff_warning_evidence_incomplete,
         "char_truncated_sections": char_truncated_sections,
         "reasons": truncation_reasons,
     }
@@ -371,7 +483,8 @@ def build_resolution_prompt(
         "Return `uncertain` when the supplied context is insufficient, ambiguous, or the fix may be elsewhere.\n"
         "Do not mark resolved merely because the new delta review produced no findings.\n"
         "Treat previous_context_pack as historical evidence for what was blocked, and the relevant current diff and context packs as the only new evidence.\n"
-        "The current evidence is relevance-filtered and may be count- or character-truncated. Inspect truncation_metadata and return `uncertain` whenever omitted evidence is needed to prove resolution.\n"
+        "The current evidence is relevance-filtered, includes a small bounded fallback for previously unknown fix surfaces, and may be count- or character-truncated. Inspect truncation_metadata and return `uncertain` whenever omitted evidence is needed to prove resolution.\n"
+        "Diff warnings are global reliability evidence. Return `uncertain` if a supplied warning makes the relevant proof incomplete. When diff_warning_evidence_incomplete is true, return `uncertain` unconditionally.\n"
         "Prefer `uncertain` over `resolved` when proof is incomplete. `still_present` and `uncertain` both continue to block the gate.\n"
         "Return only JSON that matches the provided schema.\n\n"
         "Previous blocking finding JSON:\n"
@@ -382,6 +495,8 @@ def build_resolution_prompt(
         f"{metadata_text}\n\n"
         "Relevant current diff JSON:\n"
         f"{diff_text}\n\n"
+        "Global current diff warnings JSON:\n"
+        f"{warning_evidence.text}\n\n"
         "Relevant current context packs JSON:\n"
         f"{packs_text}\n"
     )
@@ -479,19 +594,81 @@ def _resolution_diff_rank(
     return (0 if primary_paths.intersection(paths) else 1, paths)
 
 
+def _resolution_fallback_diff_rank(
+    changed_file: ChangedFile,
+    *,
+    graph_connected_file_paths: set[str],
+) -> tuple[int, int, int, int, tuple[str, ...]]:
+    status = str(changed_file.status)
+    if changed_file.old_path is None and changed_file.new_path is not None:
+        status = "added"
+    status_rank = {
+        "added": 0,
+        "renamed": 1,
+        "modified": 2,
+        "copied": 3,
+        "deleted": 4,
+    }.get(status, 5)
+    risk_signals = [
+        *changed_file.risk_signals,
+        *(signal for hunk in changed_file.hunks for signal in hunk.risk_signals),
+    ]
+    severity_rank = min(
+        (
+            {"critical": 0, "high": 1, "medium": 2, "low": 3}.get(
+                str(signal.severity),
+                4,
+            )
+            for signal in risk_signals
+        ),
+        default=4,
+    )
+    max_risk_score = max((signal.score for signal in risk_signals), default=0)
+    return (
+        (0 if graph_connected_file_paths.intersection(_resolution_changed_file_paths(changed_file)) else 1),
+        status_rank,
+        severity_rank,
+        -max_risk_score,
+        _resolution_changed_file_paths(changed_file),
+    )
+
+
+def _resolution_identity_tokens_by_file(
+    provenance_ids: set[str],
+    relevant_diff_files: list[ChangedFile],
+) -> dict[str, set[str]]:
+    tokens_by_file: dict[str, set[str]] = {}
+    for pack_id in provenance_ids:
+        path = _normalize_resolution_path(_resolution_path_from_pack_id(pack_id))
+        tokens = _resolution_pack_identity_tokens(pack_id)
+        if path and tokens:
+            tokens_by_file.setdefault(path, set()).update(tokens)
+    for changed_file in relevant_diff_files:
+        if str(changed_file.status) != "renamed":
+            continue
+        paths = _resolution_changed_file_paths(changed_file)
+        linked_tokens = {token for path in paths for token in tokens_by_file.get(path, set())}
+        if linked_tokens:
+            for path in paths:
+                tokens_by_file.setdefault(path, set()).update(linked_tokens)
+    return tokens_by_file
+
+
 def _resolution_pack_rank(
     pack: ContextPack,
     *,
     finding: Finding,
     primary_paths: set[str],
     provenance_ids: set[str],
-    previous_identity_tokens: set[str],
+    identity_tokens_by_file: dict[str, set[str]],
 ) -> tuple[int, str, str]:
     normalized_file = _normalize_resolution_path(pack.file)
     overlaps_finding_line = finding.line is not None and any(
         start_line <= finding.line <= end_line for start_line, end_line in pack.changed_lines
     )
-    shares_identity = bool(previous_identity_tokens.intersection(_resolution_pack_identity_tokens(pack.id)))
+    shares_identity = bool(
+        identity_tokens_by_file.get(normalized_file, set()).intersection(_resolution_pack_identity_tokens(pack.id))
+    )
     if pack.id in provenance_ids:
         priority = 0
     elif shares_identity:
@@ -503,6 +680,117 @@ def _resolution_pack_rank(
     else:
         priority = 4
     return (priority, normalized_file, pack.id)
+
+
+def _resolution_fallback_pack_rank(
+    pack: ContextPack,
+    *,
+    graph_connected: bool,
+) -> tuple[int, int, str, str]:
+    return (
+        0 if graph_connected else 1,
+        0 if pack.changed_lines else 1,
+        _normalize_resolution_path(pack.file),
+        pack.id,
+    )
+
+
+def _select_resolution_fallback_packs(
+    candidates: list[ContextPack],
+    *,
+    limit: int,
+) -> list[ContextPack]:
+    selected: list[ContextPack] = []
+    selected_ids: set[int] = set()
+    selected_files: set[str] = set()
+    for pack in candidates:
+        normalized_file = _normalize_resolution_path(pack.file)
+        if normalized_file in selected_files:
+            continue
+        selected.append(pack)
+        selected_ids.add(id(pack))
+        selected_files.add(normalized_file)
+        if len(selected) == limit:
+            return selected
+    for pack in candidates:
+        if id(pack) in selected_ids:
+            continue
+        selected.append(pack)
+        if len(selected) == limit:
+            break
+    return selected
+
+
+def resolution_diff_warnings_incomplete(delta_report: ReviewReport) -> bool:
+    return _build_resolution_warning_evidence(delta_report).incomplete
+
+
+def _build_resolution_warning_evidence(
+    delta_report: ReviewReport,
+) -> _ResolutionWarningEvidence:
+    total = len(delta_report.diff.warnings)
+    sanitized_warnings: list[str] = []
+    raw_truncated: list[bool] = []
+    for warning in delta_report.diff.warnings[:_RESOLUTION_DIFF_WARNING_LIMIT]:
+        was_truncated = len(warning) > _RESOLUTION_DIFF_WARNING_MAX_CHARS
+        bounded_warning = f"{warning[: _RESOLUTION_DIFF_WARNING_MAX_CHARS - 3]}..." if was_truncated else warning
+        sanitized_warnings.append(
+            _sanitize_resolution_warning(
+                bounded_warning,
+                repo_root=delta_report.project.root,
+            )
+        )
+        raw_truncated.append(was_truncated)
+    selected_warnings = [
+        (
+            warning
+            if len(warning) <= _RESOLUTION_DIFF_WARNING_MAX_CHARS
+            else f"{warning[: _RESOLUTION_DIFF_WARNING_MAX_CHARS - 3]}..."
+        )
+        for warning in sanitized_warnings
+    ]
+    truncated = sum(
+        was_raw_truncated or len(warning) > _RESOLUTION_DIFF_WARNING_MAX_CHARS
+        for warning, was_raw_truncated in zip(
+            sanitized_warnings,
+            raw_truncated,
+            strict=True,
+        )
+    )
+    omitted = total - len(selected_warnings)
+    payload = {
+        "total": total,
+        "included": len(selected_warnings),
+        "omitted": omitted,
+        "truncated": truncated,
+        "warnings": selected_warnings,
+    }
+    text, char_truncated = _bounded_resolution_json(
+        payload,
+        max_chars=_RESOLUTION_DIFF_WARNINGS_MAX_CHARS,
+        identity={
+            "total": total,
+            "included": len(selected_warnings),
+            "omitted": omitted,
+            "truncated": truncated,
+        },
+    )
+    return _ResolutionWarningEvidence(
+        text=text,
+        total=total,
+        omitted=omitted,
+        truncated=truncated,
+        char_truncated=char_truncated,
+        incomplete=bool(omitted or truncated or char_truncated),
+    )
+
+
+def _sanitize_resolution_warning(warning: str, *, repo_root: str) -> str:
+    # Import lazily to keep the LLM package independent from report package
+    # initialization while reusing the externally-facing redaction policy.
+    from apex_ray.report.sarif import sanitize_external_text
+
+    return sanitize_external_text(warning, repo_root)
 
 
 def _resolution_pack_identity_tokens(pack_id: str) -> set[str]:

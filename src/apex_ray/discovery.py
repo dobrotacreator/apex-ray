@@ -110,9 +110,18 @@ def discover_project_with_files(
     config_path: Path | None = None,
     timeout_seconds: float | None = None,
 ) -> tuple[ProjectProfile, list[Path]]:
+    """Discover a project and its files within an optional shared deadline.
+
+    ``timeout_seconds=None`` leaves the overall discovery workflow unbounded.
+    The external Git root lookup still uses its independent safety timeout so a
+    stalled Git wrapper cannot hang otherwise-unbounded discovery indefinitely.
+    """
     deadline = None if timeout_seconds is None else time.monotonic() + max(0.0, timeout_seconds)
     root = (
-        discover_repo_root(cwd)
+        discover_repo_root(
+            cwd,
+            timeout_seconds=DEFAULT_GIT_ROOT_TIMEOUT_SECONDS,
+        )
         if deadline is None
         else discover_repo_root(
             cwd,
