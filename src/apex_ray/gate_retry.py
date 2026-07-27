@@ -57,6 +57,7 @@ class PrePushGateState(ApexModel):
     coverage_debt: CoverageDebt = Field(default_factory=CoverageDebt)
     reviewed_context_pack_ids: list[str] = Field(default_factory=list)
     context_pack_fingerprints: dict[str, str] = Field(default_factory=dict)
+    report_fingerprint: str = ""
 
 
 @dataclass(frozen=True)
@@ -175,6 +176,7 @@ def build_pre_push_state(
         context_pack_fingerprints={
             pack.id: context_pack_fingerprint(pack.model_dump(mode="json")) for pack in report.context_packs
         },
+        report_fingerprint=review_report_fingerprint(report),
     )
 
 
@@ -314,6 +316,10 @@ def stale_carried_finding_reason(carried: CarriedFinding, repo_root: Path) -> st
 def context_pack_fingerprint(payload: object) -> str:
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def review_report_fingerprint(report: ReviewReport) -> str:
+    return context_pack_fingerprint(report.model_dump(mode="json"))
 
 
 def _carried_evidence_anchors_by_file(carried: CarriedFinding) -> dict[str, list[str]]:

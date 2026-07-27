@@ -29,6 +29,7 @@ from apex_ray.gate_retry import (
     dedupe_carried_findings,
     load_pre_push_state,
     resolve_state_path,
+    review_report_fingerprint,
     stale_carried_finding_reason,
     write_pre_push_state,
 )
@@ -601,6 +602,8 @@ def _retry_resolution_report(
     except ReviewerConfigError:
         return None
     if report_config_hash != config_hash:
+        return None
+    if not state.report_fingerprint or review_report_fingerprint(report) != state.report_fingerprint:
         return None
     actual_fingerprints = {
         pack.id: context_pack_fingerprint(pack.model_dump(mode="json")) for pack in report.context_packs

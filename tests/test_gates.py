@@ -1410,10 +1410,36 @@ def test_resolution_resume_rejects_unavailable_or_mismatched_report(tmp_path: Pa
         )
         is report
     )
+    round_tripped_report = type(report).model_validate_json(report.model_dump_json())
+    assert (
+        _retry_resolution_report(
+            state,
+            round_tripped_report,
+            current_head="head-2",
+            json_output=json_output,
+            config_hash=config_hash,
+            gate_config=config.gates.pre_push,
+            reviewer_ids=None,
+        )
+        is round_tripped_report
+    )
     assert (
         _retry_resolution_report(
             state,
             None,
+            current_head="head-2",
+            json_output=json_output,
+            config_hash=config_hash,
+            gate_config=config.gates.pre_push,
+            reviewer_ids=None,
+        )
+        is None
+    )
+    state_without_report_fingerprint = state.model_copy(update={"report_fingerprint": ""})
+    assert (
+        _retry_resolution_report(
+            state_without_report_fingerprint,
+            report,
             current_head="head-2",
             json_output=json_output,
             config_hash=config_hash,
@@ -1428,6 +1454,61 @@ def test_resolution_resume_rejects_unavailable_or_mismatched_report(tmp_path: Pa
         _retry_resolution_report(
             state,
             mismatched_report,
+            current_head="head-2",
+            json_output=json_output,
+            config_hash=config_hash,
+            gate_config=config.gates.pre_push,
+            reviewer_ids=None,
+        )
+        is None
+    )
+    modified_findings_report = report.model_copy(deep=True)
+    modified_findings_report.findings = [finding]
+    assert (
+        _retry_resolution_report(
+            state,
+            modified_findings_report,
+            current_head="head-2",
+            json_output=json_output,
+            config_hash=config_hash,
+            gate_config=config.gates.pre_push,
+            reviewer_ids=None,
+        )
+        is None
+    )
+    modified_verifications_report = report.model_copy(deep=True)
+    modified_verifications_report.verifications = [
+        FindingVerification(
+            finding=finding,
+            approved=False,
+            confidence=FindingConfidence.HIGH,
+            reason="Locally modified verification state.",
+        )
+    ]
+    assert (
+        _retry_resolution_report(
+            state,
+            modified_verifications_report,
+            current_head="head-2",
+            json_output=json_output,
+            config_hash=config_hash,
+            gate_config=config.gates.pre_push,
+            reviewer_ids=None,
+        )
+        is None
+    )
+    modified_diff_report = report.model_copy(deep=True)
+    modified_diff_report.diff.files.append(
+        ChangedFile(
+            old_path=None,
+            new_path="src/unreviewed.ts",
+            status=FileStatus.ADDED,
+        )
+    )
+    assert (
+        _retry_resolution_report(
+            state,
+            modified_diff_report,
             current_head="head-2",
             json_output=json_output,
             config_hash=config_hash,
