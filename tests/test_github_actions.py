@@ -1292,3 +1292,6 @@ def test_documented_workflows_are_valid_yaml_and_avoid_pull_request_target() -> 
         r"deselect\s+`Allow administrators to bypass configured protection rules`",
         docs,
     )
+    assert "APEX_RAY_API_ALLOWED_BASE_URL_ENV_VARS" in docs
+    assert "APEX_RAY_API_ALLOWED_API_KEY_ENV_VARS" in docs
+    assert "APEX_RAY_API_ALLOWED_ENV_VARS" not in docs

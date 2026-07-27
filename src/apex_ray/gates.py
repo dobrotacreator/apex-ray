@@ -175,10 +175,12 @@ def _legacy_finding_is_in_current_reviewer_scope(
     states = reduce_llm_pack_run_states(report.llm_runs)
     reviewer_scope = set(report.reviewer_scope_ids) if report.reviewer_scope_ids is not None else None
     for reviewer_id in provenance:
-        if reviewer_scope is not None and reviewer_id not in reviewer_scope:
-            continue
         reviewer = reviewers_by_id.get(reviewer_id)
         if reviewer is None:
+            # A removed/disabled reviewer or legacy provenance that no longer
+            # maps to the current configuration is not evidence of resolution.
+            return True
+        if reviewer_scope is not None and reviewer_id not in reviewer_scope:
             continue
         matching_pack_ids = {
             candidate.id for candidate in report.context_packs if reviewer_matches_pack(reviewer, candidate)

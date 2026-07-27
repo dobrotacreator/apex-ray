@@ -209,8 +209,8 @@ jobs:
     env:
       APEX_RAY_LLM_BASE_URL: ${{ vars.APEX_RAY_LLM_BASE_URL }}
       APEX_RAY_API_ALLOWED_HOSTS: ${{ vars.APEX_RAY_API_ALLOWED_HOSTS }}
-      APEX_RAY_API_ALLOWED_ENV_VARS: >-
-        APEX_RAY_LLM_BASE_URL,APEX_RAY_LLM_API_KEY
+      APEX_RAY_API_ALLOWED_BASE_URL_ENV_VARS: APEX_RAY_LLM_BASE_URL
+      APEX_RAY_API_ALLOWED_API_KEY_ENV_VARS: APEX_RAY_LLM_API_KEY
     steps:
       - name: Review
         uses: dobrotacreator/apex-ray/.github/actions/apex-ray-review@<full-release-commit-sha>
@@ -223,11 +223,13 @@ without schemes or paths. In CI, `allowed_hosts_env` is fixed to
 `APEX_RAY_API_ALLOWED_HOSTS`; repository configuration cannot select another
 variable. A custom endpoint must come from `base_url_env`, its normalized host
 must appear in `APEX_RAY_API_ALLOWED_HOSTS`, and every environment selector
-chosen by repository configuration must appear in the trusted
-`APEX_RAY_API_ALLOWED_ENV_VARS` policy. Define both policy variables in the
-workflow or a protected environment. Use an environment with required
-reviewers for high-value credentials, set provider spending limits, and avoid
-forwarding unrelated repository secrets to the job.
+chosen by repository configuration must appear in its role-specific trusted
+allowlist: base URL, API key, or custom header. Variables designated by the
+API-key policy, the selected credential, and built-in preset credential
+variables can never be reused as custom headers in CI. Define policy variables
+in the workflow or a protected environment. Use an environment with the
+protections described above for high-value credentials, set provider spending
+limits, and avoid forwarding unrelated repository secrets to the job.
 
 ## Fork and configuration safety
 

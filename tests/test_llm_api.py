@@ -1251,7 +1251,9 @@ def test_generic_compatible_provider_uses_env_endpoint_headers_and_allowlist_in_
         "COMPANY_LLM_KEY": "company-secret",
         "COMPANY_LLM_PROJECT": "apex-ray",
         "APEX_RAY_API_ALLOWED_HOSTS": "llm-gateway.example",
-        "APEX_RAY_API_ALLOWED_ENV_VARS": "COMPANY_LLM_URL,COMPANY_LLM_KEY,COMPANY_LLM_PROJECT",
+        "APEX_RAY_API_ALLOWED_BASE_URL_ENV_VARS": "COMPANY_LLM_URL",
+        "APEX_RAY_API_ALLOWED_API_KEY_ENV_VARS": "COMPANY_LLM_KEY",
+        "APEX_RAY_API_ALLOWED_HEADER_ENV_VARS": "COMPANY_LLM_PROJECT",
     }
 
     provider(config, transport, environment).review_context_pack(make_pack(), Path("."))
@@ -1283,7 +1285,8 @@ def test_generic_compatible_provider_uses_normalized_idn_host_for_ci_allowlist()
             "COMPANY_LLM_URL": "https://例え.テスト/v1",
             "COMPANY_LLM_KEY": "company-secret",
             "APEX_RAY_API_ALLOWED_HOSTS": "xn--r8jz45g.xn--zckzah",
-            "APEX_RAY_API_ALLOWED_ENV_VARS": "COMPANY_LLM_URL,COMPANY_LLM_KEY",
+            "APEX_RAY_API_ALLOWED_BASE_URL_ENV_VARS": "COMPANY_LLM_URL",
+            "APEX_RAY_API_ALLOWED_API_KEY_ENV_VARS": "COMPANY_LLM_KEY",
         },
     ).review_context_pack(make_pack(), Path("."))
 
@@ -1469,6 +1472,44 @@ def test_custom_provider_rejects_untrusted_ci_endpoint(
         provider(config, StubTransport(success_response()), environment)
 
 
+@pytest.mark.parametrize(
+    "ci_environment",
+    [
+        pytest.param({"APEX_RAY_CI": "true"}, id="explicit-apex-ray"),
+        pytest.param({"GITHUB_ACTIONS": "true"}, id="github-actions"),
+        pytest.param({"TF_BUILD": "True"}, id="azure-pipelines"),
+        pytest.param({"JENKINS_URL": "https://jenkins.example/"}, id="jenkins"),
+        pytest.param({"GITLAB_CI": "true"}, id="gitlab"),
+        pytest.param({"CIRCLECI": "true"}, id="circleci"),
+        pytest.param({"TRAVIS": "true"}, id="travis"),
+        pytest.param({"BUILDKITE": "true"}, id="buildkite"),
+        pytest.param({"TEAMCITY_VERSION": "2026.1"}, id="teamcity"),
+        pytest.param({"CODEBUILD_BUILD_ID": "project:build"}, id="codebuild"),
+        pytest.param({"BITBUCKET_BUILD_NUMBER": "42"}, id="bitbucket"),
+    ],
+)
+def test_api_provider_enforces_ci_policy_for_vendor_markers(
+    ci_environment: Mapping[str, str],
+) -> None:
+    config = LLMConfig(
+        provider=LLMProviderName.OPENAI_COMPATIBLE,
+        model="company-reviewer",
+        api=LLMAPIConfig(
+            protocol=LLMAPIProtocol.OPENAI_CHAT,
+            structured_output=LLMStructuredOutput.JSON_OBJECT,
+            base_url="https://attacker.example/v1",
+            api_key_env="UNRELATED_CLOUD_SECRET",
+        ),
+    )
+    environment = {
+        **ci_environment,
+        "UNRELATED_CLOUD_SECRET": "unrelated-secret",
+    }
+
+    with pytest.raises(LLMProviderError, match="base_url_env"):
+        provider(config, StubTransport(success_response()), environment)
+
+
 def test_preset_provider_rejects_endpoint_outside_pinned_hosts() -> None:
     config = LLMConfig(
         provider=LLMProviderName.OPENAI_API,
@@ -1532,7 +1573,107 @@ def test_ci_preset_api_key_selector_cannot_be_overridden() -> None:
                 "GITHUB_ACTIONS": "true",
                 "OPENAI_API_KEY": "openai-secret",
                 "UNRELATED_CLOUD_SECRET": "unrelated-secret",
-                "APEX_RAY_API_ALLOWED_ENV_VARS": "UNRELATED_CLOUD_SECRET",
+                "APEX_RAY_API_ALLOWED_API_KEY_ENV_VARS": "UNRELATED_CLOUD_SECRET",
+            },
+        )
+
+    assert transport.calls == []
+
+
+@pytest.mark.parametrize("credential_env", ["OPENAI_API_KEY", "ANTHROPIC_API_KEY"])
+def test_ci_preset_credential_selector_cannot_be_reused_as_header(
+    credential_env: str,
+) -> None:
+    config = LLMConfig(
+        provider=LLMProviderName.OPENAI_API,
+        model="gpt-5.6",
+        api=LLMAPIConfig(headers_from_env={"X-Leak": credential_env}),
+    )
+    transport = StubTransport(responses_success_response())
+
+    with pytest.raises(
+        LLMProviderError,
+        match="credential environment variable cannot be used as a custom header",
+    ):
+        provider(
+            config,
+            transport,
+            {
+                "GITHUB_ACTIONS": "true",
+                "OPENAI_API_KEY": "openai-secret",
+                "ANTHROPIC_API_KEY": "anthropic-secret",
+                "APEX_RAY_API_ALLOWED_HEADER_ENV_VARS": credential_env,
+            },
+        )
+
+    assert transport.calls == []
+
+
+def test_ci_custom_provider_cannot_reuse_api_key_selector_as_header() -> None:
+    config = LLMConfig(
+        provider=LLMProviderName.OPENAI_COMPATIBLE,
+        model="company-reviewer",
+        api=LLMAPIConfig(
+            protocol=LLMAPIProtocol.OPENAI_CHAT,
+            structured_output=LLMStructuredOutput.JSON_OBJECT,
+            base_url_env="COMPANY_LLM_URL",
+            api_key_env="COMPANY_LLM_KEY",
+            headers_from_env={"X-Leak": "COMPANY_LLM_KEY"},
+        ),
+    )
+    transport = StubTransport(success_response())
+
+    with pytest.raises(
+        LLMProviderError,
+        match="credential environment variable cannot be used as a custom header",
+    ):
+        provider(
+            config,
+            transport,
+            {
+                "CI": "true",
+                "COMPANY_LLM_URL": "https://llm-gateway.example/v1",
+                "COMPANY_LLM_KEY": "company-secret",
+                "APEX_RAY_API_ALLOWED_HOSTS": "llm-gateway.example",
+                "APEX_RAY_API_ALLOWED_BASE_URL_ENV_VARS": "COMPANY_LLM_URL",
+                "APEX_RAY_API_ALLOWED_API_KEY_ENV_VARS": "COMPANY_LLM_KEY",
+                "APEX_RAY_API_ALLOWED_HEADER_ENV_VARS": "COMPANY_LLM_KEY",
+            },
+        )
+
+    assert transport.calls == []
+
+
+def test_ci_custom_provider_cannot_use_another_allowed_api_key_as_header() -> None:
+    config = LLMConfig(
+        provider=LLMProviderName.OPENAI_COMPATIBLE,
+        model="company-reviewer",
+        api=LLMAPIConfig(
+            protocol=LLMAPIProtocol.OPENAI_CHAT,
+            structured_output=LLMStructuredOutput.JSON_OBJECT,
+            base_url_env="COMPANY_LLM_URL",
+            api_key_env="COMPANY_PRIMARY_KEY",
+            headers_from_env={"X-Leak": "COMPANY_BACKUP_KEY"},
+        ),
+    )
+    transport = StubTransport(success_response())
+
+    with pytest.raises(
+        LLMProviderError,
+        match="credential environment variable cannot be used as a custom header",
+    ):
+        provider(
+            config,
+            transport,
+            {
+                "CI": "true",
+                "COMPANY_LLM_URL": "https://llm-gateway.example/v1",
+                "COMPANY_PRIMARY_KEY": "primary-secret",
+                "COMPANY_BACKUP_KEY": "backup-secret",
+                "APEX_RAY_API_ALLOWED_HOSTS": "llm-gateway.example",
+                "APEX_RAY_API_ALLOWED_BASE_URL_ENV_VARS": "COMPANY_LLM_URL",
+                "APEX_RAY_API_ALLOWED_API_KEY_ENV_VARS": "COMPANY_PRIMARY_KEY,COMPANY_BACKUP_KEY",
+                "APEX_RAY_API_ALLOWED_HEADER_ENV_VARS": "COMPANY_BACKUP_KEY",
             },
         )
 
@@ -1551,12 +1692,11 @@ def test_ci_custom_provider_requires_fixed_allowlist_for_each_environment_select
     omitted_selector: str,
     message: str,
 ) -> None:
-    selectors = {
-        "COMPANY_LLM_URL",
-        "COMPANY_LLM_KEY",
-        "COMPANY_LLM_PROJECT",
+    policies_by_selector = {
+        "COMPANY_LLM_URL": "APEX_RAY_API_ALLOWED_BASE_URL_ENV_VARS",
+        "COMPANY_LLM_KEY": "APEX_RAY_API_ALLOWED_API_KEY_ENV_VARS",
+        "COMPANY_LLM_PROJECT": "APEX_RAY_API_ALLOWED_HEADER_ENV_VARS",
     }
-    selectors.remove(omitted_selector)
     config = LLMConfig(
         provider=LLMProviderName.OPENAI_COMPATIBLE,
         model="company-reviewer",
@@ -1569,20 +1709,19 @@ def test_ci_custom_provider_requires_fixed_allowlist_for_each_environment_select
         ),
     )
     transport = StubTransport(success_response())
+    environment = {
+        "CI": "true",
+        "COMPANY_LLM_URL": "https://llm-gateway.example/v1",
+        "COMPANY_LLM_KEY": "company-secret",
+        "COMPANY_LLM_PROJECT": "apex-ray",
+        "APEX_RAY_API_ALLOWED_HOSTS": "llm-gateway.example",
+    }
+    environment.update(
+        {policy: selector for selector, policy in policies_by_selector.items() if selector != omitted_selector}
+    )
 
     with pytest.raises(LLMProviderError, match=message):
-        provider(
-            config,
-            transport,
-            {
-                "CI": "true",
-                "COMPANY_LLM_URL": "https://llm-gateway.example/v1",
-                "COMPANY_LLM_KEY": "company-secret",
-                "COMPANY_LLM_PROJECT": "apex-ray",
-                "APEX_RAY_API_ALLOWED_HOSTS": "llm-gateway.example",
-                "APEX_RAY_API_ALLOWED_ENV_VARS": ",".join(sorted(selectors)),
-            },
-        )
+        provider(config, transport, environment)
 
     assert transport.calls == []
 
@@ -1608,7 +1747,8 @@ def test_ci_custom_provider_cannot_select_the_host_allowlist_variable() -> None:
                 "CI": "true",
                 "COMPANY_LLM_URL": "https://attacker.example/v1",
                 "COMPANY_LLM_KEY": "company-secret",
-                "APEX_RAY_API_ALLOWED_ENV_VARS": "COMPANY_LLM_URL,COMPANY_LLM_KEY",
+                "APEX_RAY_API_ALLOWED_BASE_URL_ENV_VARS": "COMPANY_LLM_URL",
+                "APEX_RAY_API_ALLOWED_API_KEY_ENV_VARS": "COMPANY_LLM_KEY",
                 "APEX_RAY_API_ALLOWED_HOSTS": "trusted.example",
                 "REPOSITORY_SELECTED_ALLOWLIST": "attacker.example",
             },
@@ -1637,7 +1777,8 @@ def test_ci_rejects_insecure_loopback_http_opt_in() -> None:
                 "LOCAL_LLM_URL": "http://127.0.0.1:11434/v1",
                 "LOCAL_LLM_KEY": "local-secret",
                 "APEX_RAY_API_ALLOWED_HOSTS": "127.0.0.1",
-                "APEX_RAY_API_ALLOWED_ENV_VARS": "LOCAL_LLM_URL,LOCAL_LLM_KEY",
+                "APEX_RAY_API_ALLOWED_BASE_URL_ENV_VARS": "LOCAL_LLM_URL",
+                "APEX_RAY_API_ALLOWED_API_KEY_ENV_VARS": "LOCAL_LLM_KEY",
             },
         )
 

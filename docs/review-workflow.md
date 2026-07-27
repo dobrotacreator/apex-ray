@@ -206,5 +206,5 @@ Typical issues:
 - `Python analyzer available: false`: reinstall Apex Ray or run from a healthy source checkout. The Python analyzer is built in and should normally be available whenever the CLI imports successfully.
 - `TypeScript analyzer built: false`: reinstall the published package, or in a source checkout run the TypeScript analyzer build from [Development](development.md).
 - Provider command not found: for a CLI provider, install the configured Codex CLI or Claude Code CLI, or override its executable path in `.apex-ray/config.local.yml`.
-- API credential or endpoint rejected: check the selected environment-variable names and, in CI, the trusted `APEX_RAY_API_ALLOWED_ENV_VARS` and `APEX_RAY_API_ALLOWED_HOSTS` policy.
+- API credential or endpoint rejected: check the selected environment-variable names and, in CI, `APEX_RAY_API_ALLOWED_HOSTS` plus the role-specific `APEX_RAY_API_ALLOWED_BASE_URL_ENV_VARS`, `APEX_RAY_API_ALLOWED_API_KEY_ENV_VARS`, and `APEX_RAY_API_ALLOWED_HEADER_ENV_VARS` policies. For a custom CI orchestrator, set trusted job variable `APEX_RAY_CI=true`.
 - Hook cannot find `apex-ray`: install Apex Ray on the user `PATH` used by git hooks, or update the hook environment.

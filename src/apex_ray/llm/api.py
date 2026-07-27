@@ -145,7 +145,25 @@ _EXPLICIT_TERMINAL_QUOTA_CODES = {
     "insufficient_quota",
 }
 _TRUTHY_ENV_VALUES = {"1", "on", "true", "yes"}
-_CI_ALLOWED_ENV_SELECTORS_ENV = "APEX_RAY_API_ALLOWED_ENV_VARS"
+_CI_TRUTHY_ENV_MARKERS = (
+    "APEX_RAY_CI",
+    "CI",
+    "GITHUB_ACTIONS",
+    "TF_BUILD",
+    "GITLAB_CI",
+    "CIRCLECI",
+    "TRAVIS",
+    "BUILDKITE",
+)
+_CI_PRESENCE_ENV_MARKERS = (
+    "JENKINS_URL",
+    "TEAMCITY_VERSION",
+    "CODEBUILD_BUILD_ID",
+    "BITBUCKET_BUILD_NUMBER",
+)
+_CI_ALLOWED_BASE_URL_ENV_SELECTORS_ENV = "APEX_RAY_API_ALLOWED_BASE_URL_ENV_VARS"
+_CI_ALLOWED_API_KEY_ENV_SELECTORS_ENV = "APEX_RAY_API_ALLOWED_API_KEY_ENV_VARS"
+_CI_ALLOWED_HEADER_ENV_SELECTORS_ENV = "APEX_RAY_API_ALLOWED_HEADER_ENV_VARS"
 _CI_ALLOWED_HOSTS_ENV = "APEX_RAY_API_ALLOWED_HOSTS"
 
 
@@ -553,29 +571,51 @@ class APILLMProvider:
                     f"CI custom API host allowlist environment variable is fixed to {_CI_ALLOWED_HOSTS_ENV}."
                 )
 
-        selectors: list[tuple[str, str]] = []
-        if api.base_url_env:
-            selectors.append(("base URL", api.base_url_env))
-        if self.preset is None and api.api_key_env:
-            selectors.append(("API key", api.api_key_env))
-        selectors.extend((f"header {header!r}", env_name) for header, env_name in api.headers_from_env.items())
-        if not selectors:
-            return
-
-        allowed_selectors = {
-            item
-            for item in re.split(
-                r"[\s,]+",
-                self.environment.get(_CI_ALLOWED_ENV_SELECTORS_ENV, ""),
-            )
-            if item
-        }
-        for label, selector in selectors:
-            if selector not in allowed_selectors:
-                raise LLMProviderError(
-                    f"CI {label} environment selector {selector!r} is not present in the trusted allowlist "
-                    f"{_CI_ALLOWED_ENV_SELECTORS_ENV}."
+        def allowed_selectors(policy_env: str) -> set[str]:
+            return {
+                item
+                for item in re.split(
+                    r"[\s,]+",
+                    self.environment.get(policy_env, ""),
                 )
+                if item
+            }
+
+        credential_selectors = {preset.api_key_env for preset in _PRESETS.values()}
+        credential_selectors.update(allowed_selectors(_CI_ALLOWED_API_KEY_ENV_SELECTORS_ENV))
+        selected_api_key_env = api_key_environment_name(self.config)
+        if selected_api_key_env is not None:
+            credential_selectors.add(selected_api_key_env)
+        for header, env_name in api.headers_from_env.items():
+            if env_name in credential_selectors:
+                raise LLMProviderError(
+                    f"CI credential environment variable cannot be used as a custom header: {env_name!r} -> {header!r}."
+                )
+
+        selector_groups: list[tuple[str, list[tuple[str, str]]]] = [
+            (
+                _CI_ALLOWED_BASE_URL_ENV_SELECTORS_ENV,
+                [("base URL", api.base_url_env)] if api.base_url_env else [],
+            ),
+            (
+                _CI_ALLOWED_API_KEY_ENV_SELECTORS_ENV,
+                [("API key", api.api_key_env)] if self.preset is None and api.api_key_env else [],
+            ),
+            (
+                _CI_ALLOWED_HEADER_ENV_SELECTORS_ENV,
+                [(f"header {header!r}", env_name) for header, env_name in api.headers_from_env.items()],
+            ),
+        ]
+        for policy_env, selectors in selector_groups:
+            if not selectors:
+                continue
+            allowed_for_role = allowed_selectors(policy_env)
+            for label, selector in selectors:
+                if selector not in allowed_for_role:
+                    raise LLMProviderError(
+                        f"CI {label} environment selector {selector!r} is not present in the trusted allowlist "
+                        f"{policy_env}."
+                    )
 
     def _resolve_base_url(self) -> str:
         api = self.config.api
@@ -883,7 +923,9 @@ def _validated_endpoint_host(
 
 
 def _is_ci(environment: Mapping[str, str]) -> bool:
-    return any(environment.get(name, "").strip().lower() in _TRUTHY_ENV_VALUES for name in ("CI", "GITHUB_ACTIONS"))
+    if any(environment.get(name, "").strip().lower() in _TRUTHY_ENV_VALUES for name in _CI_TRUTHY_ENV_MARKERS):
+        return True
+    return any(environment.get(name, "").strip() for name in _CI_PRESENCE_ENV_MARKERS)
 
 
 def _parse_retry_after(headers: Mapping[str, str]) -> float | None:

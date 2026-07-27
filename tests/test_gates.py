@@ -215,6 +215,64 @@ def test_unverified_gate_keeps_legacy_finding_when_in_scope_review_failed(
     assert decision.blocking_findings == [finding]
 
 
+@pytest.mark.parametrize(
+    ("reviewer_ids", "reviewers"),
+    [
+        pytest.param(
+            ["finance"],
+            [ReviewerConfig(id="security", paths=["src/auth/**"], verify=False)],
+            id="removed-reviewer",
+        ),
+        pytest.param(
+            ["finance"],
+            [
+                ReviewerConfig(id="security", paths=["src/auth/**"], verify=False),
+                ReviewerConfig(id="finance", enabled=False, verify=False),
+            ],
+            id="disabled-reviewer",
+        ),
+        pytest.param(
+            [],
+            [ReviewerConfig(id="security", paths=["src/auth/**"], verify=False)],
+            id="legacy-empty-provenance",
+        ),
+    ],
+)
+def test_unverified_gate_keeps_finding_when_provenance_cannot_be_mapped(
+    tmp_path: Path,
+    reviewer_ids: list[str],
+    reviewers: list[ReviewerConfig],
+) -> None:
+    pack = ContextPack(id="src/legacy.ts#authorize:1", file="src/legacy.ts")
+    config = ReviewConfig(reviewers=reviewers)
+    config.gates.pre_push.require_verified_findings = False
+    finding = Finding(
+        title="Authorization bypass",
+        severity=FindingSeverity.HIGH,
+        confidence=FindingConfidence.HIGH,
+        file=pack.file,
+        failure_mode="A transfer can bypass the tenant boundary.",
+        evidence="No authorization predicate precedes the transfer.",
+        suggested_fix="Add a tenant authorization check.",
+        suggested_test="Reject cross-tenant transfers.",
+        context_pack_id=pack.id,
+        reviewer_ids=reviewer_ids,
+    )
+    report = build_report(
+        ProjectProfile(root=str(tmp_path), is_git_repo=True),
+        config,
+        DiffSummary(target_mode=TargetMode.PATCH),
+        context_packs=[pack],
+        findings=[finding],
+        reviewer_scope_ids=["security"],
+    )
+
+    decision = evaluate_pre_push_gate(report, config.gates.pre_push)
+
+    assert decision.blocked is True
+    assert decision.blocking_findings == [finding]
+
+
 def test_unverified_gate_retires_legacy_multi_reviewer_debt_after_clean_scopes(
     tmp_path: Path,
 ) -> None:

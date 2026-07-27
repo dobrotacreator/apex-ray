@@ -153,33 +153,55 @@ HTTPS is mandatory. Loopback HTTP is available only when
 followed, credentials cannot appear in the URL, reserved authentication
 headers cannot be overridden, and response bodies are size-limited.
 
-In CI, Apex Ray uses two fixed, trusted policy variables whose names cannot be
+In CI, Apex Ray uses fixed, trusted policy variables whose names cannot be
 changed by repository configuration:
 
 - `APEX_RAY_API_ALLOWED_HOSTS` lists normalized custom endpoint hostnames;
-- `APEX_RAY_API_ALLOWED_ENV_VARS` lists the environment-variable names that
-  repository configuration may select for `base_url_env`, `api_key_env`, and
+- `APEX_RAY_API_ALLOWED_BASE_URL_ENV_VARS` lists variables selectable by
+  `base_url_env`;
+- `APEX_RAY_API_ALLOWED_API_KEY_ENV_VARS` lists variables selectable by
+  `api_key_env`;
+- `APEX_RAY_API_ALLOWED_HEADER_ENV_VARS` lists variables selectable by
   `headers_from_env`.
+
+Secure CI policy activates automatically for generic `CI`, GitHub Actions,
+Azure Pipelines, Jenkins, GitLab, CircleCI, Travis CI, Buildkite, TeamCity, AWS
+CodeBuild, and Bitbucket Pipelines markers. Set `APEX_RAY_CI=true` in the
+trusted job environment for another orchestrator. Do not source this marker or
+the policy variables from pull-request-controlled configuration.
+
+The three selector roles are not interchangeable. In particular, every
+variable in the API-key allowlist, the selected API-key variable, and every
+built-in preset credential variable are rejected as custom-header sources even
+if a workflow mistakenly adds one to the header allowlist.
 
 For example:
 
 ```yaml
-env:
-  COMPANY_LLM_BASE_URL: https://llm.example.internal/v1
-  COMPANY_LLM_API_KEY: ${{ secrets.COMPANY_LLM_API_KEY }}
-  COMPANY_LLM_TENANT: apex-ray
-  APEX_RAY_API_ALLOWED_HOSTS: llm.example.internal
-  APEX_RAY_API_ALLOWED_ENV_VARS: >-
-    COMPANY_LLM_BASE_URL,COMPANY_LLM_API_KEY,COMPANY_LLM_TENANT
+jobs:
+  review:
+    environment: apex-ray-review
+    env:
+      COMPANY_LLM_BASE_URL: https://llm.example.internal/v1
+      COMPANY_LLM_TENANT: apex-ray
+      APEX_RAY_API_ALLOWED_HOSTS: llm.example.internal
+      APEX_RAY_API_ALLOWED_BASE_URL_ENV_VARS: COMPANY_LLM_BASE_URL
+      APEX_RAY_API_ALLOWED_API_KEY_ENV_VARS: COMPANY_LLM_API_KEY
+      APEX_RAY_API_ALLOWED_HEADER_ENV_VARS: COMPANY_LLM_TENANT
+    steps:
+      - name: Review with pinned Apex Ray action
+        uses: dobrotacreator/apex-ray/.github/actions/apex-ray-review@<full-release-commit-sha>
+        env:
+          COMPANY_LLM_API_KEY: ${{ secrets.COMPANY_LLM_API_KEY }}
 ```
 
-Define both policy variables in trusted CI or a protected environment, not
-from checked-in Apex Ray configuration or pull-request input. Built-in presets
-always use their preset API-key variable in CI. Preset endpoint/header
-selectors and all custom-provider selectors must appear in
-`APEX_RAY_API_ALLOWED_ENV_VARS`. Outside CI, custom endpoints, selector names,
-and explicitly opted-in loopback HTTP remain configurable for local gateways
-and integration tests.
+Define the policy variables in trusted CI or a protected environment, not from
+checked-in Apex Ray configuration or pull-request input. Scope the API-key
+value itself to the pinned Apex Ray step. Built-in presets always use their
+preset API-key variable in CI. Preset endpoint/header selectors and all
+custom-provider selectors must appear in the allowlist for their specific
+role. Outside CI, custom endpoints, selector names, and explicitly opted-in
+loopback HTTP remain configurable for local gateways and integration tests.
 
 ## Provider Setup Checklist
 
