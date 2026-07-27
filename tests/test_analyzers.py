@@ -5,7 +5,9 @@ import subprocess
 import time
 import tracemalloc
 from collections.abc import Callable
+from io import BytesIO
 from pathlib import Path
+from threading import Event
 
 import pytest
 
@@ -416,6 +418,290 @@ def test_typescript_fallback_does_not_read_ignored_custom_config_extends(
     assert payload["config_files"] == ["tsconfig.json"]
     assert Path("ignored/private.custom") not in reads
     assert Path("ignored/nested.rules") not in reads
+
+
+def test_typescript_fallback_missing_config_candidates_do_not_spawn_git_processes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    missing_extends = [f"./configs/missing-{index:04d}.custom" for index in range(1_000)]
+    (tmp_path / "tsconfig.json").write_text(
+        json.dumps({"extends": missing_extends}),
+        encoding="utf-8",
+    )
+    popen_calls = 0
+
+    class VisibleGitProcess:
+        returncode = 1
+
+        def poll(self) -> int:
+            return self.returncode
+
+        def wait(self, timeout: float | None = None) -> int:
+            return self.returncode
+
+        def kill(self) -> None:
+            raise AssertionError("completed Git process must not be killed")
+
+    def fake_popen(*args: object, **kwargs: object) -> VisibleGitProcess:
+        nonlocal popen_calls
+        popen_calls += 1
+        return VisibleGitProcess()
+
+    monkeypatch.setattr(
+        typescript_analyzer_module.subprocess,
+        "Popen",
+        fake_popen,
+    )
+
+    inventory = typescript_analyzer_module._TypescriptInventory(
+        paths=[Path("tsconfig.json")],
+        partial_reason=None,
+    )
+    retained = typescript_analyzer_module._retain_fallback_config_extends(
+        tmp_path,
+        inventory,
+        [],
+        git_backed=True,
+        check_deadline=lambda: None,
+    )
+
+    assert retained.paths == [Path("tsconfig.json")]
+    assert popen_calls == 0
+
+
+def test_typescript_fallback_batches_existing_config_visibility_in_one_git_process(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_directory = tmp_path / "configs"
+    config_directory.mkdir()
+    extends_values: list[str] = []
+    for index in range(1_000):
+        relative_path = f"configs/base-{index:04d}.custom"
+        (tmp_path / relative_path).write_text("{}\n", encoding="utf-8")
+        extends_values.append(f"./{relative_path}")
+    (tmp_path / "tsconfig.json").write_text(
+        json.dumps({"extends": extends_values}),
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    real_popen = typescript_analyzer_module.subprocess.Popen
+    popen_calls = 0
+
+    def counting_popen(
+        args: list[str],
+        *,
+        stdin: int | None = None,
+        stdout: int | None = None,
+        stderr: int | None = None,
+    ) -> subprocess.Popen[bytes]:
+        nonlocal popen_calls
+        popen_calls += 1
+        return real_popen(
+            args,
+            stdin=stdin,
+            stdout=stdout,
+            stderr=stderr,
+        )
+
+    monkeypatch.setattr(
+        typescript_analyzer_module.subprocess,
+        "Popen",
+        counting_popen,
+    )
+    inventory = typescript_analyzer_module._TypescriptInventory(
+        paths=[Path("tsconfig.json")],
+        partial_reason=None,
+    )
+
+    retained = typescript_analyzer_module._retain_fallback_config_extends(
+        tmp_path,
+        inventory,
+        [],
+        git_backed=True,
+        check_deadline=lambda: None,
+    )
+
+    assert len(retained.paths) == 1_001
+    assert popen_calls == 1
+
+
+def test_typescript_fallback_git_visibility_has_an_independent_process_timeout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = 0.0
+
+    def advancing_clock() -> float:
+        nonlocal clock
+        clock += 0.6
+        return clock
+
+    class StalledGitProcess:
+        returncode: int | None = None
+        killed = False
+        stopped = Event()
+
+        class Stdin:
+            writes = 0
+
+            def write(self, data: bytes) -> int:
+                self.writes += 1
+                return len(data)
+
+            def flush(self) -> None:
+                return None
+
+            def close(self) -> None:
+                return None
+
+        class Stdout:
+            def __init__(self, stopped: Event) -> None:
+                self.stopped = stopped
+
+            def read(self, size: int = -1) -> bytes:
+                self.stopped.wait(timeout=5)
+                return b""
+
+            def close(self) -> None:
+                self.stopped.set()
+
+        def __init__(self) -> None:
+            self.stdin = self.Stdin()
+            self.stdout = self.Stdout(self.stopped)
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+        def wait(self, timeout: float | None = None) -> int:
+            if self.killed:
+                self.returncode = -9
+                return self.returncode
+            raise subprocess.TimeoutExpired(["git", "check-ignore"], timeout or 0.0)
+
+        def kill(self) -> None:
+            self.killed = True
+            self.returncode = -9
+            self.stopped.set()
+
+    process = StalledGitProcess()
+    monkeypatch.setattr(
+        typescript_analyzer_module.subprocess,
+        "Popen",
+        lambda *args, **kwargs: process,
+    )
+    monkeypatch.setattr(
+        typescript_analyzer_module.time,
+        "monotonic",
+        advancing_clock,
+    )
+
+    visible = typescript_analyzer_module._git_fallback_config_path_visible(
+        tmp_path,
+        "configs/base.custom",
+        check_deadline=lambda: None,
+    )
+
+    assert visible is None
+    assert process.killed is True
+    assert process.stdin.writes == 1
+
+
+@pytest.mark.parametrize(
+    ("metadata", "expected"),
+    [
+        ((b"", b"", b""), True),
+        ((b".gitignore", b"1", b"configs/*.custom"), False),
+        ((b".gitignore", b"2", b"!configs/base.custom"), True),
+        ((b".gitignore", b"3", b"\\!literal.custom"), False),
+    ],
+)
+def test_typescript_fallback_git_visibility_parses_coherent_protocol_records(
+    metadata: tuple[bytes, bytes, bytes],
+    expected: bool,
+) -> None:
+    path = b"configs/base.custom"
+    stdin = BytesIO()
+    stdout = BytesIO(b"\0".join((*metadata, path, b"")))
+
+    visible = typescript_analyzer_module._GitFallbackConfigVisibilityChecker._exchange(
+        stdin,
+        stdout,
+        path,
+    )
+
+    assert visible is expected
+    assert stdin.getvalue() == path + b"\0"
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        pytest.param(
+            (b"garbage-source", b"not-a-line", b""),
+            id="forged-empty-pattern",
+        ),
+        pytest.param(
+            (b"", b"", b"!fabricated-negation"),
+            id="forged-negation-without-source",
+        ),
+        pytest.param((b".gitignore", b"", b"*.custom"), id="missing-line"),
+        pytest.param((b"", b"1", b"*.custom"), id="missing-source"),
+        pytest.param((b".gitignore", b"1", b""), id="missing-pattern"),
+        pytest.param((b".gitignore", b"0", b"*.custom"), id="zero-line"),
+        pytest.param((b".gitignore", b"01", b"*.custom"), id="noncanonical-line"),
+        pytest.param((b".gitignore", b"-1", b"*.custom"), id="negative-line"),
+    ],
+)
+def test_typescript_fallback_git_visibility_rejects_malformed_protocol_records(
+    metadata: tuple[bytes, bytes, bytes],
+) -> None:
+    path = b"configs/base.custom"
+    stdin = BytesIO()
+    stdout = BytesIO(b"\0".join((*metadata, path, b"")))
+
+    visible = typescript_analyzer_module._GitFallbackConfigVisibilityChecker._exchange(
+        stdin,
+        stdout,
+        path,
+    )
+
+    assert visible is None
+    assert stdin.getvalue() == path + b"\0"
+
+
+def test_typescript_fallback_retains_git_negated_custom_config_extends(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "configs").mkdir()
+    (tmp_path / "configs" / "base.custom").write_text("{}\n", encoding="utf-8")
+    (tmp_path / "tsconfig.json").write_text(
+        '{"extends":"./configs/base.custom"}\n',
+        encoding="utf-8",
+    )
+    (tmp_path / ".gitignore").write_text(
+        "configs/*.custom\n!configs/base.custom\n",
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    inventory = typescript_analyzer_module._TypescriptInventory(
+        paths=[Path("tsconfig.json")],
+        partial_reason=None,
+    )
+
+    retained = typescript_analyzer_module._retain_fallback_config_extends(
+        tmp_path,
+        inventory,
+        [],
+        git_backed=True,
+        check_deadline=lambda: None,
+    )
+
+    assert retained.paths == [
+        Path("tsconfig.json"),
+        Path("configs/base.custom"),
+    ]
 
 
 def test_typescript_fallback_caps_custom_config_extends_chain(
@@ -1593,6 +1879,51 @@ def test_typescript_inventory_source_limit_does_not_starve_metadata(
         else "2 relevant-file safety limit"
     )
     assert expected_limit_reason in payload["partial_reason"]
+
+
+@pytest.mark.parametrize(
+    ("entry_limit", "output_byte_limit"),
+    [
+        (2, 1024 * 1024),
+        (100, 64),
+    ],
+)
+def test_typescript_git_inventory_ignores_unrelated_files_before_safety_limits(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    entry_limit: int,
+    output_byte_limit: int,
+) -> None:
+    monkeypatch.setattr(
+        typescript_analyzer_module,
+        "TS_FALLBACK_INVENTORY_ENTRY_LIMIT",
+        entry_limit,
+    )
+    monkeypatch.setattr(
+        typescript_analyzer_module,
+        "TS_FALLBACK_GIT_OUTPUT_BYTE_LIMIT",
+        output_byte_limit,
+    )
+    for index in range(10):
+        noise_path = tmp_path / f"a-noise-{index:02d}-{'x' * 32}.txt"
+        noise_path.write_text("not TypeScript inventory input\n", encoding="utf-8")
+    source_path = tmp_path / "z-src" / "service.ts"
+    source_path.parent.mkdir()
+    source_path.write_text("export const service = true;\n", encoding="utf-8")
+    (source_path.parent / "tsconfig.json").write_text("{}\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+    manifest_path = tmp_path / "files.json"
+
+    typescript_analyzer_module._write_typescript_file_manifest(
+        tmp_path,
+        manifest_path,
+    )
+
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert payload["files"] == ["z-src/service.ts"]
+    assert payload["config_files"] == ["z-src/tsconfig.json"]
+    assert "TypeScript Git fallback inventory reached" not in payload.get("partial_reason", "")
 
 
 @pytest.mark.parametrize("inventory_source", ["supplied", "git"])
@@ -3927,7 +4258,7 @@ def test_typescript_analyzer_returns_partial_result_when_a_shard_times_out(
     assert "warning for src/file-0.ts" in result.warnings
     assert "warning for src/file-2.ts" in result.warnings
     assert any("partial TypeScript analyzer result" in warning for warning in result.warnings)
-    assert any("src/file-1.ts" in warning and "timed out after 1s" in warning for warning in result.warnings)
+    assert any("src/file-1.ts" in warning and "timed out after" in warning for warning in result.warnings)
     assert result.partial is True
     assert result.failed_files == ["src/file-1.ts"]
     assert len(result.shard_failures) == 1
@@ -4393,4 +4724,6 @@ def test_typescript_analyzer_timeout_is_reported(tmp_path: Path, monkeypatch: py
             AnalyzerConfig(script_path=str(script), timeout_seconds=1),
         )
 
-    assert "timed out after 1s" in str(exc.value)
+    message = str(exc.value)
+    assert "TypeScript analyzer" in message
+    assert "timed out after" in message or "total timeout after" in message

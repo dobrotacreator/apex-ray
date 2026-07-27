@@ -86,11 +86,7 @@ export function readRepoIndexCache(
     ) {
       return null;
     }
-    if (
-      cacheVersionBeforeParse(snapshot.text) !==
-        REPO_INDEX_CACHE_VERSION ||
-      cacheJsonExceedsEntrySafetyLimit(snapshot.text, shouldStop)
-    ) {
+    if (cacheJsonExceedsEntrySafetyLimit(snapshot.text, shouldStop)) {
       return null;
     }
     if (shouldStop()) return null;
@@ -127,13 +123,6 @@ export function readRepoIndexCache(
   } catch {
     return null;
   }
-}
-
-function cacheVersionBeforeParse(text: string): number | null {
-  const match = /^\s*\{\s*"version"\s*:\s*(-?\d+)/u.exec(text);
-  if (!match) return null;
-  const version = Number(match[1]);
-  return Number.isSafeInteger(version) ? version : null;
 }
 
 function cacheJsonExceedsEntrySafetyLimit(

@@ -5,6 +5,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from http.client import HTTPException, HTTPMessage, IncompleteRead
 from io import BytesIO
+from ipaddress import IPv6Address
 from pathlib import Path
 from typing import Never, cast
 from urllib.error import HTTPError, URLError
@@ -106,6 +107,26 @@ class StubOpener:
         self.request = request
         self.timeout = timeout
         return self.response
+
+
+class _LegacyMappedIPv6Address(IPv6Address):
+    """Emulate Python versions where mapped IPv4 loopback was not propagated."""
+
+    @property
+    def is_loopback(self) -> bool:
+        return False
+
+
+def _emulate_legacy_mapped_ipv6_classification(monkeypatch: pytest.MonkeyPatch) -> None:
+    real_ip_address = http_module.ip_address
+
+    def legacy_ip_address(value: str) -> object:
+        address = real_ip_address(value)
+        if isinstance(address, IPv6Address) and address.ipv4_mapped is not None:
+            return _LegacyMappedIPv6Address(int(address))
+        return address
+
+    monkeypatch.setattr(http_module, "ip_address", legacy_ip_address)
 
 
 class StubHTTPErrorBody(BytesIO):
@@ -473,6 +494,114 @@ def test_stdlib_transport_allows_intentional_loopback_http(
     assert opener.request.full_url == expected_url
     proxy_handler = next(handler for handler in installed_handlers if isinstance(handler, http_module.ProxyHandler))
     assert getattr(proxy_handler, "proxies", None) == {}
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        pytest.param("https://api.example./v1/review", id="single-dns-root-dot"),
+        pytest.param("https://api.example../v1/review", id="dns-host"),
+        pytest.param(
+            "http://localhost....:11434/v1/review",
+            id="loopback-host",
+        ),
+    ],
+)
+def test_stdlib_transport_rejects_dns_root_dots(
+    monkeypatch: pytest.MonkeyPatch,
+    url: str,
+) -> None:
+    opener_calls = 0
+
+    def fail_if_built(*handlers: object) -> StubOpener:
+        nonlocal opener_calls
+        opener_calls += 1
+        raise AssertionError("malformed host reached the network opener")
+
+    monkeypatch.setattr(http_module, "build_opener", fail_if_built)
+
+    with pytest.raises(JSONTransportError, match="malformed host") as caught:
+        UrllibJSONTransport(allow_insecure_loopback_http=True).request(
+            url=url,
+            headers={"Authorization": "Bearer secret"},
+            payload={},
+            timeout_seconds=7,
+            use_system_proxy=False,
+        )
+
+    assert caught.value.kind == "malformed"
+    assert opener_calls == 0
+
+
+def test_stdlib_transport_allows_mapped_ipv4_loopback_http_when_ipv6_flag_is_false(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _emulate_legacy_mapped_ipv6_classification(monkeypatch)
+    opener = StubOpener(StubHTTPHandle(b'{"ok":true}'))
+    installed_handlers: list[object] = []
+
+    def fake_build_opener(*handlers: object) -> StubOpener:
+        installed_handlers.extend(handlers)
+        return opener
+
+    monkeypatch.setattr(http_module, "build_opener", fake_build_opener)
+
+    response = UrllibJSONTransport(allow_insecure_loopback_http=True).request(
+        url="http://[::ffff:127.0.0.2]:11434/v1/review",
+        headers={"Authorization": "Bearer local-secret"},
+        payload={},
+        timeout_seconds=7,
+        use_system_proxy=True,
+    )
+
+    assert response.data == {"ok": True}
+    proxy_handler = next(handler for handler in installed_handlers if isinstance(handler, http_module.ProxyHandler))
+    assert getattr(proxy_handler, "proxies", None) == {}
+
+
+@pytest.mark.parametrize(
+    ("url", "expected_proxy_bypass"),
+    [
+        pytest.param(
+            "https://[::ffff:127.0.0.2]:11434/v1/review",
+            True,
+            id="mapped-loopback",
+        ),
+        pytest.param(
+            "https://[::ffff:192.0.2.1]:11434/v1/review",
+            False,
+            id="mapped-non-loopback",
+        ),
+    ],
+)
+def test_stdlib_transport_uses_mapped_ipv4_for_https_proxy_bypass(
+    monkeypatch: pytest.MonkeyPatch,
+    url: str,
+    expected_proxy_bypass: bool,
+) -> None:
+    _emulate_legacy_mapped_ipv6_classification(monkeypatch)
+    opener = StubOpener(StubHTTPHandle(b'{"ok":true}'))
+    installed_handlers: list[object] = []
+
+    def fake_build_opener(*handlers: object) -> StubOpener:
+        installed_handlers.extend(handlers)
+        return opener
+
+    monkeypatch.setattr(http_module, "build_opener", fake_build_opener)
+
+    response = UrllibJSONTransport().request(
+        url=url,
+        headers={"Authorization": "Bearer secret"},
+        payload={},
+        timeout_seconds=7,
+        use_system_proxy=True,
+    )
+
+    assert response.data == {"ok": True}
+    proxy_handlers = [handler for handler in installed_handlers if isinstance(handler, http_module.ProxyHandler)]
+    assert bool(proxy_handlers) is expected_proxy_bypass
+    if proxy_handlers:
+        assert getattr(proxy_handlers[0], "proxies", None) == {}
 
 
 @pytest.mark.parametrize(
@@ -1319,17 +1448,7 @@ def test_generic_compatible_provider_preserves_local_loopback_endpoint() -> None
     assert transport.calls[0].url == "http://127.0.0.1:11434/v1/chat/completions"
 
 
-@pytest.mark.parametrize(
-    "base_url",
-    [
-        pytest.param("http://localhost.:11434/v1", id="localhost-trailing-dot"),
-        pytest.param(
-            "http://[0:0:0:0:0:0:0:1]:11434/v1",
-            id="expanded-ipv6-loopback",
-        ),
-    ],
-)
-def test_literal_loopback_endpoint_uses_runtime_host_normalization(base_url: str) -> None:
+def test_literal_loopback_endpoint_normalizes_expanded_ipv6() -> None:
     transport = StubTransport(success_response())
     config = LLMConfig(
         provider=LLMProviderName.OPENAI_COMPATIBLE,
@@ -1337,7 +1456,7 @@ def test_literal_loopback_endpoint_uses_runtime_host_normalization(base_url: str
         api=LLMAPIConfig(
             protocol=LLMAPIProtocol.OPENAI_CHAT,
             structured_output=LLMStructuredOutput.JSON_OBJECT,
-            base_url=base_url,
+            base_url="http://[0:0:0:0:0:0:0:1]:11434/v1",
             api_key_env="LOCAL_LLM_KEY",
             allow_insecure_loopback_http=True,
         ),
@@ -1350,6 +1469,17 @@ def test_literal_loopback_endpoint_uses_runtime_host_normalization(base_url: str
     ).review_context_pack(make_pack(), Path("."))
 
     assert len(transport.calls) == 1
+
+
+def test_literal_loopback_endpoint_rejects_dns_root_dot() -> None:
+    with pytest.raises(ValueError, match="malformed host"):
+        LLMAPIConfig(
+            protocol=LLMAPIProtocol.OPENAI_CHAT,
+            structured_output=LLMStructuredOutput.JSON_OBJECT,
+            base_url="http://localhost.:11434/v1",
+            api_key_env="LOCAL_LLM_KEY",
+            allow_insecure_loopback_http=True,
+        )
 
 
 def test_generic_compatible_provider_rejects_loopback_http_without_explicit_opt_in() -> None:

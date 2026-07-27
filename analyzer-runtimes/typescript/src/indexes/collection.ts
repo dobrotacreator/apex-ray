@@ -4,6 +4,7 @@ export interface IndexCollectionControl {
   shouldStop(): boolean;
   reserveEntry(): boolean;
   reserveEntries(count: number): boolean;
+  markPartial(): void;
 }
 
 export function collectionShouldStop(

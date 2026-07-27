@@ -584,6 +584,243 @@ test("fallback repo inventory is bounded and retains changed source files", () =
   }
 });
 
+test("changed source files consume inventory count and path byte limits", () => {
+  const repo = fs.mkdtempSync(
+    path.join(os.tmpdir(), "apex-ray-ts-index-changed-boundary-"),
+  );
+  try {
+    const changedPaths = Array.from(
+      { length: 6 },
+      (_, index) => `src/changed-${index}.ts`,
+    );
+    for (const changedPath of changedPaths) {
+      writeFile(repo, changedPath, "export const changed = true;\n");
+    }
+    const fallbackArgs = parseArgs([
+      "--repo",
+      repo,
+      "--changed",
+      ...changedPaths,
+      "--no-index-cache",
+    ]);
+    const maxPathBytes =
+      Buffer.byteLength(changedPaths[0], "utf8") +
+      Buffer.byteLength(changedPaths[1], "utf8") +
+      1;
+
+    const countLimited = loadRepoFileInventory(fallbackArgs, {
+      maxEntries: 100,
+      maxFiles: 2,
+      maxPathBytes: 1_024,
+    });
+    const byteLimited = loadRepoFileInventory(fallbackArgs, {
+      maxEntries: 100,
+      maxFiles: 6,
+      maxPathBytes,
+    });
+
+    assert.deepEqual(
+      countLimited.absPaths,
+      changedPaths.slice(0, 2).map((relPath) => path.join(repo, relPath)),
+    );
+    assert.match(
+      countLimited.partialReason ?? "",
+      /changed path inventory reached the safety limit of 2 source files/,
+    );
+    assert.deepEqual(byteLimited.absPaths, [
+      path.join(repo, changedPaths[0]),
+    ]);
+    assert.ok(
+      byteLimited.absPaths.reduce(
+        (total, absPath) =>
+          total +
+          Buffer.byteLength(
+            path.relative(repo, absPath).replaceAll("\\", "/"),
+            "utf8",
+          ) +
+          1,
+        0,
+      ) <= maxPathBytes,
+    );
+    assert.match(
+      byteLimited.partialReason ?? "",
+      new RegExp(
+        `changed path inventory reached the retained-path byte safety limit of ${maxPathBytes}`,
+      ),
+    );
+
+    const manifestPath = path.join(repo, "typescript-files.json");
+    fs.writeFileSync(
+      manifestPath,
+      JSON.stringify({ version: 2, files: [] }),
+      "utf8",
+    );
+    const manifestArgs = parseArgs([
+      "--repo",
+      repo,
+      "--changed",
+      ...changedPaths,
+      "--file-manifest",
+      manifestPath,
+      "--no-index-cache",
+    ]);
+    const manifestLimited = loadRepoFileInventory(manifestArgs, {
+      maxFiles: 2,
+    });
+    const manifestByteLimited = loadRepoFileInventory(manifestArgs, {
+      maxFiles: 10,
+      maxPathBytes: 5,
+    });
+
+    assert.deepEqual(
+      manifestLimited.absPaths,
+      changedPaths.slice(0, 2).map((relPath) => path.join(repo, relPath)),
+    );
+    assert.match(
+      manifestLimited.partialReason ?? "",
+      /changed path inventory reached the safety limit of 2 source files/,
+    );
+    assert.deepEqual(manifestByteLimited.absPaths, [
+      path.join(repo, changedPaths[0]),
+    ]);
+    assert.match(
+      manifestByteLimited.partialReason ?? "",
+      /changed path inventory reached the retained-path byte safety limit of 5/,
+    );
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("changed path prevalidation stops after preserving one root when cancelled", () => {
+  const repo = fs.mkdtempSync(
+    path.join(os.tmpdir(), "apex-ray-ts-index-changed-cancel-"),
+  );
+  const originalLstatSync = fs.lstatSync;
+  const originalRealpathSync = fs.realpathSync;
+  try {
+    const changedPaths = Array.from(
+      { length: 12 },
+      (_, index) => `src/changed-${index}.ts`,
+    );
+    for (const changedPath of changedPaths) {
+      writeFile(repo, changedPath, "export const changed = true;\n");
+    }
+    const args = parseArgs([
+      "--repo",
+      repo,
+      "--changed",
+      ...changedPaths,
+      "--no-index-cache",
+    ]);
+    let changedLstatCalls = 0;
+    let realpathCalls = 0;
+    fs.lstatSync = ((candidate: fs.PathLike) => {
+      if (String(candidate).endsWith(".ts")) {
+        changedLstatCalls += 1;
+      }
+      return originalLstatSync(candidate);
+    }) as typeof fs.lstatSync;
+    fs.realpathSync = ((candidate: fs.PathLike, ...rest: unknown[]) => {
+      realpathCalls += 1;
+      return (originalRealpathSync as (...args: unknown[]) => fs.PathLike)(
+        candidate,
+        ...rest,
+      );
+    }) as typeof fs.realpathSync;
+
+    const inventory = loadRepoFileInventory(args, {
+      maxFiles: 1,
+      shouldStop: () => true,
+    });
+
+    assert.deepEqual(inventory.absPaths, [
+      path.join(repo, changedPaths[0]),
+    ]);
+    assert.match(
+      inventory.partialReason ?? "",
+      /changed path inventory reached the safety limit of 1 source files/,
+    );
+    assert.match(inventory.partialReason ?? "", /analysis time budget/);
+    assert.equal(changedLstatCalls, 1);
+    assert.ok(
+      realpathCalls <= 2,
+      `expected repository plus one changed-path realpath, got ${realpathCalls}`,
+    );
+  } finally {
+    fs.lstatSync = originalLstatSync;
+    fs.realpathSync = originalRealpathSync;
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("changed path prevalidation skips over-byte candidates before filesystem access", () => {
+  const repo = fs.mkdtempSync(
+    path.join(os.tmpdir(), "apex-ray-ts-index-changed-byte-skip-"),
+  );
+  const originalLstatSync = fs.lstatSync;
+  try {
+    const longPaths = Array.from(
+      { length: 99 },
+      (_, index) => `long-changed-file-${index}.ts`,
+    );
+    for (const changedPath of ["a.ts", ...longPaths, "b.ts"]) {
+      writeFile(repo, changedPath, "export const changed = true;\n");
+    }
+    const args = parseArgs([
+      "--repo",
+      repo,
+      "--changed",
+      "a.ts",
+      ...longPaths,
+      "b.ts",
+      "--no-index-cache",
+    ]);
+    let changedLstatCalls = 0;
+    fs.lstatSync = ((candidate: fs.PathLike) => {
+      if (String(candidate).endsWith(".ts")) {
+        changedLstatCalls += 1;
+      }
+      return originalLstatSync(candidate);
+    }) as typeof fs.lstatSync;
+
+    const noRemainingRoom = loadRepoFileInventory(args, {
+      maxEntries: 200,
+      maxFiles: 200,
+      maxPathBytes: 6,
+    });
+
+    assert.deepEqual(noRemainingRoom.absPaths, [
+      path.join(repo, "a.ts"),
+    ]);
+    assert.match(
+      noRemainingRoom.partialReason ?? "",
+      /changed path inventory reached the retained-path byte safety limit of 6/,
+    );
+    assert.equal(changedLstatCalls, 1);
+
+    changedLstatCalls = 0;
+    const laterShortPathFits = loadRepoFileInventory(args, {
+      maxEntries: 200,
+      maxFiles: 200,
+      maxPathBytes: 10,
+    });
+
+    assert.deepEqual(laterShortPathFits.absPaths, [
+      path.join(repo, "a.ts"),
+      path.join(repo, "b.ts"),
+    ]);
+    assert.match(
+      laterShortPathFits.partialReason ?? "",
+      /changed path inventory reached the retained-path byte safety limit of 10/,
+    );
+    assert.equal(changedLstatCalls, 2);
+  } finally {
+    fs.lstatSync = originalLstatSync;
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
+});
+
 test("fallback repo inventory is partial when a source directory cannot be opened", () => {
   const repo = fs.mkdtempSync(
     path.join(os.tmpdir(), "apex-ray-ts-index-fallback-unreadable-"),

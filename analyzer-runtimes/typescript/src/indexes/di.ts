@@ -6,6 +6,7 @@ import {
   propertyAssignmentNamed,
   unwrapExpression,
 } from "../ast-utils.js";
+import { REPO_INDEX_SEMANTIC_ENTRY_LIMIT } from "../constants.js";
 import { referenceForNode } from "../references/utils.js";
 import type { DiInjectionIndexEntry, DiProviderIndexEntry } from "../types.js";
 import {
@@ -19,27 +20,84 @@ interface DirectConstArrayLiteral {
   unsafeIdentifierStarts: number[];
 }
 
+function visitChildrenUntilStopped(
+  node: ts.Node,
+  visit: (child: ts.Node) => boolean,
+): boolean {
+  const stopped = ts.forEachChild(
+    node,
+    (child) => (visit(child) ? undefined : true),
+  );
+  return stopped !== true;
+}
+
+function createDiAuxiliaryCollectionControl(
+  outputControl?: IndexCollectionControl,
+): IndexCollectionControl {
+  // Prepasses retain lookup state, not semantic output. Keep that state
+  // bounded while still inheriting cancellation and deadline checks.
+  let reservedEntries = 0;
+  let limitReached = false;
+  const markLimitReached = (): void => {
+    if (limitReached) return;
+    limitReached = true;
+    outputControl?.markPartial();
+  };
+  const auxiliaryControl: IndexCollectionControl = {
+    shouldStop: () =>
+      limitReached || collectionShouldStop(outputControl),
+    reserveEntry: () => auxiliaryControl.reserveEntries(1),
+    reserveEntries: (count) => {
+      if (count < 0 || !Number.isSafeInteger(count)) {
+        markLimitReached();
+        return false;
+      }
+      if (auxiliaryControl.shouldStop()) return false;
+      if (
+        count >
+        REPO_INDEX_SEMANTIC_ENTRY_LIMIT - reservedEntries
+      ) {
+        markLimitReached();
+        return false;
+      }
+      reservedEntries += count;
+      return true;
+    },
+    markPartial: () => outputControl?.markPartial(),
+  };
+  return auxiliaryControl;
+}
+
 export function collectDiProviderIndex(
   repo: string,
   source: ts.SourceFile,
   control?: IndexCollectionControl,
 ): DiProviderIndexEntry[] {
   const providers: DiProviderIndexEntry[] = [];
-  const staticArrays = collectDirectConstArrayLiterals(source, control);
+  const staticArrays = collectDirectConstArrayLiterals(
+    source,
+    createDiAuxiliaryCollectionControl(control),
+  );
   const providerArrays = collectDiProviderArrays(
     repo,
     source,
     staticArrays,
-    control,
+    createDiAuxiliaryCollectionControl(control),
   );
+  // Concrete module/provider objects are higher-signal output than lookup
+  // metadata for arrays that may never be referenced.
+  if (!visit(source)) return providers;
   for (const entries of providerArrays.values()) {
-    providers.push(...entries);
+    for (const entry of entries) {
+      if (!appendIndexEntry(providers, entry, control)) {
+        return providers;
+      }
+    }
   }
-  visit(source);
   return providers;
 
-  function visit(node: ts.Node): void {
-    if (collectionShouldStop(control)) return;
+  function visit(node: ts.Node): boolean {
+    if (collectionShouldStop(control)) return false;
     if (ts.isObjectLiteralExpression(node)) {
       providers.push(
         ...diProviderEntriesForModuleObject(
@@ -61,13 +119,13 @@ export function collectDiProviderIndex(
         ),
       );
     }
-    ts.forEachChild(node, visit);
+    return visitChildrenUntilStopped(node, visit);
   }
 }
 
 function collectDirectConstArrayLiterals(
   source: ts.SourceFile,
-  control?: IndexCollectionControl,
+  control: IndexCollectionControl,
 ): Map<string, DirectConstArrayLiteral> {
   const arrays = new Map<string, DirectConstArrayLiteral>();
   for (const statement of source.statements) {
@@ -88,6 +146,13 @@ function collectDirectConstArrayLiterals(
         declaration.initializer,
       );
       if (array) {
+        if (
+          !arrays.has(declaration.name.text) &&
+          !control.reserveEntry()
+        ) {
+          arrays.clear();
+          return arrays;
+        }
         arrays.set(declaration.name.text, {
           array,
           unsafeIdentifierStarts: [],
@@ -107,15 +172,16 @@ function collectDirectConstArrayLiterals(
       ts.isIdentifier(node) &&
       !isReadOnlySpreadIdentifier(node)
     ) {
-      arrays
-        .get(node.text)
-        ?.unsafeIdentifierStarts.push(node.getStart(source));
+      const array = arrays.get(node.text);
+      if (array) {
+        if (!control.reserveEntry()) return false;
+        array.unsafeIdentifierStarts.push(node.getStart(source));
+      }
     }
-    let complete = true;
-    ts.forEachChild(node, (child) => {
-      if (complete) complete = collectUnsafeIdentifierStarts(child);
-    });
-    return complete;
+    return visitChildrenUntilStopped(
+      node,
+      collectUnsafeIdentifierStarts,
+    );
   }
 
   function isReadOnlySpreadIdentifier(
@@ -193,7 +259,7 @@ function collectDiProviderArrays(
   repo: string,
   source: ts.SourceFile,
   staticArrays: ReadonlyMap<string, DirectConstArrayLiteral>,
-  control?: IndexCollectionControl,
+  control: IndexCollectionControl,
 ): Map<string, DiProviderIndexEntry[]> {
   const providerArrays = new Map<string, DiProviderIndexEntry[]>();
   for (const statement of source.statements) {
@@ -266,17 +332,21 @@ function diProviderEntriesForModuleObject(
         const spreadIdentifier = identifierFromExpression(element.expression);
         const spreadProviders = spreadIdentifier ? providerArrays.get(spreadIdentifier.text) : undefined;
         if (spreadIdentifier && spreadProviders) {
-          if (!appendIndexEntry(entries, {
-            tokenName: spreadIdentifier.text,
-            implementationName: spreadIdentifier.text,
-            reference: referenceForNode(repo, source, referenceNode, "read"),
-          }, control)) break;
           for (const provider of spreadProviders) {
             if (!appendIndexEntry(entries, {
               tokenName: provider.tokenName,
               implementationName: provider.implementationName,
               reference: referenceForNode(repo, source, referenceNode, "read"),
-            }, control)) break;
+            }, control)) {
+              return entries;
+            }
+          }
+          if (!appendIndexEntry(entries, {
+            tokenName: spreadIdentifier.text,
+            implementationName: spreadIdentifier.text,
+            reference: referenceForNode(repo, source, referenceNode, "read"),
+          }, control)) {
+            return entries;
           }
           continue;
         }
@@ -411,18 +481,20 @@ export function collectDiInjectionIndex(
   visit(source);
   return injections;
 
-  function visit(node: ts.Node): void {
-    if (collectionShouldStop(control)) return;
+  function visit(node: ts.Node): boolean {
+    if (collectionShouldStop(control)) return false;
     if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "Inject") {
       const [argument] = node.arguments;
       const token = identifierFromExpression(argument);
       if (token) {
-        appendIndexEntry(injections, {
+        if (!appendIndexEntry(injections, {
           tokenName: token.text,
           reference: referenceForNode(repo, source, token, "read"),
-        }, control);
+        }, control)) {
+          return false;
+        }
       }
     }
-    ts.forEachChild(node, visit);
+    return visitChildrenUntilStopped(node, visit);
   }
 }

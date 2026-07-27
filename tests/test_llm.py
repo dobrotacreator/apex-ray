@@ -11,6 +11,7 @@ from apex_ray.llm import (
     ClaudeCodeCLIProvider,
     CodexCLIProvider,
     FakeLLMProvider,
+    LLMProvider,
     LLMProviderError,
     build_claude_command,
     build_codex_command,
@@ -44,6 +45,7 @@ from apex_ray.llm.cache import (
 )
 from apex_ray.llm.cli import claude_result_text
 from apex_ray.llm.prompts import render_review_prompt
+from apex_ray.llm.providers import review_context_pack_with_provider
 from apex_ray.llm.review import LLMRouteCircuitBreaker
 from apex_ray.llm.usage import parse_claude_usage_from_json, parse_codex_usage_from_jsonl
 from apex_ray.models import (
@@ -54,6 +56,7 @@ from apex_ray.models import (
     FileKind,
     Finding,
     FindingConfidence,
+    FindingResolution,
     FindingSeverity,
     FindingVerification,
     LLMAPIConfig,
@@ -70,6 +73,7 @@ from apex_ray.models import (
     LLMVerificationResult,
     MemoryMatch,
     ReviewerConfig,
+    ReviewReport,
     RiskSeverity,
     RiskSignal,
     RuleMatch,
@@ -133,6 +137,24 @@ def make_unknown_language_pack(file: str = "src/types.pyi") -> ContextPack:
     )
 
 
+class _RenderedPromptReviewTestProvider:
+    def review_rendered_prompt_with_usage(
+        self,
+        pack: ContextPack,
+        repo_root: Path,
+        prompt: str,
+    ) -> LLMReviewResult:
+        assert prompt
+        return LLMReviewResult(findings=self.review_context_pack(pack, repo_root))
+
+    def review_context_pack(
+        self,
+        pack: ContextPack,
+        repo_root: Path,
+    ) -> list[Finding]:
+        raise NotImplementedError
+
+
 def test_fake_provider_returns_findings_with_pack_id() -> None:
     finding = Finding(
         title="Potential incorrect total",
@@ -151,6 +173,7 @@ def test_fake_provider_returns_findings_with_pack_id() -> None:
     findings, runs = review_context_packs([make_pack()], config, Path("."), provider=provider)
 
     assert provider.reviewed_pack_ids == ["src/cart.ts#calculateTotal:1"]
+    assert provider.reviewed_prompts == [render_review_prompt(make_pack()).text]
     assert findings[0].context_pack_id == "src/cart.ts#calculateTotal:1"
     assert findings[0].reviewer_context_pack_ids == {
         "general": ["src/cart.ts#calculateTotal:1"],
@@ -226,7 +249,7 @@ def test_llm_run_estimates_use_effective_provider_calibration() -> None:
 
 
 def test_review_context_packs_records_provider_failure_per_pack() -> None:
-    class FailingProvider:
+    class FailingProvider(_RenderedPromptReviewTestProvider):
         def review_context_pack(self, pack: ContextPack, repo_root: Path) -> list[Finding]:
             raise LLMProviderError("ERROR: You've hit your usage limit for GPT-5.3-Codex-Spark.")
 
@@ -245,7 +268,7 @@ def test_review_context_packs_records_provider_failure_per_pack() -> None:
 def test_review_context_packs_opens_circuit_after_terminal_parallel_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class FailingProvider:
+    class FailingProvider(_RenderedPromptReviewTestProvider):
         calls = 0
 
         def review_context_pack(self, pack: ContextPack, repo_root: Path) -> list[Finding]:
@@ -272,7 +295,7 @@ def test_review_context_packs_opens_circuit_after_terminal_parallel_failure(
 def test_review_context_packs_opens_circuit_only_for_failed_route(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class HealthyProvider:
+    class HealthyProvider(_RenderedPromptReviewTestProvider):
         calls = 0
 
         def review_context_pack(self, pack: ContextPack, repo_root: Path) -> list[Finding]:
@@ -429,7 +452,7 @@ def test_literal_api_config_rejects_out_of_range_legacy_ipv4(
 def test_review_circuit_preserves_quota_fallback_for_later_packs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class ReviewProvider:
+    class ReviewProvider(_RenderedPromptReviewTestProvider):
         def __init__(self, *, quota_failure: bool) -> None:
             self.quota_failure = quota_failure
             self.calls = 0
@@ -642,6 +665,15 @@ def test_review_context_packs_records_provider_reported_usage() -> None:
                 ),
             )
 
+        def review_rendered_prompt_with_usage(
+            self,
+            pack: ContextPack,
+            repo_root: Path,
+            prompt: str,
+        ) -> LLMReviewResult:
+            assert prompt
+            return self.review_context_pack_with_usage(pack, repo_root)
+
         def review_context_pack(self, pack: ContextPack, repo_root: Path) -> list[Finding]:
             raise AssertionError("usage-aware review path should be used")
 
@@ -699,6 +731,60 @@ def test_review_context_packs_passes_pre_rendered_prompt_to_capable_provider() -
 
     assert seen_prompts == [rendered.text]
     assert runs[0].input_chars == len(rendered.text)
+
+
+def test_supplied_rendered_prompt_rejects_protocol_provider_without_prompt_support() -> None:
+    class LegacyProvider:
+        calls = 0
+
+        def review_context_pack(
+            self,
+            pack: ContextPack,
+            repo_root: Path,
+        ) -> list[Finding]:
+            self.calls += 1
+            return []
+
+        def verify_finding(
+            self,
+            finding: Finding,
+            pack: ContextPack,
+            repo_root: Path,
+        ) -> FindingVerification:
+            raise AssertionError("not used")
+
+        def resolve_finding(
+            self,
+            finding: Finding,
+            previous_pack: ContextPack | None,
+            delta_report: ReviewReport,
+            repo_root: Path,
+        ) -> FindingResolution:
+            raise AssertionError("not used")
+
+    provider: LLMProvider = LegacyProvider()
+
+    with pytest.raises(
+        LLMProviderError,
+        match="does not support supplied rendered review prompts",
+    ):
+        review_context_pack_with_provider(
+            provider,
+            make_pack(),
+            Path("."),
+            prompt="RENDERED_PROMPT_SENTINEL",
+        )
+
+    assert provider.calls == 0
+
+    result = review_context_pack_with_provider(
+        provider,
+        make_pack(),
+        Path("."),
+    )
+
+    assert result.findings == []
+    assert provider.calls == 1
 
 
 def test_review_prompt_cache_isolates_reviewer_prompt_contexts() -> None:

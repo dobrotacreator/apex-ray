@@ -44,6 +44,15 @@ def _legacy_ipv4_host_is_in_range(host: str) -> bool:
     return all(value <= limit for value, limit in zip(values, limits, strict=True))
 
 
+def _ip_address_is_loopback(address: IPv4Address | IPv6Address) -> bool:
+    if address.is_loopback:
+        return True
+    if isinstance(address, IPv6Address):
+        mapped_ipv4 = address.ipv4_mapped
+        return mapped_ipv4 is not None and mapped_ipv4.is_loopback
+    return False
+
+
 @dataclass(frozen=True)
 class JSONHTTPResponse:
     status_code: int
@@ -121,13 +130,16 @@ def _validated_api_endpoint(
     try:
         parsed = urlsplit(url)
         port = parsed.port
-        host = (parsed.hostname or "").lower().rstrip(".")
+        raw_host = (parsed.hostname or "").lower()
     except ValueError as exc:
         detail = "invalid port" if "port" in str(exc).lower() else "malformed host"
         raise ValueError(f"API endpoint contains an {detail}.") from exc
 
     if parsed.username is not None or parsed.password is not None:
         raise ValueError("API endpoint must not contain credentials.")
+    if raw_host.endswith("."):
+        raise ValueError("API endpoint contains a malformed host.")
+    host = raw_host
     if not host:
         raise ValueError("API endpoint must include a host.")
     if parsed.netloc.endswith(":"):
@@ -162,7 +174,7 @@ def _validated_api_endpoint(
     else:
         normalized_host = str(address)
 
-    is_loopback = normalized_host == "localhost" or (address is not None and address.is_loopback)
+    is_loopback = normalized_host == "localhost" or (address is not None and _ip_address_is_loopback(address))
     allowed_loopback_http = allow_insecure_loopback_http and parsed.scheme == "http" and is_loopback
     if parsed.scheme != "https" and not allowed_loopback_http:
         if parsed.scheme == "http" and is_loopback:

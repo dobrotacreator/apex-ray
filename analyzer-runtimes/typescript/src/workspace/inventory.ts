@@ -54,7 +54,8 @@ interface RepoPathValidation {
 type RepoPathValidationCache = Map<string, RepoPathValidation>;
 
 interface ValidatedChangedPaths {
-  absPaths: string[];
+  absPathsByKey: Map<string, string>;
+  retainedPathBytes: number;
   partialReason: string | null;
 }
 
@@ -69,10 +70,30 @@ export function loadRepoFileInventory(
 ): RepoFileInventory {
   const realRepoPath = fs.realpathSync(args.repo);
   const validationCache: RepoPathValidationCache = new Map();
+  const shouldStop = options.shouldStop ?? (() => false);
+  const maxFiles = positiveLimit(
+    options.maxFiles,
+    INVENTORY_FILE_LIMIT,
+  );
+  const maxChangedValidationEntries = Math.min(
+    maxFiles,
+    positiveLimit(
+      options.maxEntries,
+      FALLBACK_INVENTORY_ENTRY_LIMIT,
+    ),
+  );
+  const maxChangedPathBytes = positiveLimit(
+    options.maxPathBytes,
+    FALLBACK_INVENTORY_PATH_BYTE_LIMIT,
+  );
   const changed = validatedChangedAbsPaths(
     args,
     realRepoPath,
     validationCache,
+    maxFiles,
+    maxChangedPathBytes,
+    maxChangedValidationEntries,
+    shouldStop,
   );
   if (!args.fileManifestPath) {
     return loadFallbackRepoFileInventory(
@@ -104,7 +125,7 @@ function loadManifestRepoFileInventory(
   const shouldStop = options.shouldStop ?? (() => false);
   if (shouldStop()) {
     return partialInventory(
-      changed.absPaths,
+      changed.absPathsByKey.values(),
       combinePartialReasons(
         changed.partialReason,
         "TypeScript manifest inventory scan stopped because the analysis time budget was exhausted; repository context is partial.",
@@ -127,7 +148,7 @@ function loadManifestRepoFileInventory(
     );
     if (readResult.status === "byte-limit") {
       return partialInventory(
-        changed.absPaths,
+        changed.absPathsByKey.values(),
         combinePartialReasons(
           changed.partialReason,
           `TypeScript file manifest reached the manifest byte safety limit of ${maxManifestBytes}; repository context is partial.`,
@@ -137,7 +158,7 @@ function loadManifestRepoFileInventory(
     }
     if (readResult.status === "stopped") {
       return partialInventory(
-        changed.absPaths,
+        changed.absPathsByKey.values(),
         combinePartialReasons(
           changed.partialReason,
           "TypeScript manifest inventory scan stopped because the analysis time budget was exhausted; repository context is partial.",
@@ -148,7 +169,7 @@ function loadManifestRepoFileInventory(
     manifestText = readResult.text;
     if (shouldStop()) {
       return partialInventory(
-        changed.absPaths,
+        changed.absPathsByKey.values(),
         combinePartialReasons(
           changed.partialReason,
           "TypeScript manifest inventory scan stopped because the analysis time budget was exhausted; repository context is partial.",
@@ -158,7 +179,7 @@ function loadManifestRepoFileInventory(
     }
     if (manifestExceedsEntrySafetyLimit(manifestText, maxFiles)) {
       return partialInventory(
-        changed.absPaths,
+        changed.absPathsByKey.values(),
         combinePartialReasons(
           changed.partialReason,
           `TypeScript file manifest reached the manifest entry safety limit of ${maxFiles} source files per array before parsing; repository context is partial.`,
@@ -190,7 +211,7 @@ function loadManifestRepoFileInventory(
   }
 
   const relPathSet = new Set<string>();
-  const absPathSet = new Set<string>();
+  const absPathsByKey = changed.absPathsByKey;
   const packagePathsByKey = new Map<string, string>();
   const configPathsByKey = new Map<string, string>();
   let partialReason: string | null = changed.partialReason;
@@ -240,7 +261,17 @@ function loadManifestRepoFileInventory(
       );
       continue;
     }
-    absPathSet.add(validation.absPath);
+    const absPathKey = canonicalPathKey(validation.absPath);
+    if (absPathsByKey.has(absPathKey)) continue;
+    if (absPathsByKey.size >= maxFiles) {
+      partialReason = combinePartialReasons(
+        partialReason,
+        `TypeScript manifest inventory scan reached the safety limit of ${maxFiles} source files; ` +
+          "repository context is partial.",
+      );
+      break;
+    }
+    absPathsByKey.set(absPathKey, validation.absPath);
   }
   const packageFiles = Array.isArray(parsed.package_files)
     ? parsed.package_files
@@ -327,8 +358,7 @@ function loadManifestRepoFileInventory(
     }
     configPathsByKey.set(pathKey, absPath);
   }
-  for (const absPath of changed.absPaths) absPathSet.add(absPath);
-  const absPaths = [...absPathSet].sort();
+  const absPaths = [...absPathsByKey.values()].sort();
   const packageJsonAbsPaths = [...packagePathsByKey.values()].sort();
   const configJsonAbsPaths = [...configPathsByKey.values()].sort();
   const fingerprint = partialReason
@@ -380,12 +410,12 @@ function loadFallbackRepoFileInventory(
     FALLBACK_INVENTORY_PATH_BYTE_LIMIT,
   );
   const openDirectory = options.openDirectory ?? fs.opendirSync;
-  const absPathSet = new Set<string>();
+  const absPathsByKey = changed.absPathsByKey;
   const packagePathSet = new Set<string>();
   const configPathSet = new Set<string>();
   const pendingDirectories = [path.resolve(args.repo)];
   let visitedEntries = 0;
-  let retainedPathBytes = 0;
+  let retainedPathBytes = changed.retainedPathBytes;
   let partialReason: string | null = changed.partialReason;
 
   scan: while (pendingDirectories.length > 0) {
@@ -473,6 +503,12 @@ function loadFallbackRepoFileInventory(
         if (!isMetadata && !isSource) continue;
         const absPath = path.join(directoryPath, entry.name);
         const relPath = normalizeRelPath(path.relative(args.repo, absPath));
+        if (
+          isSource &&
+          absPathsByKey.has(canonicalPathKey(absPath))
+        ) {
+          continue;
+        }
         const pathBytes = Buffer.byteLength(relPath, "utf8") + 1;
         if (retainedPathBytes + pathBytes > maxPathBytes) {
           partialReason = combinePartialReasons(
@@ -533,7 +569,9 @@ function loadFallbackRepoFileInventory(
           );
           continue;
         }
-        if (absPathSet.size >= maxFiles) {
+        const absPathKey = canonicalPathKey(validation.absPath);
+        if (absPathsByKey.has(absPathKey)) continue;
+        if (absPathsByKey.size >= maxFiles) {
           partialReason = combinePartialReasons(
             partialReason,
             `TypeScript fallback inventory scan reached the safety limit of ${maxFiles} source files; ` +
@@ -541,7 +579,7 @@ function loadFallbackRepoFileInventory(
           );
           break scan;
         }
-        absPathSet.add(validation.absPath);
+        absPathsByKey.set(absPathKey, validation.absPath);
       }
     } catch {
       const relativeDirectory =
@@ -562,9 +600,8 @@ function loadFallbackRepoFileInventory(
     }
   }
 
-  for (const absPath of changed.absPaths) absPathSet.add(absPath);
   return inventoryFromAbsPaths(
-    [...absPathSet].sort(),
+    [...absPathsByKey.values()].sort(),
     null,
     partialReason,
     [...packagePathSet],
@@ -723,11 +760,94 @@ function validatedChangedAbsPaths(
   args: Args,
   realRepoPath: string,
   validationCache: RepoPathValidationCache,
+  maxFiles: number,
+  maxPathBytes: number,
+  maxValidationEntries: number,
+  shouldStop: () => boolean,
 ): ValidatedChangedPaths {
   const changedByKey = new Map<string, string>();
+  let retainedPathBytes = 0;
   let partialReason: string | null = null;
+  let fileLimitReported = false;
+  let pathByteLimitReported = false;
+  let validationIssueReported = false;
+  let validationAttempts = 0;
   for (const changedFile of args.changed) {
     const relPath = normalizeRelPath(changedFile);
+    const validationKey = canonicalPathKey(
+      path.resolve(args.repo, relPath),
+    );
+    if (!isTypeScriptOrJavaScriptFileName(validationKey)) continue;
+    if (changedByKey.has(validationKey)) continue;
+    if (changedByKey.size >= maxFiles) {
+      if (!fileLimitReported) {
+        partialReason = combinePartialReasons(
+          partialReason,
+          `TypeScript changed path inventory reached the safety limit of ${maxFiles} source files; ` +
+            "repository context is partial.",
+        );
+        fileLimitReported = true;
+      }
+      if (shouldStop()) {
+        partialReason = combinePartialReasons(
+          partialReason,
+          "TypeScript changed path inventory scan stopped because the analysis time budget was exhausted; repository context is partial.",
+        );
+      }
+      break;
+    }
+    if (validationAttempts > 0 && shouldStop()) {
+      partialReason = combinePartialReasons(
+        partialReason,
+        "TypeScript changed path inventory scan stopped because the analysis time budget was exhausted; repository context is partial.",
+      );
+      break;
+    }
+    if (validationAttempts >= maxValidationEntries) {
+      partialReason = combinePartialReasons(
+        partialReason,
+        `TypeScript changed path inventory reached the validation safety limit of ${maxValidationEntries} paths; ` +
+          "repository context is partial.",
+      );
+      break;
+    }
+    if (
+      changedByKey.size > 0 &&
+      retainedPathBytes >= maxPathBytes
+    ) {
+      if (!pathByteLimitReported) {
+        partialReason = combinePartialReasons(
+          partialReason,
+          `TypeScript changed path inventory reached the retained-path byte safety limit of ${maxPathBytes}; ` +
+            "repository context is partial.",
+        );
+        pathByteLimitReported = true;
+      }
+      if (shouldStop()) {
+        partialReason = combinePartialReasons(
+          partialReason,
+          "TypeScript changed path inventory scan stopped because the analysis time budget was exhausted; repository context is partial.",
+        );
+      }
+      break;
+    }
+    const pathBytes = Buffer.byteLength(relPath, "utf8") + 1;
+    if (
+      changedByKey.size > 0 &&
+      retainedPathBytes + pathBytes > maxPathBytes
+    ) {
+      if (!pathByteLimitReported) {
+        partialReason = combinePartialReasons(
+          partialReason,
+          `TypeScript changed path inventory reached the retained-path byte safety limit of ${maxPathBytes}; ` +
+            "repository context is partial.",
+        );
+        pathByteLimitReported = true;
+      }
+      continue;
+    }
+    const validationWasCached = validationCache.has(validationKey);
+    validationAttempts += 1;
     const validation = validateRepoRelativePath(
       args.repo,
       realRepoPath,
@@ -736,21 +856,55 @@ function validatedChangedAbsPaths(
       validationCache,
     );
     const absPath = validation.absPath;
-    if (isTypeScriptOrJavaScriptFileName(absPath)) {
-      if (validation.status !== "unsafe") {
-        changedByKey.set(canonicalPathKey(absPath), absPath);
-      }
-      if (validation.status !== "safe") {
-        partialReason ??= validationPartialReason(
+    if (
+      validation.status !== "safe" &&
+      !validationIssueReported
+    ) {
+      partialReason = combinePartialReasons(
+        partialReason,
+        validationPartialReason(
           "TypeScript changed path",
           relPath,
           validation.status,
+        ),
+      );
+      validationIssueReported = true;
+    }
+    if (validation.status === "unsafe") {
+      if (!validationWasCached) validationCache.delete(validationKey);
+      continue;
+    }
+
+    const pathKey = canonicalPathKey(absPath);
+    if (changedByKey.has(pathKey)) continue;
+
+    if (
+      retainedPathBytes + pathBytes > maxPathBytes
+    ) {
+      if (!pathByteLimitReported) {
+        partialReason = combinePartialReasons(
+          partialReason,
+          `TypeScript changed path inventory reached the retained-path byte safety limit of ${maxPathBytes}; ` +
+            "repository context is partial.",
         );
+        pathByteLimitReported = true;
+      }
+      // Preserve one changed root so callers can still report the original
+      // changed-file failure when a configured byte limit is smaller than
+      // a single safe repository-relative path.
+      if (changedByKey.size > 0) {
+        if (!validationWasCached) {
+          validationCache.delete(validationKey);
+        }
+        continue;
       }
     }
+    changedByKey.set(pathKey, absPath);
+    retainedPathBytes += pathBytes;
   }
   return {
-    absPaths: [...changedByKey.values()],
+    absPathsByKey: changedByKey,
+    retainedPathBytes,
     partialReason,
   };
 }
@@ -865,7 +1019,7 @@ function isSafeFallbackDirectory(
 }
 
 function partialInventory(
-  changedAbsPaths: string[],
+  changedAbsPaths: Iterable<string>,
   reason: string,
   validationCache: RepoPathValidationCache,
 ): RepoFileInventory {

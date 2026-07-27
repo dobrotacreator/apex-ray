@@ -70,6 +70,7 @@ class FakeLLMProvider:
         self.verification_approvals = verification_approvals or []
         self.resolution_statuses = resolution_statuses or []
         self.reviewed_pack_ids: list[str] = []
+        self.reviewed_prompts: list[str] = []
         self.verified_batch_pack_ids: list[str] = []
         self.verified_batches: list[list[str]] = []
         self.verified_finding_titles: list[str] = []
@@ -78,6 +79,15 @@ class FakeLLMProvider:
     def review_context_pack(self, pack: ContextPack, repo_root: Path) -> list[Finding]:
         self.reviewed_pack_ids.append(pack.id)
         return [finding.model_copy(update={"context_pack_id": pack.id}) for finding in self.findings]
+
+    def review_rendered_prompt_with_usage(
+        self,
+        pack: ContextPack,
+        repo_root: Path,
+        prompt: str,
+    ) -> LLMReviewResult:
+        self.reviewed_prompts.append(prompt)
+        return LLMReviewResult(findings=self.review_context_pack(pack, repo_root))
 
     def verify_finding(self, finding: Finding, pack: ContextPack, repo_root: Path) -> FindingVerification:
         self.verified_finding_titles.append(finding.title)
@@ -434,7 +444,12 @@ def review_context_pack_with_provider(
     prompt: str | None = None,
 ) -> LLMReviewResult:
     rendered_reviewer = getattr(provider, "review_rendered_prompt_with_usage", None)
-    if prompt is not None and callable(rendered_reviewer):
+    if prompt is not None:
+        if not callable(rendered_reviewer):
+            raise LLMProviderError(
+                f"{type(provider).__name__} does not support supplied rendered review prompts; "
+                "implement review_rendered_prompt_with_usage()."
+            )
         reviewer_with_prompt = cast(
             Callable[[ContextPack, Path, str], LLMReviewResult],
             rendered_reviewer,

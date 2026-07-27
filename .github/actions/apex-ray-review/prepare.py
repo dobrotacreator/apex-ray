@@ -344,16 +344,56 @@ def _resolve_commit(workspace: Path, ref: str) -> str:
 
 
 def _read_git_file(workspace: Path, commit: str, path: str) -> str | None:
-    result = subprocess.run(
-        ["git", "show", f"{commit}:{path}"],
-        cwd=workspace,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
+    if not re.fullmatch(r"[0-9a-f]{40,64}", commit):
+        raise ValueError("The trusted base config commit id is invalid.")
+    try:
+        tree_result = subprocess.run(
+            [
+                "git",
+                "ls-tree",
+                "--full-tree",
+                "-z",
+                commit,
+                "--",
+                f":(literal){path}",
+            ],
+            cwd=workspace,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, UnicodeError) as exc:
+        raise ValueError("Unable to inspect the trusted base config in Git.") from exc
+    if tree_result.returncode != 0:
+        raise ValueError("Unable to inspect the trusted base config in Git.")
+    entries = [entry for entry in tree_result.stdout.split("\0") if entry]
+    if not entries:
         return None
-    return result.stdout
+    if len(entries) != 1:
+        raise ValueError("Git returned ambiguous metadata for the trusted base config.")
+    metadata, separator, entry_path = entries[0].partition("\t")
+    metadata_parts = metadata.split()
+    if (
+        not separator
+        or entry_path != path
+        or len(metadata_parts) != 3
+        or metadata_parts[1] != "blob"
+        or re.fullmatch(r"[0-9a-f]{40,64}", metadata_parts[2]) is None
+    ):
+        raise ValueError("Git returned invalid metadata for the trusted base config.")
+    try:
+        blob_result = subprocess.run(
+            ["git", "cat-file", "blob", metadata_parts[2]],
+            cwd=workspace,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, UnicodeError) as exc:
+        raise ValueError("The trusted base config exists but its Git blob could not be read.") from exc
+    if blob_result.returncode != 0:
+        raise ValueError("The trusted base config exists but its Git blob could not be read.")
+    return blob_result.stdout
 
 
 def _load_config_document(raw_config: str | None) -> dict[str, Any]:

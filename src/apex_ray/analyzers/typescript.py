@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from queue import Empty, Full, Queue
 from threading import Event, Thread
-from typing import Literal, Protocol
+from typing import BinaryIO, Literal, Protocol
 
 from pydantic import ValidationError
 
@@ -54,10 +54,17 @@ TS_PACKAGE_INDEX_BYTE_LIMIT = 4 * 1024 * 1024
 TS_PACKAGE_INDEX_ENTRY_LIMIT = 512
 TS_PACKAGE_EXTENDS_CANDIDATE_GROUP_LIMIT = 512
 TS_INVENTORY_CASE_SENSITIVE = sys.platform not in {"darwin", "win32"}
+_TS_GIT_VISIBILITY_TIMEOUT_SECONDS = 1.0
 _TS_FILE_MANIFEST_HEADER = b'{"version":2'
 _TS_FILE_MANIFEST_SECTIONS = ("files", "package_files", "config_files")
 _TS_FILE_MANIFEST_PARTIAL_PREFIX = b',"partial_reason":'
 _TS_FILE_MANIFEST_PARTIAL_SUFFIX = "; repository context is partial."
+_TS_GIT_INVENTORY_INCLUDE_PATHSPECS = tuple(
+    f":(glob,icase)**/*{suffix}" for suffix in sorted(TS_JS_INDEX_SUFFIXES | TS_CONFIG_METADATA_SUFFIXES)
+)
+_TS_GIT_INVENTORY_EXCLUDE_PATHSPECS = tuple(
+    f":(exclude,glob)**/{directory}/**" for directory in sorted(DISCOVERY_IGNORED_DIRS)
+)
 
 
 @dataclass(frozen=True)
@@ -90,6 +97,15 @@ class _TypescriptManifestPlan:
 class _TypescriptInventory:
     paths: list[Path]
     partial_reason: str | None
+
+
+class _FallbackConfigVisibility(Protocol):
+    def visible(
+        self,
+        path_key: str,
+        *,
+        check_deadline: Callable[[], None],
+    ) -> bool | None: ...
 
 
 @dataclass
@@ -973,6 +989,30 @@ def _retain_fallback_config_extends(
     git_backed: bool,
     check_deadline: Callable[[], None],
 ) -> _TypescriptInventory:
+    git_visibility_checker = _GitFallbackConfigVisibilityChecker(repo_root) if git_backed else None
+    try:
+        return _retain_fallback_config_extends_with_visibility(
+            repo_root,
+            inventory,
+            ignored_patterns,
+            git_backed=git_backed,
+            check_deadline=check_deadline,
+            git_visibility_checker=git_visibility_checker,
+        )
+    finally:
+        if git_visibility_checker is not None:
+            git_visibility_checker.close()
+
+
+def _retain_fallback_config_extends_with_visibility(
+    repo_root: Path,
+    inventory: _TypescriptInventory,
+    ignored_patterns: list[str],
+    *,
+    git_backed: bool,
+    check_deadline: Callable[[], None],
+    git_visibility_checker: _FallbackConfigVisibility | None,
+) -> _TypescriptInventory:
     """Add only safe arbitrary-suffix configs reached by ``extends`` edges."""
 
     retention = _TypescriptInventoryRetention(
@@ -1059,13 +1099,23 @@ def _retain_fallback_config_extends(
                         )
                         retention.add_reason(reason)
                         return retention.build()
+                    candidate_path = Path(candidate)
+                    if not _fallback_config_path_exists_safely(
+                        repo_root,
+                        candidate_path,
+                        check_deadline=check_deadline,
+                    ):
+                        continue
                     if git_backed:
                         if candidate not in git_visibility_by_path:
-                            git_visibility_by_path[candidate] = _git_fallback_config_path_visible(
-                                repo_root,
-                                candidate,
-                                check_deadline=check_deadline,
-                            )
+                            if git_visibility_checker is None:
+                                visible = None
+                            else:
+                                visible = git_visibility_checker.visible(
+                                    candidate,
+                                    check_deadline=check_deadline,
+                                )
+                            git_visibility_by_path[candidate] = visible
                         visible = git_visibility_by_path[candidate]
                         if visible is None:
                             retention.add_reason(
@@ -1075,7 +1125,6 @@ def _retain_fallback_config_extends(
                             continue
                         if not visible:
                             continue
-                    candidate_path = Path(candidate)
                     if (
                         _read_inventory_config(
                             repo_root,
@@ -1123,6 +1172,216 @@ def _fallback_config_path_ignored(
     return False
 
 
+def _fallback_config_path_exists_safely(
+    repo_root: Path,
+    relative_path: Path,
+    *,
+    check_deadline: Callable[[], None],
+) -> bool:
+    """Preflight a config candidate without following symlinks or reading it."""
+
+    check_deadline()
+    path_key = _inventory_path_key(relative_path)
+    if path_key is None:
+        return False
+    try:
+        current = repo_root.resolve(strict=True)
+        parts = PurePosixPath(path_key).parts
+        entry: os.stat_result | None = None
+        for index, component in enumerate(parts):
+            check_deadline()
+            current /= component
+            entry = current.stat(follow_symlinks=False)
+            if stat.S_ISLNK(entry.st_mode):
+                return False
+            if index < len(parts) - 1 and not stat.S_ISDIR(entry.st_mode):
+                return False
+        return entry is not None and stat.S_ISREG(entry.st_mode)
+    except OSError:
+        return False
+
+
+class _GitFallbackConfigVisibilityChecker:
+    """Query Git ignore visibility over one bounded, lazily started process."""
+
+    def __init__(self, repo_root: Path) -> None:
+        self.repo_root = repo_root
+        self._process: subprocess.Popen[bytes] | None = None
+        self._requests: Queue[tuple[bytes, Queue[bool | None]] | None] = Queue()
+        self._worker: Thread | None = None
+        self._failed = False
+
+    def visible(
+        self,
+        path_key: str,
+        *,
+        check_deadline: Callable[[], None],
+    ) -> bool | None:
+        if self._failed or not self._ensure_started():
+            return None
+        try:
+            encoded_path = os.fsencode(path_key)
+        except UnicodeEncodeError:
+            return None
+        if not encoded_path or b"\0" in encoded_path:
+            return None
+
+        response: Queue[bool | None] = Queue(maxsize=1)
+        self._requests.put((encoded_path, response))
+        request_deadline = time.monotonic() + _TS_GIT_VISIBILITY_TIMEOUT_SECONDS
+        try:
+            while True:
+                check_deadline()
+                remaining_seconds = request_deadline - time.monotonic()
+                if remaining_seconds <= 0:
+                    self._abort()
+                    return None
+                try:
+                    result = response.get(timeout=min(0.05, remaining_seconds))
+                except Empty:
+                    continue
+                if result is None:
+                    self._abort()
+                return result
+        except BaseException:
+            self._abort()
+            raise
+
+    def close(self) -> None:
+        process = self._process
+        if process is None:
+            return
+        worker = self._worker
+        if worker is not None and worker.is_alive() and not self._failed:
+            self._requests.put(None)
+            worker.join(timeout=_TS_GIT_VISIBILITY_TIMEOUT_SECONDS)
+        if worker is not None and worker.is_alive():
+            self._abort()
+            return
+        try:
+            process.wait(timeout=_TS_GIT_VISIBILITY_TIMEOUT_SECONDS)
+        except OSError, subprocess.TimeoutExpired:
+            self._abort()
+            return
+        self._close_pipes()
+
+    def _ensure_started(self) -> bool:
+        if self._process is not None:
+            return not self._failed
+        try:
+            process = subprocess.Popen(
+                [
+                    "git",
+                    "-C",
+                    str(self.repo_root),
+                    "check-ignore",
+                    "--verbose",
+                    "--non-matching",
+                    "-z",
+                    "--stdin",
+                ],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+            )
+        except OSError, ValueError:
+            self._failed = True
+            return False
+        if process.stdin is None or process.stdout is None:  # pragma: no cover - PIPE guarantees both
+            with suppress(OSError):
+                process.kill()
+            with suppress(OSError, subprocess.TimeoutExpired):
+                process.wait(timeout=_TS_GIT_VISIBILITY_TIMEOUT_SECONDS)
+            self._failed = True
+            return False
+        self._process = process
+        self._worker = Thread(
+            target=self._serve_requests,
+            args=(process.stdin, process.stdout),
+            daemon=True,
+            name="apex-ray-typescript-git-visibility",
+        )
+        self._worker.start()
+        return True
+
+    def _serve_requests(
+        self,
+        stdin: BinaryIO,
+        stdout: BinaryIO,
+    ) -> None:
+        try:
+            while True:
+                request = self._requests.get()
+                if request is None:
+                    return
+                path, response = request
+                result = self._exchange(stdin, stdout, path)
+                response.put(result)
+                if result is None:
+                    self._failed = True
+                    return
+        finally:
+            with suppress(OSError, ValueError):
+                stdin.close()
+
+    @staticmethod
+    def _exchange(stdin: BinaryIO, stdout: BinaryIO, path: bytes) -> bool | None:
+        try:
+            written = stdin.write(path + b"\0")
+            stdin.flush()
+            if written != len(path) + 1:
+                return None
+            fields: list[bytes] = []
+            response_bytes = 0
+            for _ in range(4):
+                field = bytearray()
+                while True:
+                    character = stdout.read(1)
+                    if not character:
+                        return None
+                    response_bytes += len(character)
+                    if response_bytes > TS_FALLBACK_INVENTORY_PATH_BYTE_LIMIT:
+                        return None
+                    if character == b"\0":
+                        break
+                    field.extend(character)
+                fields.append(bytes(field))
+        except OSError, ValueError:
+            return None
+        if len(fields) != 4 or fields[3] != path:
+            return None
+        source, line_number, pattern, _ = fields
+        if not source and not line_number and not pattern:
+            return True
+        if not source or not line_number or line_number.startswith(b"0") or not line_number.isdigit() or not pattern:
+            return None
+        return pattern.startswith(b"!")
+
+    def _abort(self) -> None:
+        self._failed = True
+        process = self._process
+        if process is None:
+            return
+        if process.poll() is None:
+            with suppress(OSError):
+                process.kill()
+        with suppress(OSError, subprocess.TimeoutExpired):
+            process.wait(timeout=_TS_GIT_VISIBILITY_TIMEOUT_SECONDS)
+        worker = self._worker
+        if worker is not None and worker.is_alive():
+            worker.join(timeout=_TS_GIT_VISIBILITY_TIMEOUT_SECONDS)
+        self._close_pipes()
+
+    def _close_pipes(self) -> None:
+        process = self._process
+        if process is None:
+            return
+        for stream in (process.stdin, process.stdout):
+            if stream is not None:
+                with suppress(OSError, ValueError):
+                    stream.close()
+
+
 def _git_fallback_config_path_visible(
     repo_root: Path,
     path_key: str,
@@ -1131,43 +1390,11 @@ def _git_fallback_config_path_visible(
 ) -> bool | None:
     """Return whether Git exposes a path to inventory, failing closed on errors."""
 
+    checker = _GitFallbackConfigVisibilityChecker(repo_root)
     try:
-        process = subprocess.Popen(
-            [
-                "git",
-                "-C",
-                str(repo_root),
-                "check-ignore",
-                "-q",
-                "--",
-                path_key,
-            ],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-    except OSError:
-        return None
-    except ValueError:
-        return None
-    try:
-        while process.poll() is None:
-            check_deadline()
-            try:
-                process.wait(timeout=0.05)
-            except subprocess.TimeoutExpired:
-                continue
+        return checker.visible(path_key, check_deadline=check_deadline)
     finally:
-        if process.poll() is None:
-            with suppress(OSError):
-                process.kill()
-        with suppress(OSError, subprocess.TimeoutExpired):
-            process.wait(timeout=1.0)
-    if process.returncode == 0:
-        return False
-    if process.returncode == 1:
-        return True
-    return None
+        checker.close()
 
 
 def _stream_bounded_git_typescript_inventory(
@@ -1185,6 +1412,9 @@ def _stream_bounded_git_typescript_inventory(
         "--cached",
         "--others",
         "--exclude-standard",
+        "--",
+        *_TS_GIT_INVENTORY_INCLUDE_PATHSPECS,
+        *_TS_GIT_INVENTORY_EXCLUDE_PATHSPECS,
     ]
     try:
         process = subprocess.Popen(
@@ -1237,7 +1467,7 @@ def _stream_bounded_git_typescript_inventory(
     )
     pending = bytearray()
     output_bytes = 0
-    visited_entries = 0
+    relevant_entries = 0
     try:
         while True:
             check_deadline()
@@ -1265,26 +1495,26 @@ def _stream_bounded_git_typescript_inventory(
                 if not raw_path:
                     continue
                 check_deadline()
-                visited_entries += 1
                 limited = _append_bounded_git_typescript_path(
                     retention,
                     raw_path,
                     ignored_patterns,
-                    visited_entries=visited_entries,
+                    relevant_entries=relevant_entries,
                 )
                 if isinstance(limited, str):
                     retention.add_reason(limited)
                     return retention.build()
+                if limited:
+                    relevant_entries += 1
             if consumed:
                 del pending[:consumed]
         if pending:
             check_deadline()
-            visited_entries += 1
             limited = _append_bounded_git_typescript_path(
                 retention,
                 bytes(pending),
                 ignored_patterns,
-                visited_entries=visited_entries,
+                relevant_entries=relevant_entries,
             )
             if isinstance(limited, str):
                 retention.add_reason(limited)
@@ -1315,14 +1545,8 @@ def _append_bounded_git_typescript_path(
     raw_path: bytes,
     ignored_patterns: list[str],
     *,
-    visited_entries: int,
-) -> str | None:
-    if visited_entries > TS_FALLBACK_INVENTORY_ENTRY_LIMIT:
-        return (
-            "TypeScript Git fallback inventory reached the "
-            f"{TS_FALLBACK_INVENTORY_ENTRY_LIMIT} filesystem-entry safety limit"
-            f"{_TS_FILE_MANIFEST_PARTIAL_SUFFIX}"
-        )
+    relevant_entries: int,
+) -> bool | str:
     decoded_path = os.fsdecode(raw_path)
     path_key = _inventory_path_key(Path(decoded_path))
     if path_key is None or _typescript_inventory_path_ignored(
@@ -1330,12 +1554,18 @@ def _append_bounded_git_typescript_path(
         ignored_patterns,
         is_directory=False,
     ):
-        return None
+        return False
     relative_path = Path(path_key)
     if not _is_typescript_inventory_candidate(relative_path):
-        return None
+        return False
+    if relevant_entries >= TS_FALLBACK_INVENTORY_ENTRY_LIMIT:
+        return (
+            "TypeScript Git fallback inventory reached the "
+            f"{TS_FALLBACK_INVENTORY_ENTRY_LIMIT} relevant-entry safety limit"
+            f"{_TS_FILE_MANIFEST_PARTIAL_SUFFIX}"
+        )
     retention.add(relative_path)
-    return None
+    return True
 
 
 def _walk_bounded_typescript_inventory(

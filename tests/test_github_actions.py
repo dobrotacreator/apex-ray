@@ -444,6 +444,51 @@ def test_restricted_config_defaults_only_missing_or_empty_documents(
     assert helper._load_config_document(config_text) == expected
 
 
+def test_read_git_file_returns_none_when_trusted_base_path_is_absent(
+    tmp_path: Path,
+) -> None:
+    helper = _load_helper()
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    base_sha = _init_repository(workspace)
+
+    assert (
+        helper._read_git_file(
+            workspace,
+            base_sha,
+            ".apex-ray/missing.yml",
+        )
+        is None
+    )
+
+
+def test_read_git_file_fails_closed_when_trusted_base_blob_cannot_be_read(
+    tmp_path: Path,
+) -> None:
+    helper = _load_helper()
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    base_sha = _init_repository(workspace)
+    blob_sha = _git(
+        workspace,
+        "rev-parse",
+        f"{base_sha}:.apex-ray/config.yml",
+    )
+    loose_blob = workspace / ".git" / "objects" / blob_sha[:2] / blob_sha[2:]
+    assert loose_blob.is_file()
+    loose_blob.unlink()
+
+    with pytest.raises(
+        ValueError,
+        match="trusted base config exists but its Git blob could not be read",
+    ):
+        helper._read_git_file(
+            workspace,
+            base_sha,
+            ".apex-ray/config.yml",
+        )
+
+
 def test_prepare_escapes_top_level_configuration_errors(tmp_path: Path) -> None:
     workspace = tmp_path / "repository"
     runner_temp = tmp_path / "runner"

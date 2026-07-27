@@ -82,6 +82,69 @@ test("repo index cache writes valid payloads and rejects invalid payloads", () =
   }
 });
 
+test("repo index cache accepts the current version in any top-level property order", () => {
+  const cacheHome = fs.mkdtempSync(
+    path.join(os.tmpdir(), "apex-ray-ts-cache-property-order-"),
+  );
+  const cachePath = path.join(cacheHome, "index.json");
+  const file = emptyRepoFile(cacheHome);
+  try {
+    const payloads = [
+      {
+        version: REPO_INDEX_CACHE_VERSION,
+        inventoryFingerprint: null,
+        files: [file],
+      },
+      {
+        inventoryFingerprint: null,
+        files: [file],
+        version: REPO_INDEX_CACHE_VERSION,
+      },
+      {
+        files: [file],
+        version: REPO_INDEX_CACHE_VERSION,
+        inventoryFingerprint: null,
+      },
+      {
+        metadata: { version: REPO_INDEX_CACHE_VERSION - 1 },
+        files: [file],
+        inventoryFingerprint: null,
+        version: REPO_INDEX_CACHE_VERSION,
+      },
+    ];
+
+    for (const payload of payloads) {
+      fs.writeFileSync(cachePath, JSON.stringify(payload), "utf8");
+      assert.ok(readRepoIndexCache(cachePath));
+    }
+  } finally {
+    fs.rmSync(cacheHome, { recursive: true, force: true });
+  }
+});
+
+test("repo index cache validates the top-level version instead of a nested version", () => {
+  const cacheHome = fs.mkdtempSync(
+    path.join(os.tmpdir(), "apex-ray-ts-cache-nested-version-"),
+  );
+  const cachePath = path.join(cacheHome, "index.json");
+  try {
+    fs.writeFileSync(
+      cachePath,
+      JSON.stringify({
+        metadata: { version: REPO_INDEX_CACHE_VERSION },
+        inventoryFingerprint: null,
+        files: [],
+        version: REPO_INDEX_CACHE_VERSION - 1,
+      }),
+      "utf8",
+    );
+
+    assert.equal(readRepoIndexCache(cachePath), null);
+  } finally {
+    fs.rmSync(cacheHome, { recursive: true, force: true });
+  }
+});
+
 test("repo index cache requires explicit reconciliation for inventory mismatches", () => {
   const cacheHome = fs.mkdtempSync(
     path.join(os.tmpdir(), "apex-ray-ts-cache-fingerprint-"),
@@ -176,7 +239,7 @@ test("repo index cache reports write failures and removes its temporary file", (
   }
 });
 
-test("repo index cache rejects the previous format before JSON parsing", () => {
+test("repo index cache rejects the previous format after its bounded JSON parse", () => {
   const cacheHome = fs.mkdtempSync(
     path.join(os.tmpdir(), "apex-ray-ts-cache-old-version-"),
   );
@@ -200,7 +263,7 @@ test("repo index cache rejects the previous format before JSON parsing", () => {
     }) as typeof JSON.parse;
 
     assert.equal(readRepoIndexCache(cachePath), null);
-    assert.equal(parseCalls, 0);
+    assert.equal(parseCalls, 1);
   } finally {
     JSON.parse = originalJsonParse;
     fs.rmSync(cacheHome, { recursive: true, force: true });

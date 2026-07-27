@@ -122,6 +122,7 @@ export function buildRepoIndex(
       semanticEntryCount += count;
       return true;
     },
+    markPartial: markSemanticEntryLimitReached,
   };
   const markUnavailable = (relPath: string, reason: string): void => {
     partial = true;

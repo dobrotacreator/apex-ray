@@ -27,6 +27,7 @@ from apex_ray.models import (
     LLMContextSelection,
     LLMProfile,
     LLMProviderName,
+    LLMReviewResult,
     LLMRun,
     ProjectProfile,
     ReviewConfig,
@@ -3430,6 +3431,15 @@ def test_continue_review_includes_reviewer_packs_skipped_by_prior_budget(
 def test_continue_review_shares_route_circuit_across_reviewers(tmp_path: Path) -> None:
     class TerminalProvider:
         calls = 0
+
+        def review_rendered_prompt_with_usage(
+            self,
+            _pack: ContextPack,
+            _repo_root: Path,
+            _prompt: str,
+        ) -> LLMReviewResult:
+            self.calls += 1
+            raise LLMProviderError("Invalid API key.", category="auth")
 
         def review_context_pack(self, _pack: ContextPack, _repo_root: Path) -> list[Finding]:
             self.calls += 1
