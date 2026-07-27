@@ -345,3 +345,26 @@ def test_git_inventory_translates_output_limit_to_discovery_error(
         list_project_files(tmp_path, is_git_repo=True)
 
     assert "generated or untracked files" in str(error.value)
+
+
+def test_git_inventory_translates_nonzero_exit_to_discovery_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def failed_git(
+        _args: list[str],
+        cwd: Path,
+        *,
+        timeout: float | None = None,
+        max_output_bytes: int,
+        max_entries: int,
+    ) -> git.GitNulOutput:
+        del cwd, timeout, max_output_bytes, max_entries
+        return git.GitNulOutput(returncode=128, entries=["stale.py"])
+
+    monkeypatch.setattr("apex_ray.discovery.git.read_git_nul_output", failed_git)
+
+    with pytest.raises(DiscoveryError, match="Git inventory command failed with exit code 128") as error:
+        list_project_files(tmp_path, is_git_repo=True)
+
+    assert "repository and worktree state" in str(error.value)

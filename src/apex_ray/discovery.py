@@ -240,7 +240,13 @@ def _list_git_project_files(
             "Remove generated or untracked files from the repository before retrying."
         ) from exc
     _check_discovery_deadline(deadline)
-    for rel_path in output.entries if output.returncode == 0 else []:
+    if output.returncode != 0:
+        raise DiscoveryError(
+            "Project file discovery failed: "
+            f"Git inventory command failed with exit code {output.returncode}. "
+            "Check the repository and worktree state before retrying."
+        )
+    for rel_path in output.entries:
         _check_discovery_deadline(deadline)
         if _should_ignore_path(rel_path, ignored_patterns):
             continue
