@@ -25,6 +25,7 @@ from apex_ray.models import (
     TargetMode,
 )
 from apex_ray.report import build_report, render_markdown
+from apex_ray.report.coverage_breakdown import pack_residual_priority
 
 
 def test_render_markdown_explains_project_risk_and_focused_reviewers() -> None:
@@ -215,6 +216,24 @@ def test_builtin_auth_heuristic_does_not_make_test_only_packs_p0() -> None:
     priorities = {status.context_pack_id: status.priority for status in report.llm_coverage.pack_statuses}
     assert priorities[source_pack.id] == "p0"
     assert priorities[test_pack.id] == "p1"
+
+
+def test_current_high_risk_outranks_lower_archived_residual_priority() -> None:
+    pack = ContextPack(
+        id="src/payments.ts#capture:1",
+        file="src/payments.ts",
+        file_kind=FileKind.SOURCE,
+        risk_signals=[
+            RiskSignal(
+                kind="financial",
+                severity=RiskSeverity.HIGH,
+                reason="Money movement changed.",
+                file="src/payments.ts",
+            )
+        ],
+    )
+
+    assert pack_residual_priority(pack, archived_priority="p2") == "p0"
 
 
 def test_render_markdown_lists_legacy_configured_reviewers_when_selection_data_is_missing() -> None:

@@ -2447,6 +2447,69 @@ review:
     }
 
 
+def test_review_continue_from_resolves_explicit_config_against_report_root(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    caller_root = tmp_path / "caller"
+    project_root = tmp_path / "project"
+    caller_root.mkdir()
+    rules_dir = project_root / ".apex-ray" / "rules"
+    rules_dir.mkdir(parents=True)
+    prior = build_report(
+        ProjectProfile(root=str(project_root), is_git_repo=True),
+        ReviewConfig(),
+        DiffSummary(target_mode=TargetMode.PATCH, stats=DiffStats(files_changed=1)),
+    )
+    report_path = tmp_path / "review.json"
+    report_path.write_text(prior.model_dump_json(indent=2), encoding="utf-8")
+    config_path = project_root / ".apex-ray" / "config.yml"
+    config_path.write_text(
+        "review:\n  rule_paths:\n    - .apex-ray/rules\n",
+        encoding="utf-8",
+    )
+    (rules_dir / "continuation-root.md").write_text(
+        "---\n"
+        "id: continuation-root\n"
+        "paths:\n"
+        "  - src/**\n"
+        "---\n"
+        "Resolve continuation policy against the report repository.\n",
+        encoding="utf-8",
+    )
+    seen: dict[str, object] = {}
+
+    def fake_continue(*args, **kwargs):
+        seen["root"] = kwargs["repo_root"]
+        seen["rules"] = [rule.id for rule in kwargs["config"].rule_definitions]
+        return prior, [object()]
+
+    monkeypatch.setattr("apex_ray.cli.main.discover_repo_root", lambda _cwd: caller_root)
+    monkeypatch.setattr("apex_ray.cli.main.continue_review_from_report", fake_continue)
+
+    result = runner.invoke(
+        app,
+        [
+            "review",
+            "--continue-from",
+            str(report_path),
+            "--config",
+            str(config_path),
+            "--output",
+            str(tmp_path / "continued.md"),
+            "--json",
+            str(tmp_path / "continued.json"),
+        ],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert seen == {
+        "root": project_root,
+        "rules": ["continuation-root"],
+    }
+
+
 def test_review_auto_followup_preserves_explicit_reviewer_scope(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
     patch = tmp_path / "sample.diff"

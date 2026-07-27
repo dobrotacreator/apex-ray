@@ -363,6 +363,9 @@ def _select_llm_context_pack_indexes(
                 priority_packs,
                 changed_files,
                 remaining,
+                preferred_pack_ids={
+                    pack.id for _index, pack in priority_packs if (priority_by_pack_id or {}).get(pack.id) == priority
+                },
             )
         )
     return sorted(selected_indexes)
@@ -372,13 +375,18 @@ def _select_llm_context_pack_indexes_within_priority(
     indexed_context_packs: list[tuple[int, ContextPack]],
     changed_files: list[ChangedFile],
     max_packs: int,
+    *,
+    preferred_pack_ids: set[str],
 ) -> list[int]:
     if len(indexed_context_packs) <= max_packs:
         return [index for index, _pack in indexed_context_packs]
     kind_by_path = {file.path: file.file_kind for file in changed_files}
     indexed = list(indexed_context_packs)
     indexed.sort(
-        key=lambda item: _llm_pack_priority(item[1], kind_by_path, item[0]),
+        key=lambda item: (
+            item[1].id in preferred_pack_ids,
+            _llm_pack_priority(item[1], kind_by_path, item[0]),
+        ),
         reverse=True,
     )
     groups: dict[str, list[tuple[int, ContextPack]]] = {}

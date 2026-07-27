@@ -347,7 +347,9 @@ def _detect_frameworks(root: Path, deadline: float | None = None) -> set[str]:
         try:
             parsed = json.loads(package_json_text)
             data = parsed if isinstance(parsed, dict) else {}
-        except json.JSONDecodeError, RecursionError:
+        except json.JSONDecodeError:
+            data = {}
+        except RecursionError:
             data = {}
         dependencies = data.get("dependencies", {})
         dev_dependencies = data.get("devDependencies", {})
@@ -409,7 +411,9 @@ def _read_bounded_regular_text(
             return None
         _check_discovery_deadline(deadline)
         return payload.decode("utf-8")
-    except OSError, UnicodeDecodeError:
+    except OSError:
+        return None
+    except UnicodeDecodeError:
         return None
     finally:
         os.close(descriptor)

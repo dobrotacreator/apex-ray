@@ -2092,7 +2092,9 @@ def _stable_file_identity(file_stat: os.stat_result) -> tuple[int, int, int, int
 def _parse_typescript_config_extends(config_text: str) -> tuple[str, ...]:
     try:
         config = json.loads(_jsonc_to_json(config_text))
-    except json.JSONDecodeError, RecursionError:
+    except json.JSONDecodeError:
+        return ()
+    except RecursionError:
         return ()
     if not isinstance(config, dict):
         return ()
@@ -2290,7 +2292,9 @@ def _build_typescript_package_index(
             continue
         try:
             package_json = json.loads(package_text)
-        except json.JSONDecodeError, RecursionError:
+        except json.JSONDecodeError:
+            continue
+        except RecursionError:
             continue
         if not isinstance(package_json, dict):
             continue

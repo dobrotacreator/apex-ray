@@ -804,7 +804,9 @@ def test_legacy_continuation_keeps_builtin_auth_tests_in_test_slice() -> None:
     assert select_continuation_context_packs(report, slices={"high_risk"}) == []
 
 
-def test_capped_continuation_preserves_archived_residual_priority(tmp_path: Path) -> None:
+def test_capped_continuation_preserves_archived_priority_without_downgrading_current_risk(
+    tmp_path: Path,
+) -> None:
     archived_p0 = ContextPack(
         id="src/archived.ts#run:1",
         file="src/archived.ts",
@@ -851,14 +853,19 @@ def test_capped_continuation_preserves_archived_residual_priority(tmp_path: Path
     statuses[archived_p0.id].priority = "p0"
     statuses[recomputed_p0.id].priority = "p1"
 
-    _continued, selected = continue_review_from_report(
+    continued, selected = continue_review_from_report(
         initial,
         repo_root=tmp_path,
         max_pack_reviews=1,
         provider=FakeLLMProvider([]),
     )
 
+    # Both packs are effectively P0: the confirmed archived backlog wins the
+    # capped tie, while current high-risk evidence remains P0 for the next
+    # continuation even though its archived status was stale.
     assert [pack.id for pack in selected] == [archived_p0.id]
+    continued_statuses = {status.context_pack_id: status for status in continued.llm_coverage.pack_statuses}
+    assert continued_statuses[recomputed_p0.id].priority == "p0"
 
 
 def test_continue_review_updates_modern_default_general_reviewer_selection(

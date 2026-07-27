@@ -37,6 +37,7 @@ from apex_ray.models import (
     DEFAULT_AUTO_FOLLOWUP_P0_MAX_PACK_REVIEWS,
     LLMCoverageMode,
     LLMProviderName,
+    ReviewConfig,
     ReviewReport,
     TargetMode,
 )
@@ -382,7 +383,11 @@ def review(
     """Inspect a diff and write markdown/JSON reports."""
     try:
         root = discover_repo_root(Path.cwd())
-        review_config, config_path = load_config(root, config)
+        if continue_from is None:
+            review_config, config_path = load_config(root, config)
+        else:
+            review_config = ReviewConfig()
+            config_path = None
     except (ConfigError, DiscoveryError) as exc:
         raise typer.BadParameter(str(exc)) from exc
 
@@ -418,6 +423,11 @@ def review(
         root = Path(prior_report.project.root)
         if config is None:
             review_config = prior_report.config
+        else:
+            try:
+                review_config, config_path = load_config(root, config)
+            except ConfigError as exc:
+                raise typer.BadParameter(str(exc)) from exc
     warn_outdated_agent_artifacts(root)
 
     output = resolve_output_path(root, output)

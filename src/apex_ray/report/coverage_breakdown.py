@@ -187,8 +187,6 @@ def pack_residual_priority(
     pack: ContextPack,
     archived_priority: str | None = None,
 ) -> str:
-    if archived_priority in {"p0", "p1", "p2"}:
-        return archived_priority
     risk_by_severity = _pack_risk_by_severity(pack)
     rule_modes = Counter(str(rule.mode) for rule in pack.rule_matches)
     rule_severities = Counter(str(rule.severity) for rule in pack.rule_matches)
@@ -198,16 +196,20 @@ def pack_residual_priority(
         or rule_severities.get("critical", 0)
         or rule_severities.get("high", 0)
     ):
-        return "p0"
-    if (
+        current_priority = "p0"
+    elif (
         risk_by_severity.get("medium", 0)
         or risk_by_severity.get("critical", 0)
         or risk_by_severity.get("high", 0)
         or pack.file_kind in {FileKind.SOURCE, FileKind.SCHEMA, FileKind.MIGRATION, FileKind.CONFIG}
         or pack.stats.truncated
     ):
-        return "p1"
-    return "p2"
+        current_priority = "p1"
+    else:
+        current_priority = "p2"
+    if archived_priority not in {"p0", "p1", "p2"}:
+        return current_priority
+    return _highest_residual_priority((current_priority, archived_priority)) or current_priority
 
 
 def _pack_symbol_names(packs: list[ContextPack]) -> list[str]:
