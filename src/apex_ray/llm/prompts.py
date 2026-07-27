@@ -1,6 +1,7 @@
+import fnmatch
 import hashlib
 import json
-from collections.abc import MutableMapping
+from collections.abc import Iterable, MutableMapping
 from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -8,13 +9,21 @@ from typing import Literal
 
 from apex_ray.discovery import LANGUAGE_EXTENSIONS
 from apex_ray.memory import pack_prompt_payload
-from apex_ray.models import ContextPack, Finding, ReviewReport
+from apex_ray.models import ChangedFile, ContextPack, Finding, ReviewReport
 
 LANGUAGE_HINTS = {
     "javascript": "TypeScript/JavaScript",
     "python": "Python",
     "typescript": "TypeScript/JavaScript",
 }
+RESOLUTION_PROMPT_MAX_CHARS = 256_000
+_RESOLUTION_FINDING_MAX_CHARS = 24_000
+_RESOLUTION_PREVIOUS_PACK_MAX_CHARS = 56_000
+_RESOLUTION_METADATA_MAX_CHARS = 12_000
+_RESOLUTION_DIFF_MAX_CHARS = 64_000
+_RESOLUTION_CONTEXT_PACKS_MAX_CHARS = 92_000
+_RESOLUTION_DIFF_FILE_LIMIT = 20
+_RESOLUTION_CONTEXT_PACK_LIMIT = 8
 
 
 @dataclass(frozen=True)
@@ -197,28 +206,389 @@ def build_resolution_prompt(
     delta_report: ReviewReport,
 ) -> str:
     previous_payload = pack_prompt_payload(previous_pack, "verify") if previous_pack is not None else None
-    delta_pack_payloads = [pack_prompt_payload(pack, "verify") for pack in delta_report.context_packs]
-    delta_payload = {
-        "diff": delta_report.diff.model_dump(mode="json"),
-        "context_packs": delta_pack_payloads,
+    primary_paths, relevant_literal_paths, relevant_glob_patterns = _resolution_relevant_paths(
+        finding,
+        previous_pack,
+    )
+    provenance_ids = _resolution_provenance_ids(finding, previous_pack)
+    previous_identity_tokens = {
+        token for pack_id in provenance_ids for token in _resolution_pack_identity_tokens(pack_id)
     }
-    return (
+    relevant_diff_files = sorted(
+        (
+            changed_file
+            for changed_file in delta_report.diff.files
+            if any(
+                _resolution_path_matches(
+                    path,
+                    relevant_literal_paths,
+                    relevant_glob_patterns,
+                )
+                for path in _resolution_changed_file_paths(changed_file)
+            )
+        ),
+        key=lambda changed_file: _resolution_diff_rank(changed_file, primary_paths),
+    )
+    current_relevant_literal_paths = {
+        *relevant_literal_paths,
+        *[path for changed_file in relevant_diff_files for path in _resolution_changed_file_paths(changed_file)],
+    }
+    relevant_packs = sorted(
+        (
+            pack
+            for pack in delta_report.context_packs
+            if pack.id in provenance_ids
+            or _resolution_path_matches(
+                pack.file,
+                current_relevant_literal_paths,
+                relevant_glob_patterns,
+            )
+        ),
+        key=lambda pack: _resolution_pack_rank(
+            pack,
+            finding=finding,
+            primary_paths=primary_paths,
+            provenance_ids=provenance_ids,
+            previous_identity_tokens=previous_identity_tokens,
+        ),
+    )
+    selected_diff_files = relevant_diff_files[:_RESOLUTION_DIFF_FILE_LIMIT]
+    selected_packs = relevant_packs[:_RESOLUTION_CONTEXT_PACK_LIMIT]
+    finding_text, finding_char_truncated = _bounded_resolution_json(
+        finding.model_dump(mode="json"),
+        max_chars=_RESOLUTION_FINDING_MAX_CHARS,
+        identity={
+            "title": finding.title,
+            "severity": finding.severity,
+            "confidence": finding.confidence,
+            "file": finding.file,
+            "line": finding.line,
+            "failure_mode": finding.failure_mode,
+            "evidence": finding.evidence,
+            "suggested_fix": finding.suggested_fix,
+            "suggested_test": finding.suggested_test,
+            "context_pack_id": finding.context_pack_id,
+        },
+    )
+    previous_text, previous_char_truncated = _bounded_resolution_json(
+        previous_payload,
+        max_chars=_RESOLUTION_PREVIOUS_PACK_MAX_CHARS,
+        identity=(
+            {"file": previous_pack.file, "context_pack_id": previous_pack.id}
+            if previous_pack is not None
+            else {"context_pack_id": None}
+        ),
+    )
+    diff_payload = {
+        "base": delta_report.diff.base,
+        "target_mode": delta_report.diff.target_mode,
+        "files": [changed_file.model_dump(mode="json") for changed_file in selected_diff_files],
+        "stats": {
+            "files_changed": len(selected_diff_files),
+            "additions": sum(changed_file.additions for changed_file in selected_diff_files),
+            "deletions": sum(changed_file.deletions for changed_file in selected_diff_files),
+            "ignored_files": sum(changed_file.is_ignored for changed_file in selected_diff_files),
+        },
+    }
+    diff_text, diff_char_truncated = _bounded_resolution_json(
+        diff_payload,
+        max_chars=_RESOLUTION_DIFF_MAX_CHARS,
+        identity={
+            "selected_files": [
+                path for changed_file in selected_diff_files for path in _resolution_changed_file_paths(changed_file)
+            ]
+        },
+    )
+    pack_payloads = [pack_prompt_payload(pack, "verify") for pack in selected_packs]
+    packs_text, packs_char_truncated = _bounded_resolution_json(
+        pack_payloads,
+        max_chars=_RESOLUTION_CONTEXT_PACKS_MAX_CHARS,
+        identity={"selected_context_pack_ids": [pack.id for pack in selected_packs]},
+    )
+    excluded_irrelevant_diff_files = len(delta_report.diff.files) - len(relevant_diff_files)
+    excluded_irrelevant_context_packs = len(delta_report.context_packs) - len(relevant_packs)
+    omitted_relevant_diff_files = len(relevant_diff_files) - len(selected_diff_files)
+    omitted_relevant_context_packs = len(relevant_packs) - len(selected_packs)
+    global_diff_warnings_excluded = len(delta_report.diff.warnings)
+    char_truncated_sections = [
+        name
+        for name, truncated in (
+            ("current_context_packs", packs_char_truncated),
+            ("current_diff", diff_char_truncated),
+            ("previous_context_pack", previous_char_truncated),
+            ("previous_finding", finding_char_truncated),
+        )
+        if truncated
+    ]
+    truncation_reasons = [
+        reason
+        for reason, applies in (
+            ("irrelevant_diff_files_excluded", excluded_irrelevant_diff_files > 0),
+            ("irrelevant_context_packs_excluded", excluded_irrelevant_context_packs > 0),
+            ("relevant_diff_file_count_limited", omitted_relevant_diff_files > 0),
+            ("relevant_context_pack_count_limited", omitted_relevant_context_packs > 0),
+            ("global_diff_warnings_excluded", global_diff_warnings_excluded > 0),
+            ("section_char_budget_applied", bool(char_truncated_sections)),
+        )
+        if applies
+    ]
+    metadata = {
+        "applied": bool(truncation_reasons),
+        "max_prompt_chars": RESOLUTION_PROMPT_MAX_CHARS,
+        "relevant_literal_paths": _bounded_resolution_labels(current_relevant_literal_paths),
+        "relevant_glob_patterns": _bounded_resolution_labels(relevant_glob_patterns),
+        "selected_diff_files": _bounded_resolution_labels(
+            path for changed_file in selected_diff_files for path in _resolution_changed_file_paths(changed_file)
+        ),
+        "selected_context_pack_ids": _bounded_resolution_labels(pack.id for pack in selected_packs),
+        "excluded_irrelevant_diff_files": excluded_irrelevant_diff_files,
+        "excluded_irrelevant_context_packs": excluded_irrelevant_context_packs,
+        "omitted_relevant_diff_files": omitted_relevant_diff_files,
+        "omitted_relevant_context_packs": omitted_relevant_context_packs,
+        "global_diff_warnings_excluded": global_diff_warnings_excluded,
+        "char_truncated_sections": char_truncated_sections,
+        "reasons": truncation_reasons,
+    }
+    metadata_text, metadata_char_truncated = _bounded_resolution_json(
+        metadata,
+        max_chars=_RESOLUTION_METADATA_MAX_CHARS,
+        identity={"applied": metadata["applied"], "reasons": truncation_reasons},
+    )
+    if metadata_char_truncated:
+        metadata["applied"] = True
+        metadata["char_truncated_sections"] = [*char_truncated_sections, "truncation_metadata"]
+        metadata["reasons"] = [*truncation_reasons, "section_char_budget_applied"]
+        metadata_text, _ = _bounded_resolution_json(
+            metadata,
+            max_chars=_RESOLUTION_METADATA_MAX_CHARS,
+            identity={"applied": True, "reasons": metadata["reasons"]},
+        )
+    prompt = (
         "You are Apex Ray's strict pre-push retry resolution pass.\n"
         "Decide whether a previously verified blocking code-review finding is resolved in the current snapshot.\n"
         "Return status `resolved` only when the supplied delta and current context prove that the failure mode no longer applies.\n"
         "Return `still_present` when the same failure mode remains visible or the delta leaves the relevant code unchanged.\n"
         "Return `uncertain` when the supplied context is insufficient, ambiguous, or the fix may be elsewhere.\n"
         "Do not mark resolved merely because the new delta review produced no findings.\n"
-        "Treat previous_context_pack as historical evidence for what was blocked, and delta_report as the only new evidence.\n"
+        "Treat previous_context_pack as historical evidence for what was blocked, and the relevant current diff and context packs as the only new evidence.\n"
+        "The current evidence is relevance-filtered and may be count- or character-truncated. Inspect truncation_metadata and return `uncertain` whenever omitted evidence is needed to prove resolution.\n"
         "Prefer `uncertain` over `resolved` when proof is incomplete. `still_present` and `uncertain` both continue to block the gate.\n"
         "Return only JSON that matches the provided schema.\n\n"
         "Previous blocking finding JSON:\n"
-        f"{json.dumps(finding.model_dump(mode='json'), indent=2)}\n\n"
+        f"{finding_text}\n\n"
         "Previous context pack JSON:\n"
-        f"{json.dumps(previous_payload, indent=2)}\n\n"
-        "Delta report JSON:\n"
-        f"{json.dumps(delta_payload, indent=2)}\n"
+        f"{previous_text}\n\n"
+        "Delta report truncation_metadata JSON:\n"
+        f"{metadata_text}\n\n"
+        "Relevant current diff JSON:\n"
+        f"{diff_text}\n\n"
+        "Relevant current context packs JSON:\n"
+        f"{packs_text}\n"
     )
+    if len(prompt) > RESOLUTION_PROMPT_MAX_CHARS:
+        raise RuntimeError(
+            "Resolution prompt exceeded its internal hard character budget; "
+            "returning it could exceed the configured LLM provider input limit."
+        )
+    return prompt
+
+
+def _resolution_relevant_paths(
+    finding: Finding,
+    previous_pack: ContextPack | None,
+) -> tuple[set[str], set[str], set[str]]:
+    primary_paths = {
+        _normalize_resolution_path(path)
+        for path in [
+            finding.file,
+            *[_resolution_path_from_pack_id(pack_id) for pack_id in _resolution_provenance_ids(finding, previous_pack)],
+            previous_pack.file if previous_pack is not None else "",
+        ]
+        if path
+    }
+    relevant_literal_paths = set(primary_paths)
+    relevant_glob_patterns: set[str] = set()
+    if previous_pack is None:
+        return primary_paths, relevant_literal_paths, relevant_glob_patterns
+    relevant_literal_paths.update(_normalize_resolution_path(path) for path in previous_pack.related_tests if path)
+    for rule in previous_pack.rule_matches:
+        relevant_glob_patterns.update(_normalize_resolution_path(path) for path in rule.resolution_surfaces if path)
+    for reference in [
+        *previous_pack.references,
+        *previous_pack.callees,
+        *previous_pack.contracts,
+        *previous_pack.metadata,
+    ]:
+        if reference.file:
+            relevant_literal_paths.add(_normalize_resolution_path(reference.file))
+    for snippet in [
+        *previous_pack.reference_snippets,
+        *previous_pack.callee_snippets,
+        *previous_pack.contract_snippets,
+        *previous_pack.metadata_snippets,
+        *previous_pack.related_test_snippets,
+    ]:
+        if snippet.file:
+            relevant_literal_paths.add(_normalize_resolution_path(snippet.file))
+    return primary_paths, relevant_literal_paths, relevant_glob_patterns
+
+
+def _resolution_provenance_ids(
+    finding: Finding,
+    previous_pack: ContextPack | None,
+) -> set[str]:
+    pack_ids = {
+        finding.context_pack_id,
+        previous_pack.id if previous_pack is not None else "",
+        *[pack_id for reviewer_pack_ids in finding.reviewer_context_pack_ids.values() for pack_id in reviewer_pack_ids],
+    }
+    return {pack_id for pack_id in pack_ids if pack_id}
+
+
+def _resolution_path_from_pack_id(pack_id: str) -> str:
+    return pack_id.split("#", 1)[0] if "#" in pack_id else ""
+
+
+def _normalize_resolution_path(path: str) -> str:
+    normalized = path.replace("\\", "/")
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    return normalized
+
+
+def _resolution_path_matches(
+    path: str,
+    literal_paths: set[str],
+    glob_patterns: set[str],
+) -> bool:
+    normalized = _normalize_resolution_path(path)
+    return normalized in literal_paths or any(fnmatch.fnmatchcase(normalized, pattern) for pattern in glob_patterns)
+
+
+def _resolution_changed_file_paths(changed_file: ChangedFile) -> tuple[str, ...]:
+    return tuple(
+        sorted({_normalize_resolution_path(path) for path in (changed_file.old_path, changed_file.new_path) if path})
+    )
+
+
+def _resolution_diff_rank(
+    changed_file: ChangedFile,
+    primary_paths: set[str],
+) -> tuple[int, tuple[str, ...]]:
+    paths = _resolution_changed_file_paths(changed_file)
+    return (0 if primary_paths.intersection(paths) else 1, paths)
+
+
+def _resolution_pack_rank(
+    pack: ContextPack,
+    *,
+    finding: Finding,
+    primary_paths: set[str],
+    provenance_ids: set[str],
+    previous_identity_tokens: set[str],
+) -> tuple[int, str, str]:
+    normalized_file = _normalize_resolution_path(pack.file)
+    overlaps_finding_line = finding.line is not None and any(
+        start_line <= finding.line <= end_line for start_line, end_line in pack.changed_lines
+    )
+    shares_identity = bool(previous_identity_tokens.intersection(_resolution_pack_identity_tokens(pack.id)))
+    if pack.id in provenance_ids:
+        priority = 0
+    elif shares_identity:
+        priority = 1
+    elif normalized_file in primary_paths and overlaps_finding_line:
+        priority = 2
+    elif normalized_file in primary_paths:
+        priority = 3
+    else:
+        priority = 4
+    return (priority, normalized_file, pack.id)
+
+
+def _resolution_pack_identity_tokens(pack_id: str) -> set[str]:
+    if "#" not in pack_id:
+        return set()
+    identity = pack_id.split("#", 1)[1]
+    if identity.startswith("cluster:"):
+        identity = identity.removeprefix("cluster:")
+    tokens: set[str] = set()
+    for token in identity.split("+"):
+        candidate, separator, suffix = token.rpartition(":")
+        normalized = candidate if separator and suffix.isdigit() else token
+        if normalized:
+            tokens.add(normalized)
+    return tokens
+
+
+def _bounded_resolution_labels(
+    values: Iterable[object],
+    *,
+    max_items: int = 64,
+    max_label_chars: int = 512,
+) -> list[str]:
+    labels = sorted({str(value) for value in values})
+    bounded = [
+        label if len(label) <= max_label_chars else f"{label[: max_label_chars - 3]}..." for label in labels[:max_items]
+    ]
+    if len(labels) > max_items:
+        bounded.append(f"... {len(labels) - max_items} additional values omitted")
+    return bounded
+
+
+def _bounded_resolution_json(
+    payload: object,
+    *,
+    max_chars: int,
+    identity: dict[str, object],
+) -> tuple[str, bool]:
+    rendered = json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False)
+    if len(rendered) <= max_chars:
+        return rendered, False
+    compact = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    bounded_identity = {key: _bounded_resolution_identity_value(value) for key, value in identity.items()}
+    truncation = {
+        "applied": True,
+        "max_chars": max_chars,
+        "original_chars": len(rendered),
+        "strategy": "deterministic_prefix_suffix_excerpt",
+        "truncated": True,
+    }
+
+    def render_excerpt(excerpt_chars: int) -> str:
+        prefix_chars = excerpt_chars * 3 // 4
+        suffix_chars = excerpt_chars - prefix_chars
+        return json.dumps(
+            {
+                "_truncation": truncation,
+                "identity": bounded_identity,
+                "serialized_prefix": compact[:prefix_chars],
+                "serialized_suffix": compact[-suffix_chars:] if suffix_chars else "",
+            },
+            indent=2,
+            sort_keys=True,
+            ensure_ascii=False,
+        )
+
+    low = 0
+    high = len(compact)
+    best = render_excerpt(0)
+    while low <= high:
+        midpoint = (low + high) // 2
+        candidate = render_excerpt(midpoint)
+        if len(candidate) <= max_chars:
+            best = candidate
+            low = midpoint + 1
+        else:
+            high = midpoint - 1
+    return best, True
+
+
+def _bounded_resolution_identity_value(value: object) -> object:
+    if isinstance(value, str):
+        return value if len(value) <= 512 else f"{value[:509]}..."
+    if isinstance(value, list):
+        return [_bounded_resolution_identity_value(item) for item in value[:16]]
+    return value
 
 
 def _language_review_guidance(pack: ContextPack) -> str:
