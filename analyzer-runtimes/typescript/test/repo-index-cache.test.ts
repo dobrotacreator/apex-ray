@@ -82,6 +82,30 @@ test("repo index cache writes valid payloads and rejects invalid payloads", () =
   }
 });
 
+test("repo index cache requires explicit reconciliation for inventory mismatches", () => {
+  const cacheHome = fs.mkdtempSync(
+    path.join(os.tmpdir(), "apex-ray-ts-cache-fingerprint-"),
+  );
+  const cachePath = path.join(cacheHome, "index.json");
+  try {
+    const file = emptyRepoFile(cacheHome);
+    assert.equal(
+      writeRepoIndexCache(cachePath, [file], "inventory-a").written,
+      true,
+    );
+
+    assert.ok(readRepoIndexCache(cachePath, "inventory-a"));
+    assert.equal(readRepoIndexCache(cachePath, "inventory-b"), null);
+    assert.ok(
+      readRepoIndexCache(cachePath, "inventory-b", {
+        allowInventoryMismatch: true,
+      }),
+    );
+  } finally {
+    fs.rmSync(cacheHome, { recursive: true, force: true });
+  }
+});
+
 test("repo index cache stores identifier coordinates without duplicated source text", () => {
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), "apex-ray-ts-compact-cache-repo-"));
   const cacheHome = fs.mkdtempSync(path.join(os.tmpdir(), "apex-ray-ts-compact-cache-home-"));

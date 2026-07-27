@@ -52,11 +52,24 @@ function defaultCacheHome(): string {
   return path.join(os.tmpdir(), "apex-ray-cache");
 }
 
+export interface RepoIndexCacheReadOptions {
+  /**
+   * Permit a cache from a different file inventory only when the caller
+   * reconciles entries against the current inventory and stable file identity.
+   */
+  allowInventoryMismatch?: boolean;
+  shouldStop?: () => boolean;
+}
+
 export function readRepoIndexCache(
   cachePath: string,
-  _inventoryFingerprint: string | null = null,
-  shouldStop: () => boolean = () => false,
+  inventoryFingerprint: string | null = null,
+  options: RepoIndexCacheReadOptions = {},
 ): RepoIndexCacheFile | null {
+  const {
+    allowInventoryMismatch = false,
+    shouldStop = () => false,
+  } = options;
   if (shouldStop()) return null;
   try {
     const snapshot = readStableFile(
@@ -84,6 +97,10 @@ export function readRepoIndexCache(
     const parsed = JSON.parse(snapshot.text) as RepoIndexCacheFile;
     if (
       parsed.version !== REPO_INDEX_CACHE_VERSION ||
+      (parsed.inventoryFingerprint !== null &&
+        typeof parsed.inventoryFingerprint !== "string") ||
+      (!allowInventoryMismatch &&
+        parsed.inventoryFingerprint !== inventoryFingerprint) ||
       !Array.isArray(parsed.files) ||
       parsed.files.length > ANALYZER_SOURCE_FILE_LIMIT
     ) {

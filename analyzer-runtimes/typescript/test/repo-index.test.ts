@@ -100,6 +100,28 @@ test("repo index builder limits indexing to a file manifest", () => {
     assert.equal(second.cacheStats?.hits, 2);
     assert.equal(second.cacheStats?.misses, 0);
 
+    fs.renameSync(
+      path.join(repo, "src", "consumer.ts"),
+      path.join(repo, "src", "renamed.ts"),
+    );
+    writeFile(repo, "src/new.ts", "export const added = true;\n");
+    fs.writeFileSync(
+      manifestPath,
+      JSON.stringify({
+        version: 2,
+        files: ["src/cart.ts", "src/renamed.ts", "src/new.ts"],
+      }),
+      "utf8",
+    );
+    const reconciled = buildRepoIndex(args);
+    assert.deepEqual(
+      reconciled.files.map((entry) => entry.relPath),
+      ["src/cart.ts", "src/new.ts", "src/renamed.ts"],
+    );
+    assert.equal(reconciled.cacheStats?.hits, 1);
+    assert.equal(reconciled.cacheStats?.misses, 2);
+    assert.equal(reconciled.cacheStats?.written, true);
+
     fs.writeFileSync(manifestPath, JSON.stringify({ version: 2, files: ["src/cart.ts"] }), "utf8");
     const narrowed = buildRepoIndex(args);
     assert.deepEqual(narrowed.files.map((entry) => entry.relPath), ["src/cart.ts"]);

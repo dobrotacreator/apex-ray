@@ -1146,7 +1146,9 @@ def _git_fallback_config_path_visible(
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-    except OSError, ValueError:
+    except OSError:
+        return None
+    except ValueError:
         return None
     try:
         while process.poll() is None:

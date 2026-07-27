@@ -46,7 +46,13 @@ export function buildRepoIndex(
       ? readRepoIndexCache(
           cachePath,
           inventory.fingerprint,
-          shouldStop,
+          {
+            // Fingerprints cover inventory membership, not source contents.
+            // Reuse entries across membership changes only because the loop
+            // below filters to current paths and revalidates stable identity.
+            allowInventoryMismatch: true,
+            shouldStop,
+          },
         )
       : null;
   const cachedFiles = new Map(
