@@ -2888,6 +2888,91 @@ def test_cross_pack_fuzzy_siblings_with_one_origin_keep_distinct_decisions() -> 
 
     assert active_verifications(verifications) == verifications
     assert verified_report_findings([approved], verifications) == [approved]
+    assert verified_report_findings([approved, rejected], verifications) == [approved]
+
+
+def test_cross_pack_exact_siblings_with_one_origin_keep_distinct_decisions() -> None:
+    approved = Finding(
+        title="Authorization guard bypass permits an unauthorized settlement",
+        severity=FindingSeverity.HIGH,
+        confidence=FindingConfidence.HIGH,
+        file="src/transfers.ts",
+        line=41,
+        failure_mode="The settlement path bypasses the account ownership authorization guard.",
+        evidence="The changed early return executes before the account ownership authorization guard.",
+        suggested_fix="Move the early return after the account ownership authorization guard.",
+        suggested_test="Reject a settlement for an account the caller does not own.",
+        context_pack_id="src/router.ts#authorize:1",
+        reviewer_ids=["security"],
+        reviewer_context_pack_ids={
+            "security": ["src/router.ts#authorize:1"],
+        },
+    )
+    rejected = approved.model_copy(
+        update={
+            "file": "src/refunds.ts",
+            "line": 93,
+            "context_pack_id": "src/refunds.ts#refund:93",
+        }
+    )
+    verifications = [
+        FindingVerification(
+            finding=approved,
+            reviewer_id="security",
+            approved=True,
+            confidence=FindingConfidence.HIGH,
+            reason="Confirmed.",
+        ),
+        FindingVerification(
+            finding=rejected,
+            reviewer_id="security",
+            approved=False,
+            confidence=FindingConfidence.HIGH,
+            reason="Rejected as a distinct sibling.",
+        ),
+    ]
+
+    assert active_verifications(verifications) == verifications
+    assert verified_report_findings([approved, rejected], verifications) == [approved]
+    assert matching_active_verifications(approved, [verifications[1]]) == []
+    assert verified_report_findings([approved], [verifications[1]]) == []
+
+
+def test_cross_file_legacy_lineage_does_not_reuse_a_fuzzy_approval() -> None:
+    legacy = Finding(
+        title="Authorization guard can be bypassed before settlement",
+        severity=FindingSeverity.HIGH,
+        confidence=FindingConfidence.HIGH,
+        file="src/router.ts",
+        line=17,
+        failure_mode="A caller can submit a settlement without the required ownership check.",
+        evidence="The changed early return executes before the ownership guard.",
+        suggested_fix="Move the early return after the ownership guard.",
+        suggested_test="Reject a settlement for an account the caller does not own.",
+        context_pack_id="src/router.ts#dispatch:17",
+        reviewer_ids=["security"],
+    )
+    rediscovered = legacy.model_copy(
+        update={
+            "title": "Settlement can bypass the account authorization guard",
+            "file": "src/settlement.ts",
+            "line": 42,
+            "context_pack_id": "src/settlement.ts#settle:42",
+            "reviewer_context_pack_ids": {
+                "security": [legacy.context_pack_id],
+            },
+        }
+    )
+    verification = FindingVerification(
+        finding=legacy,
+        reviewer_id="security",
+        approved=True,
+        confidence=FindingConfidence.HIGH,
+        reason="Confirmed.",
+    )
+
+    assert matching_active_verifications(rediscovered, [verification]) == []
+    assert verified_report_findings([rediscovered], [verification]) == []
 
 
 def test_exact_cross_pack_rediscovery_for_one_reviewer_consolidates_origins() -> None:
@@ -6305,6 +6390,235 @@ def test_consolidate_findings_deduplicates_test_and_source_root_cause() -> None:
     ]
 
 
+@pytest.mark.parametrize(
+    "scope_update",
+    [
+        pytest.param(
+            {
+                "file": "src/refunds.ts",
+                "line": 42,
+                "context_pack_id": "src/refunds.ts#settle:42",
+            },
+            id="different-file",
+        ),
+        pytest.param(
+            {
+                "line": 142,
+                "context_pack_id": "src/settlement.ts#settle:142",
+            },
+            id="distant-line",
+        ),
+        pytest.param(
+            {
+                "line": 242,
+            },
+            id="distant-line-same-pack",
+        ),
+        pytest.param(
+            {
+                "line": None,
+                "context_pack_id": "src/settlement.ts#dispatch:17",
+            },
+            id="unknown-line-different-pack",
+        ),
+    ],
+)
+def test_consolidate_findings_preserves_similar_independent_scopes(
+    scope_update: dict[str, object],
+) -> None:
+    first = Finding(
+        title="Authorization guard can be bypassed before settlement",
+        severity=FindingSeverity.HIGH,
+        confidence=FindingConfidence.HIGH,
+        file="src/settlement.ts",
+        line=42,
+        failure_mode="A caller can submit a settlement without the required ownership check.",
+        evidence="The changed early return executes before the ownership guard.",
+        suggested_fix="Move the early return after the ownership guard.",
+        suggested_test="Reject a settlement for an account the caller does not own.",
+        context_pack_id="src/settlement.ts#settle:42",
+        reviewer_ids=["security"],
+    )
+    independent = first.model_copy(update=scope_update)
+
+    consolidated = consolidate_findings([first, independent])
+
+    assert consolidated == [first, independent]
+
+
+@pytest.mark.parametrize("equivalent_path", ["./src/settlement.ts", r"src\settlement.ts"])
+def test_consolidate_findings_normalizes_equivalent_path_spellings(
+    equivalent_path: str,
+) -> None:
+    first = Finding(
+        title="Authorization guard can be bypassed before settlement",
+        severity=FindingSeverity.HIGH,
+        confidence=FindingConfidence.HIGH,
+        file="src/settlement.ts",
+        line=42,
+        failure_mode="A caller can submit a settlement without the required ownership check.",
+        evidence="The changed early return executes before the ownership guard.",
+        suggested_fix="Move the early return after the ownership guard.",
+        suggested_test="Reject a settlement for an account the caller does not own.",
+        context_pack_id="src/settlement.ts#settle:42",
+        reviewer_ids=["security"],
+    )
+    duplicate = first.model_copy(
+        update={
+            "file": equivalent_path,
+            "context_pack_id": "./src/settlement.ts#settle:42",
+        }
+    )
+
+    assert len(consolidate_findings([first, duplicate])) == 1
+
+
+@pytest.mark.parametrize("legacy_path", ["./src/settlement.ts", r"src\settlement.ts"])
+def test_matching_verifications_normalizes_equivalent_pack_path_spellings(
+    legacy_path: str,
+) -> None:
+    current = Finding(
+        title="Authorization guard can be bypassed before settlement",
+        severity=FindingSeverity.HIGH,
+        confidence=FindingConfidence.HIGH,
+        file="src/settlement.ts",
+        line=42,
+        failure_mode="A caller can submit a settlement without the required ownership check.",
+        evidence="The changed early return executes before the ownership guard.",
+        suggested_fix="Move the early return after the ownership guard.",
+        suggested_test="Reject a settlement for an account the caller does not own.",
+        context_pack_id="src/settlement.ts#settle:42",
+        reviewer_ids=["security"],
+    )
+    legacy = current.model_copy(
+        update={
+            "file": legacy_path,
+            "context_pack_id": f"{legacy_path}#settle:42",
+        }
+    )
+    verification = FindingVerification(
+        finding=legacy,
+        reviewer_id="security",
+        approved=True,
+        confidence=FindingConfidence.HIGH,
+        reason="Confirmed.",
+    )
+
+    assert matching_active_verifications(current, [verification]) == [verification]
+    assert verified_report_findings([current], [verification]) == [current]
+    rejection = FindingVerification(
+        finding=current,
+        reviewer_id="security",
+        approved=False,
+        confidence=FindingConfidence.HIGH,
+        reason="Rejected by the newer review.",
+    )
+    assert active_verifications([verification, rejection]) == [rejection]
+    assert verified_report_findings([current], [verification, rejection]) == []
+
+
+def test_consolidate_findings_preserves_cross_file_shared_reviewer_origin() -> None:
+    origin = "src/router.ts#dispatch:17"
+    first = Finding(
+        title="Authorization guard can be bypassed before settlement",
+        severity=FindingSeverity.HIGH,
+        confidence=FindingConfidence.HIGH,
+        file="src/settlement.ts",
+        line=42,
+        failure_mode="A caller can submit a settlement without the required ownership check.",
+        evidence="The changed early return executes before the ownership guard.",
+        suggested_fix="Move the early return after the ownership guard.",
+        suggested_test="Reject a settlement for an account the caller does not own.",
+        context_pack_id=origin,
+        reviewer_ids=["security"],
+        reviewer_context_pack_ids={"security": [origin]},
+    )
+    duplicate = first.model_copy(
+        update={
+            "file": "src/router.ts",
+            "line": 17,
+        }
+    )
+
+    consolidated = consolidate_findings([first, duplicate])
+
+    assert consolidated == [first, duplicate]
+
+
+@pytest.mark.parametrize(
+    "shared_anchor",
+    [
+        "`request[id]` and `request[user]`",
+        "`request[account]`",
+        "`headers[authorization]`",
+        "`account[permissions]`",
+    ],
+)
+def test_consolidate_findings_preserves_generic_cross_file_code_anchor(
+    shared_anchor: str,
+) -> None:
+    payment = Finding(
+        title=f"Missing ownership check for {shared_anchor}",
+        severity=FindingSeverity.HIGH,
+        confidence=FindingConfidence.HIGH,
+        file="src/billing/payments.ts",
+        line=42,
+        failure_mode=f"A caller can submit {shared_anchor} without the required ownership check.",
+        evidence=f"The payment handler reads {shared_anchor} before the account ownership guard.",
+        suggested_fix=f"Run the ownership guard before reading {shared_anchor}.",
+        suggested_test=f"Reject a payment when {shared_anchor} belongs to another account.",
+        context_pack_id="src/router.ts#dispatch:17",
+        reviewer_ids=["security"],
+        reviewer_context_pack_ids={
+            "security": ["src/router.ts#dispatch:17"],
+        },
+    )
+    refund = payment.model_copy(
+        update={
+            "file": "src/billing/refunds.ts",
+            "line": 73,
+            "failure_mode": (f"A caller can submit {shared_anchor} without the required ownership check for a refund."),
+            "evidence": f"The refund handler reads {shared_anchor} before the account ownership guard.",
+        }
+    )
+
+    assert consolidate_findings([payment, refund]) == [payment, refund]
+
+
+@pytest.mark.parametrize(
+    ("test_path", "source_path"),
+    [
+        ("tests/test_repository.py", "src/repository.py"),
+        ("tests/repository_test.py", "src/repository.py"),
+        ("test/repository.py", "src/repository.py"),
+        ("__tests__/repository.spec.ts", "src/repository.ts"),
+    ],
+)
+def test_consolidate_findings_normalizes_test_source_conventions(
+    test_path: str,
+    source_path: str,
+) -> None:
+    test_finding = Finding(
+        title="Repository returns records without tenant filtering",
+        severity=FindingSeverity.HIGH,
+        confidence=FindingConfidence.HIGH,
+        file=test_path,
+        line=20,
+        failure_mode="The repository can return records owned by a different tenant.",
+        evidence="The changed query no longer includes the required tenant predicate.",
+        suggested_fix="Restore the tenant predicate before executing the repository query.",
+        suggested_test="Reject records belonging to a different tenant.",
+    )
+    source_finding = test_finding.model_copy(
+        update={
+            "file": source_path,
+            "line": 44,
+        }
+    )
+
+    assert consolidate_findings([test_finding, source_finding]) == [source_finding]
+
+
 def test_consolidate_findings_preserves_all_reviewer_provenance() -> None:
     first = Finding(
         title="Authorization guard can be bypassed before settlement",
@@ -6502,7 +6816,7 @@ def test_consolidate_findings_prefers_an_approved_duplicate() -> None:
     assert consolidated[0].reviewer_ids == ["finance", "security"]
 
 
-def test_consolidate_findings_uses_bracketed_query_tokens_for_duplicates() -> None:
+def test_consolidate_findings_preserves_cross_file_bracketed_query_findings() -> None:
     schema_finding = Finding(
         title="`filter[pagination]` is now accepted despite unsupported response shape",
         severity=FindingSeverity.HIGH,
@@ -6545,6 +6859,7 @@ def test_consolidate_findings_uses_bracketed_query_tokens_for_duplicates() -> No
 
     assert consolidate_findings([schema_finding, adapter_finding, conflict_finding]) == [
         schema_finding,
+        adapter_finding,
         conflict_finding,
     ]
 

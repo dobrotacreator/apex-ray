@@ -2,6 +2,7 @@ from collections.abc import Iterable
 
 from apex_ray.findings import (
     finding_decision_identity,
+    finding_path_is_test,
     findings_are_duplicates,
     merge_finding_reviewer_provenance,
 )
@@ -43,17 +44,7 @@ def _finding_preference_key(
 ) -> tuple[int, int, int, int]:
     return (
         1 if finding_decision_identity(finding) in (preferred_identities or set()) else 0,
-        0 if _is_test_path(finding.file) else 1,
+        0 if finding_path_is_test(finding.file) else 1,
         {"low": 1, "medium": 2, "high": 3}.get(str(finding.confidence), 0),
         1 if finding.line is not None else 0,
-    )
-
-
-def _is_test_path(path: str) -> bool:
-    normalized = path.replace("\\", "/")
-    return (
-        ".test." in normalized
-        or ".spec." in normalized
-        or "/__tests__/" in normalized
-        or normalized.startswith("__tests__/")
     )

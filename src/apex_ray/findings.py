@@ -9,6 +9,9 @@ from apex_ray.models import ContextPack, Finding, FindingVerification
 _TOKEN_RE = re.compile(r"\s+")
 _FINDING_TOKEN_RE = re.compile(r"[a-z0-9_]{3,}")
 _FINDING_CODE_TOKEN_RE = re.compile(r"[a-z][a-z0-9]*(?:\[[a-z0-9]*\])+(?:\[\])?")
+_TEST_FILE_MARKER_RE = re.compile(r"\.(?:test|spec)\.")
+_TEST_FILE_SUFFIX_RE = re.compile(r"_test(?=\.)")
+_TEST_PATH_PARTS = frozenset({"__tests__", "test", "tests"})
 _FINDING_STOP_WORDS = {
     "add",
     "added",
@@ -78,7 +81,9 @@ def findings_share_reviewer_origin(
     right: Finding,
     reviewer_id: str,
 ) -> bool:
-    return bool(reviewer_origin_pack_ids(left, reviewer_id).intersection(reviewer_origin_pack_ids(right, reviewer_id)))
+    left_origins = {_normalized_context_pack_id(value) for value in reviewer_origin_pack_ids(left, reviewer_id)}
+    right_origins = {_normalized_context_pack_id(value) for value in reviewer_origin_pack_ids(right, reviewer_id)}
+    return bool(left_origins.intersection(right_origins))
 
 
 def merge_finding_reviewer_provenance(
@@ -269,7 +274,11 @@ def _matching_verifications_for_finding(
         content_decisions = [
             verification
             for verification in reviewer_decisions
-            if _has_cross_pack_reviewer_lineage(
+            if _finding_consolidation_scope_is_compatible(
+                finding,
+                verification.finding,
+            )
+            and _has_cross_pack_reviewer_lineage(
                 finding,
                 verification.finding,
                 candidate_reviewer_id,
@@ -305,7 +314,9 @@ def _has_cross_pack_reviewer_lineage(
     verification_finding: Finding,
     reviewer_id: str,
 ) -> bool:
-    if finding.context_pack_id == verification_finding.context_pack_id:
+    if _normalized_context_pack_id(finding.context_pack_id) == _normalized_context_pack_id(
+        verification_finding.context_pack_id
+    ):
         return False
     if findings_share_reviewer_origin(
         finding,
@@ -373,7 +384,9 @@ def _verification_decisions_share_explicit_cross_pack_origin(
 ) -> bool:
     return (
         left.reviewer_id == right.reviewer_id
-        and left.finding.context_pack_id != right.finding.context_pack_id
+        and _normalized_context_pack_id(left.finding.context_pack_id)
+        != _normalized_context_pack_id(right.finding.context_pack_id)
+        and _finding_consolidation_scope_is_compatible(left.finding, right.finding)
         and (
             reviewer_origins_are_explicit(left.finding, left.reviewer_id)
             or reviewer_origins_are_explicit(right.finding, right.reviewer_id)
@@ -485,11 +498,11 @@ def finding_decision_identity(finding: Finding) -> tuple[object, ...]:
     return (
         str(finding.severity),
         finding.title,
-        finding.file,
+        _normalized_finding_file(finding),
         finding.line,
         finding.failure_mode,
         finding.evidence,
-        finding.context_pack_id,
+        _normalized_context_pack_id(finding.context_pack_id),
     )
 
 
@@ -498,7 +511,52 @@ def findings_are_duplicates(left: Finding, right: Finding) -> bool:
         return True
     if left.severity != right.severity:
         return False
+    if not _finding_consolidation_scope_is_compatible(left, right):
+        return False
     return _finding_subjects_are_duplicates(left, right)
+
+
+def _finding_consolidation_scope_is_compatible(left: Finding, right: Finding) -> bool:
+    left_file = _normalized_finding_file(left)
+    right_file = _normalized_finding_file(right)
+    if left_file == right_file:
+        if left.line is None or right.line is None:
+            return False
+        return abs(left.line - right.line) <= 3
+    return _test_source_scopes_are_compatible(left_file, right_file)
+
+
+def _test_source_scopes_are_compatible(left: str, right: str) -> bool:
+    if finding_path_is_test(left) == finding_path_is_test(right):
+        return False
+    return finding_test_source_scope(left) == finding_test_source_scope(right)
+
+
+def finding_path_is_test(path: str) -> bool:
+    """Return whether a finding path uses a common test convention."""
+    normalized = _normalize_path(path)
+    parts = normalized.split("/")
+    filename = parts[-1] if parts else ""
+    return (
+        any(part in _TEST_PATH_PARTS for part in parts[:-1])
+        or bool(_TEST_FILE_MARKER_RE.search(filename))
+        or filename.startswith("test_")
+        or bool(_TEST_FILE_SUFFIX_RE.search(filename))
+    )
+
+
+def finding_test_source_scope(path: str) -> str:
+    """Normalize conventional test/source counterparts to one file scope."""
+    parts = [
+        part for part in _normalize_path(path).split("/") if part and part not in _TEST_PATH_PARTS and part != "src"
+    ]
+    if not parts:
+        return ""
+    filename = _TEST_FILE_MARKER_RE.sub(".", parts[-1])
+    if filename.startswith("test_"):
+        filename = filename.removeprefix("test_")
+    parts[-1] = _TEST_FILE_SUFFIX_RE.sub("", filename, count=1)
+    return "/".join(parts)
 
 
 def _finding_subjects_are_duplicates(left: Finding, right: Finding) -> bool:
@@ -519,11 +577,11 @@ def _finding_subjects_are_duplicates(left: Finding, right: Finding) -> bool:
 def _verification_subject_identity(finding: Finding) -> tuple[object, ...]:
     return (
         finding.title,
-        finding.file,
+        _normalized_finding_file(finding),
         finding.line,
         finding.failure_mode,
         finding.evidence,
-        finding.context_pack_id,
+        _normalized_context_pack_id(finding.context_pack_id),
     )
 
 
@@ -539,7 +597,11 @@ def _cross_pack_verification_identity(finding: Finding) -> tuple[object, ...]:
 def _verification_scope_is_compatible(left: Finding, right: Finding) -> bool:
     if _normalized_finding_file(left) != _normalized_finding_file(right):
         return False
-    if left.context_pack_id and right.context_pack_id and left.context_pack_id != right.context_pack_id:
+    if (
+        left.context_pack_id
+        and right.context_pack_id
+        and _normalized_context_pack_id(left.context_pack_id) != _normalized_context_pack_id(right.context_pack_id)
+    ):
         return False
     if left.line is None or right.line is None:
         return left.line == right.line
@@ -547,7 +609,14 @@ def _verification_scope_is_compatible(left: Finding, right: Finding) -> bool:
 
 
 def _normalized_finding_file(finding: Finding) -> str:
-    return finding.file.replace("\\", "/")
+    return _normalize_path(finding.file)
+
+
+def _normalized_context_pack_id(value: str) -> str:
+    prefix, separator, suffix = value.strip().partition("#")
+    if not separator:
+        return value.strip()
+    return f"{_normalize_path(prefix)}#{suffix}"
 
 
 def context_pack_fingerprint(pack: ContextPack | None) -> str:
