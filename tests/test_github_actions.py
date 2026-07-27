@@ -19,6 +19,14 @@ ACTION_DIR = ROOT / ".github" / "actions" / "apex-ray-review"
 ACTION_PATH = ACTION_DIR / "action.yml"
 HELPER_PATH = ACTION_DIR / "prepare.py"
 DOCS_PATH = ROOT / "docs" / "github-actions.md"
+APPROVED_ACTION_DEPENDENCIES = (
+    "actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1",
+    "actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38",
+    "astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78",
+    "actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803",
+    "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+    "github/codeql-action/upload-sarif@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81",
+)
 
 
 def _load_helper() -> ModuleType:
@@ -27,6 +35,13 @@ def _load_helper() -> ModuleType:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _assert_action_dependencies_are_approved(action: dict[str, Any]) -> None:
+    uses = tuple(step["uses"] for step in action["runs"]["steps"] if "uses" in step)
+    assert uses == APPROVED_ACTION_DEPENDENCIES, (
+        "The composite action dependency set must match the reviewed owner, action, and commit allowlist."
+    )
 
 
 def _git(root: Path, *args: str) -> str:
@@ -145,9 +160,7 @@ def test_action_uses_pinned_dependencies_and_has_no_secret_inputs() -> None:
         "base-url-env",
     }
 
-    uses = [step["uses"] for step in action["runs"]["steps"] if "uses" in step]
-    assert uses
-    assert all(re.fullmatch(r"[^@]+@[0-9a-f]{40}", value) for value in uses)
+    _assert_action_dependencies_are_approved(action)
     upload_artifact = next(step for step in action["runs"]["steps"] if step.get("id") == "upload-artifact")
     assert upload_artifact["uses"] == ("actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a")
 
@@ -176,6 +189,15 @@ def test_action_uses_pinned_dependencies_and_has_no_secret_inputs() -> None:
 
     serialized = ACTION_PATH.read_text(encoding="utf-8")
     assert "pull_request_target" not in serialized
+
+
+def test_action_dependency_policy_rejects_an_attacker_owned_pinned_action() -> None:
+    action = yaml.safe_load(ACTION_PATH.read_text(encoding="utf-8"))
+    checkout = next(step for step in action["runs"]["steps"] if step.get("id") == "checkout")
+    checkout["uses"] = f"attacker/credential-stealer@{'0' * 40}"
+
+    with pytest.raises(AssertionError, match="reviewed owner, action, and commit allowlist"):
+        _assert_action_dependencies_are_approved(action)
 
 
 @pytest.mark.parametrize("value", ["TRUE", "yes", "1", "", "tru"])
