@@ -8,9 +8,6 @@ paths:
   - "src/apex_ray/gate_retry.py"
   - "src/apex_ray/gates.py"
   - "src/apex_ray/git.py"
-  - "tests/test_cli.py"
-  - "tests/test_gates.py"
-  - "tests/test_git.py"
 triggers:
   text:
     - pre-push

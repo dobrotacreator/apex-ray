@@ -4,6 +4,11 @@ import path from "node:path";
 import ts from "typescript";
 
 import {
+  ANALYZER_METADATA_BYTE_LIMIT,
+  ANALYZER_METADATA_FILE_LIMIT,
+  ANALYZER_PACKAGE_INFO_LIMIT,
+  ANALYZER_SOURCE_BYTE_LIMIT,
+  ANALYZER_SOURCE_FILE_LIMIT,
   FOCUSED_PROGRAM_CHANGED_FILE_THRESHOLD,
   FOCUSED_PROGRAM_DECLARATION_ROOT_LIMIT,
 } from "./constants.js";
@@ -11,26 +16,56 @@ import {
   packageExportTargetsForKey,
   readPackageInfo,
 } from "./package-info.js";
+import { createBoundedExpansionBudget } from "./bounded-expansion.js";
 import type { Args, PackageInfo, ProgramContext } from "./types.js";
 import { loadRepoFileInventory, type RepoFileInventory } from "./workspace/inventory.js";
 import {
   canonicalPathKey,
   formatDiagnostic,
+  inspectStableFile,
   isDeclarationFileName,
   isInsideRepo,
   isSameOrInsideRepo,
   normalizeRelPath,
-  readStableUtf8File,
+  readStableFile,
   scriptKindForPath,
   uniquePaths,
   walk,
 } from "./utils.js";
 
-const workspacePackageInfoCache = new Map<string, PackageInfo | null>();
+interface WorkspacePackageInfoCacheEntry {
+  packageInfo: PackageInfo | null;
+  fileName: string | null;
+  retainedBytes: number;
+}
+const workspacePackageInfoCache = new Map<
+  string,
+  WorkspacePackageInfoCacheEntry
+>();
+let workspacePackageInfoCacheBytes = 0;
+interface BoundedWorkspacePackageIndex {
+  packages: Map<string, PackageInfo>;
+  retainedPackages: Array<{
+    fileName: string;
+    fileBytes: number;
+  }>;
+}
 const boundedWorkspacePackageIndexCache = new WeakMap<
   RepoFileInventory,
-  Map<string, PackageInfo>
+  BoundedWorkspacePackageIndex
 >();
+const SUPPLEMENTAL_DECLARATION_ROOT_BYTE_LIMIT = 512 * 1024;
+const SUPPLEMENTAL_DECLARATION_EXCLUDED_DIRECTORIES = new Set([
+  ".next",
+  ".pnpm",
+  ".turbo",
+  "build",
+  "coverage",
+  "dist",
+  "generated",
+  "node_modules",
+  "out",
+]);
 type ConfigReadResult = ReturnType<typeof ts.readConfigFile>;
 
 interface InternalFileMatcherPatterns {
@@ -48,6 +83,40 @@ interface TypeScriptFileMatcherApi {
   ): InternalFileMatcherPatterns;
 }
 
+interface SupplementalDeclarationSelectionOptions {
+  isEligible?: (fileName: string) => boolean;
+  markPartial?: () => void;
+  shouldStop?: () => boolean;
+}
+
+interface ProgramSourceBudget {
+  acceptedFileInstances: number;
+  acceptedBytes: number;
+  reservedChangedFileBytesByKey: Map<string, number>;
+  claimedReservedChangedKeys: Set<string>;
+  warningEmitted: boolean;
+  warnings: string[];
+  inventory: RepoFileInventory | null;
+}
+
+interface ProgramSourceScope {
+  acceptedFileBytesByKey: Map<string, number>;
+  changedFileKeys: Set<string>;
+}
+
+interface CompilerMetadataBudget {
+  retainedBytesByKey: Map<string, number>;
+  lookupKeys: Set<string>;
+  packageKeys: Set<string>;
+  retainedBytes: number;
+  rejectionCount: number;
+  reserveLookup(fileName: string): boolean;
+  reserveFile(fileName: string, fileBytes: number): boolean;
+  reservePackage(fileName: string): boolean;
+  reportFileLimit(fileName: string, fileBytes: number): void;
+  reportExpansionLimit(): void;
+}
+
 export function createProgramContexts(
   args: Args,
   warnings: string[],
@@ -56,6 +125,10 @@ export function createProgramContexts(
 ): Map<string, ProgramContext> {
   const packageBoundaryCache = new Map<string, string>();
   const configReadCache = new Map<string, ConfigReadResult>();
+  const metadataBudget = createCompilerMetadataBudget(
+    warnings,
+    inventory,
+  );
   const groups = new Map<
     string,
     {
@@ -77,6 +150,7 @@ export function createProgramContexts(
           tsconfigPath,
           tsconfigPath,
           inventory,
+          metadataBudget,
         );
       configReadCache.set(tsconfigPath, configReadResult);
       if (configReadResult.error) {
@@ -99,6 +173,13 @@ export function createProgramContexts(
   }
 
   const contextsByFile = new Map<string, ProgramContext>();
+  const sourceBudget = createProgramSourceBudget(warnings, inventory);
+  reserveChangedProgramSources(
+    args.repo,
+    args.changed,
+    sourceBudget,
+    inventory,
+  );
   const declarationRootsByPackage = inventory
     ? indexDeclarationRootsByPackage(
         args.repo,
@@ -126,6 +207,8 @@ export function createProgramContexts(
         inventory,
         noConfigDeclarationRoots,
         shouldStop,
+        sourceBudget,
+        metadataBudget,
       );
       context = {
         program,
@@ -193,6 +276,7 @@ function readStableConfigFile(
   configPath: string,
   primaryConfigPath: string,
   inventory: RepoFileInventory | null,
+  metadataBudget?: CompilerMetadataBudget,
 ): ConfigReadResult {
   return ts.readConfigFile(configPath, (fileName) =>
     readPermittedConfigFile(
@@ -200,6 +284,7 @@ function readStableConfigFile(
       fileName,
       primaryConfigPath,
       inventory,
+      metadataBudget,
     ),
   );
 }
@@ -209,9 +294,10 @@ function readPermittedConfigFile(
   fileName: string,
   primaryConfigPath: string,
   inventory: RepoFileInventory | null,
+  metadataBudget?: CompilerMetadataBudget,
 ): string | undefined {
   return (
-    readStableUtf8File(
+    readStableFile(
       fileName,
       (resolvedPath, realPath) =>
         isConfigFilePermitted(
@@ -221,6 +307,16 @@ function readPermittedConfigFile(
           primaryConfigPath,
           inventory,
         ),
+      (identity) => {
+        if (identity.size > ANALYZER_METADATA_BYTE_LIMIT) {
+          metadataBudget?.reportFileLimit(fileName, identity.size);
+          return false;
+        }
+        return (
+          metadataBudget?.reserveFile(fileName, identity.size) ??
+          true
+        );
+      },
     )?.text ?? undefined
   );
 }
@@ -275,25 +371,106 @@ function markConfigurationPartial(
   if (!warnings.includes(reason)) warnings.push(reason);
 }
 
+function createCompilerMetadataBudget(
+  warnings: string[],
+  inventory: RepoFileInventory | null,
+): CompilerMetadataBudget {
+  const budget = {
+    retainedBytesByKey: new Map<string, number>(),
+    lookupKeys: new Set<string>(),
+    packageKeys: new Set<string>(),
+    retainedBytes: 0,
+    rejectionCount: 0,
+  } as CompilerMetadataBudget;
+  const reportLimit = (): void => {
+    budget.rejectionCount += 1;
+    if (inventory) inventory.configurationPartial = true;
+    const reason =
+      `TypeScript compiler metadata byte safety limit of ${ANALYZER_METADATA_BYTE_LIMIT} per file and in aggregate, ` +
+      `or entry safety limit of ${ANALYZER_METADATA_FILE_LIMIT} files and ${ANALYZER_PACKAGE_INFO_LIMIT} package objects, was reached; ` +
+      "configuration context is partial.";
+    if (!warnings.includes(reason)) warnings.push(reason);
+  };
+  const reportExpansionLimit = (): void => {
+    budget.rejectionCount += 1;
+    if (inventory) inventory.configurationPartial = true;
+    const reason =
+      "TypeScript package export target expansion safety limit was reached; configuration context is partial.";
+    if (!warnings.includes(reason)) warnings.push(reason);
+  };
+  budget.reserveLookup = (fileName) => {
+    const key = canonicalPathKey(path.resolve(fileName));
+    if (budget.lookupKeys.has(key)) return true;
+    if (budget.lookupKeys.size >= ANALYZER_METADATA_FILE_LIMIT) {
+      reportLimit();
+      return false;
+    }
+    budget.lookupKeys.add(key);
+    return true;
+  };
+  budget.reserveFile = (fileName, fileBytes) => {
+    const key = canonicalPathKey(path.resolve(fileName));
+    const previousBytes = budget.retainedBytesByKey.get(key);
+    if (previousBytes !== undefined && fileBytes <= previousBytes) {
+      return true;
+    }
+    if (!budget.reserveLookup(fileName)) return false;
+    const additionalBytes = fileBytes - (previousBytes ?? 0);
+    if (
+      fileBytes > ANALYZER_METADATA_BYTE_LIMIT ||
+      additionalBytes >
+        ANALYZER_METADATA_BYTE_LIMIT - budget.retainedBytes
+    ) {
+      reportLimit();
+      return false;
+    }
+    budget.retainedBytesByKey.set(key, fileBytes);
+    budget.retainedBytes += additionalBytes;
+    return true;
+  };
+  budget.reservePackage = (fileName) => {
+    const key = canonicalPathKey(path.resolve(fileName));
+    if (budget.packageKeys.has(key)) return true;
+    if (budget.packageKeys.size >= ANALYZER_PACKAGE_INFO_LIMIT) {
+      reportLimit();
+      return false;
+    }
+    budget.packageKeys.add(key);
+    return true;
+  };
+  budget.reportFileLimit = () => {
+    reportLimit();
+  };
+  budget.reportExpansionLimit = () => {
+    reportExpansionLimit();
+  };
+  return budget;
+}
+
 function createInventoryParseConfigHost(
   repo: string,
   primaryConfigPath: string,
   inventory: RepoFileInventory,
   shouldStop: () => boolean,
+  metadataBudget?: CompilerMetadataBudget,
 ): ts.ParseConfigHost {
   const readCache = new Map<string, string | undefined>();
   const readFile = (fileName: string): string | undefined => {
     if (shouldStop()) return undefined;
     const key = canonicalPathKey(fileName);
     if (!readCache.has(key)) {
+      if (metadataBudget && !metadataBudget.reserveLookup(fileName)) {
+        readCache.set(key, undefined);
+        return undefined;
+      }
       const text = readPermittedConfigFile(
         repo,
         fileName,
         primaryConfigPath,
         inventory,
+        metadataBudget,
       );
-      readCache.set(
-        key,
+      const normalizedText =
         text === undefined
           ? undefined
           : normalizeTsConfigFileText(
@@ -302,7 +479,20 @@ function createInventoryParseConfigHost(
               text,
               inventory,
               shouldStop,
-            ),
+              metadataBudget,
+            );
+      const retainedText =
+        normalizedText === undefined ||
+        !metadataBudget ||
+        metadataBudget.reserveFile(
+          fileName,
+          Buffer.byteLength(normalizedText, "utf8"),
+        )
+          ? normalizedText
+          : undefined;
+      readCache.set(
+        key,
+        retainedText,
       );
     }
     return readCache.get(key);
@@ -337,6 +527,7 @@ export function normalizeTsConfigFileText(
   text: string,
   inventory: RepoFileInventory | null = null,
   shouldStop: () => boolean = () => false,
+  metadataBudget?: CompilerMetadataBudget,
 ): string {
   if (
     shouldStop() ||
@@ -352,6 +543,7 @@ export function normalizeTsConfigFileText(
     parsed.config,
     inventory,
     shouldStop,
+    metadataBudget,
   );
   return normalized === parsed.config ? text : JSON.stringify(normalized);
 }
@@ -434,11 +626,19 @@ function createProgram(
   inventory: RepoFileInventory | null,
   noConfigDeclarationRoots: string[] | null,
   shouldStop: () => boolean,
+  sourceBudget: ProgramSourceBudget,
+  metadataBudget: CompilerMetadataBudget,
 ): ts.Program {
   if (configPath) {
     const readResult =
       configReadResult ??
-      readStableConfigFile(repo, configPath, configPath, inventory);
+      readStableConfigFile(
+        repo,
+        configPath,
+        configPath,
+        inventory,
+        metadataBudget,
+      );
     if (readResult.error) {
       warnings.push(formatDiagnostic(readResult.error));
       markConfigurationPartial(inventory, warnings);
@@ -450,6 +650,7 @@ function createProgram(
           readResult.config,
           inventory,
           shouldStop,
+          metadataBudget,
         ),
         inventory
           ? createInventoryParseConfigHost(
@@ -457,6 +658,7 @@ function createProgram(
               configPath,
               inventory,
               shouldStop,
+              metadataBudget,
             )
           : ts.sys,
         path.dirname(configPath),
@@ -482,6 +684,14 @@ function createProgram(
           permittedDeclarationRoots,
           changedRootNames,
           warnings,
+          {
+            isEligible: (fileName) =>
+              isEligibleSupplementalDeclarationRoot(repo, fileName),
+            markPartial: () => {
+              if (inventory) inventory.partial = true;
+            },
+            shouldStop,
+          },
         );
         warnings.push(
           `Large TypeScript change set (${focusedProgramFileCount} files); using focused program roots to keep analysis bounded.`,
@@ -492,14 +702,18 @@ function createProgram(
           reviewOptions,
           inventory,
           shouldStop,
+          sourceBudget,
+          createProgramSourceScope(sourceBudget, changedRootNames),
         );
       }
       return createInventoryBoundedProgram(
         repo,
-        uniquePaths([...permittedConfigRootNames, ...changedRootNames]),
+        uniquePaths([...changedRootNames, ...permittedConfigRootNames]),
         reviewOptions,
         inventory,
         shouldStop,
+        sourceBudget,
+        createProgramSourceScope(sourceBudget, changedRootNames),
       );
     }
   }
@@ -509,6 +723,14 @@ function createProgram(
     noConfigDeclarationRoots ?? inventory?.declarationAbsPaths ?? [],
     changedRootNames,
     warnings,
+    {
+      isEligible: (fileName) =>
+        isEligibleSupplementalDeclarationRoot(repo, fileName),
+      markPartial: () => {
+        if (inventory) inventory.partial = true;
+      },
+      shouldStop,
+    },
   );
   warnings.push(
     selectedDeclarationRoots.length
@@ -529,6 +751,8 @@ function createProgram(
     options,
     inventory,
     shouldStop,
+    sourceBudget,
+    createProgramSourceScope(sourceBudget, changedRootNames),
   );
 }
 
@@ -538,27 +762,9 @@ function createInventoryBoundedProgram(
   options: ts.CompilerOptions,
   inventory: RepoFileInventory | null,
   shouldStop: () => boolean,
+  sourceBudget: ProgramSourceBudget,
+  sourceScope: ProgramSourceScope,
 ): ts.Program {
-  if (!inventory) {
-    const host = ts.createCompilerHost(options);
-    const originalGetSourceFile = host.getSourceFile.bind(host);
-    host.getSourceFile = (
-      fileName,
-      languageVersionOrOptions,
-      onError,
-      shouldCreateNewSourceFile,
-    ) =>
-      shouldStop()
-        ? undefined
-        : originalGetSourceFile(
-            fileName,
-            languageVersionOrOptions,
-            onError,
-            shouldCreateNewSourceFile,
-          );
-    return ts.createProgram({ rootNames, options, host });
-  }
-
   const host = ts.createCompilerHost(options);
   const defaultLibraryRoot = path.dirname(
     path.resolve(ts.getDefaultLibFilePath(options)),
@@ -572,6 +778,7 @@ function createInventoryBoundedProgram(
     fs.realpathSync(repo),
   ];
   const isPermitted = (resolvedPath: string, realPath: string): boolean =>
+    inventory === null ||
     isCompilerFilePermitted(
       repoRoots,
       resolvedPath,
@@ -581,7 +788,18 @@ function createInventoryBoundedProgram(
     );
   host.readFile = (fileName) => {
     if (shouldStop()) return undefined;
-    return readStableUtf8File(fileName, isPermitted)?.text ?? undefined;
+    return readStableFile(
+      fileName,
+      isPermitted,
+      (identity) =>
+        reserveProgramSourceFile(
+          fileName,
+          identity.size,
+          sourceBudget,
+          sourceScope,
+          defaultLibraryRoots,
+        ),
+    )?.text ?? undefined;
   };
   host.getSourceFile = (
     fileName,
@@ -590,7 +808,18 @@ function createInventoryBoundedProgram(
     _shouldCreateNewSourceFile,
   ) => {
     if (shouldStop()) return undefined;
-    const snapshot = readStableUtf8File(fileName, isPermitted);
+    const snapshot = readStableFile(
+      fileName,
+      isPermitted,
+      (identity) =>
+        reserveProgramSourceFile(
+          fileName,
+          identity.size,
+          sourceBudget,
+          sourceScope,
+          defaultLibraryRoots,
+        ),
+    );
     if (snapshot?.text === null || snapshot?.text === undefined) return undefined;
     return ts.createSourceFile(
       fileName,
@@ -600,6 +829,164 @@ function createInventoryBoundedProgram(
     );
   };
   return ts.createProgram({ rootNames, options, host });
+}
+
+function createProgramSourceBudget(
+  warnings: string[],
+  inventory: RepoFileInventory | null,
+): ProgramSourceBudget {
+  return {
+    acceptedFileInstances: 0,
+    acceptedBytes: 0,
+    reservedChangedFileBytesByKey: new Map(),
+    claimedReservedChangedKeys: new Set(),
+    warningEmitted: false,
+    warnings,
+    inventory,
+  };
+}
+
+function createProgramSourceScope(
+  _budget: ProgramSourceBudget,
+  changedRootNames: string[],
+): ProgramSourceScope {
+  return {
+    acceptedFileBytesByKey: new Map(),
+    changedFileKeys: new Set(
+      changedRootNames.map((fileName) =>
+        canonicalPathKey(path.resolve(fileName)),
+      ),
+    ),
+  };
+}
+
+function reserveChangedProgramSources(
+  repo: string,
+  changed: string[],
+  budget: ProgramSourceBudget,
+  inventory: RepoFileInventory | null,
+): void {
+  const repoRoot = path.resolve(repo);
+  let realRepoRoot: string;
+  try {
+    realRepoRoot = fs.realpathSync(repoRoot);
+  } catch {
+    return;
+  }
+  const isPermitted = (resolvedPath: string, realPath: string): boolean =>
+    isInsideRepo(repoRoot, resolvedPath) &&
+    isInsideRepo(realRepoRoot, realPath) &&
+    (
+      inventory === null ||
+      (
+        inventory.pathKeys.has(canonicalPathKey(resolvedPath)) &&
+        inventory.pathKeys.has(canonicalPathKey(realPath))
+      )
+    );
+  for (const changedFile of changed) {
+    const absPath = path.resolve(repoRoot, changedFile);
+    const fileKey = canonicalPathKey(absPath);
+    if (budget.reservedChangedFileBytesByKey.has(fileKey)) continue;
+    const inspection = inspectStableFile(absPath, isPermitted);
+    if (!inspection) continue;
+    if (!reserveProgramSourceInstance(inspection.identity.size, budget)) {
+      continue;
+    }
+    budget.reservedChangedFileBytesByKey.set(
+      fileKey,
+      inspection.identity.size,
+    );
+  }
+}
+
+function reserveProgramSourceFile(
+  fileName: string,
+  fileBytes: number,
+  budget: ProgramSourceBudget,
+  scope: ProgramSourceScope,
+  defaultLibraryRoots: string[],
+): boolean {
+  const resolvedPath = path.resolve(fileName);
+  const fileKey = canonicalPathKey(resolvedPath);
+  if (
+    defaultLibraryRoots.some((libraryRoot) =>
+      isSameOrInsideRepo(libraryRoot, resolvedPath),
+    )
+  ) {
+    return true;
+  }
+  const previouslyAcceptedBytes = scope.acceptedFileBytesByKey.get(fileKey);
+  if (
+    previouslyAcceptedBytes !== undefined &&
+    fileBytes <= previouslyAcceptedBytes
+  ) {
+    return true;
+  }
+  if (previouslyAcceptedBytes !== undefined) {
+    const additionalBytes = fileBytes - previouslyAcceptedBytes;
+    if (
+      additionalBytes >
+      ANALYZER_SOURCE_BYTE_LIMIT - budget.acceptedBytes
+    ) {
+      markProgramSourceBudgetReached(budget);
+      return false;
+    }
+    budget.acceptedBytes += additionalBytes;
+    scope.acceptedFileBytesByKey.set(fileKey, fileBytes);
+    return true;
+  }
+  const reservedChangedBytes =
+    scope.changedFileKeys.has(fileKey) &&
+    !budget.claimedReservedChangedKeys.has(fileKey)
+      ? budget.reservedChangedFileBytesByKey.get(fileKey)
+      : undefined;
+  if (reservedChangedBytes !== undefined) {
+    const additionalBytes = Math.max(0, fileBytes - reservedChangedBytes);
+    if (
+      additionalBytes > 0 &&
+      additionalBytes > ANALYZER_SOURCE_BYTE_LIMIT - budget.acceptedBytes
+    ) {
+      markProgramSourceBudgetReached(budget);
+      return false;
+    }
+    budget.acceptedBytes += additionalBytes;
+    budget.claimedReservedChangedKeys.add(fileKey);
+    scope.acceptedFileBytesByKey.set(fileKey, fileBytes);
+    return true;
+  }
+
+  if (!reserveProgramSourceInstance(fileBytes, budget)) {
+    return false;
+  }
+  scope.acceptedFileBytesByKey.set(fileKey, fileBytes);
+  return true;
+}
+
+function reserveProgramSourceInstance(
+  fileBytes: number,
+  budget: ProgramSourceBudget,
+): boolean {
+  if (
+    budget.acceptedFileInstances >= ANALYZER_SOURCE_FILE_LIMIT ||
+    fileBytes > ANALYZER_SOURCE_BYTE_LIMIT - budget.acceptedBytes
+  ) {
+    markProgramSourceBudgetReached(budget);
+    return false;
+  }
+  budget.acceptedFileInstances += 1;
+  budget.acceptedBytes += fileBytes;
+  return true;
+}
+
+function markProgramSourceBudgetReached(
+  budget: ProgramSourceBudget,
+): void {
+  if (budget.warningEmitted) return;
+  budget.warningEmitted = true;
+  if (budget.inventory) budget.inventory.partial = true;
+  budget.warnings.push(
+    `TypeScript program source budget reached the safety limit of ${ANALYZER_SOURCE_FILE_LIMIT} retained source instances or ${ANALYZER_SOURCE_BYTE_LIMIT} bytes across the analyzer shard; compiler context is partial.`,
+  );
 }
 
 function isCompilerFilePermitted(
@@ -775,12 +1162,15 @@ export function selectSupplementalDeclarationRoots(
   declarationRoots: string[],
   changedRoots: string[],
   warnings: string[],
+  options: SupplementalDeclarationSelectionOptions = {},
 ): string[] {
   const changedKeys = new Set(changedRoots.map(canonicalPathKey));
   const seenKeys = new Set<string>();
   const selected: DeclarationRootCandidate[] = [];
   let supplementalRootCount = 0;
+  let ineligibleRootCount = 0;
   for (const fileName of declarationRoots) {
+    if (options.shouldStop?.()) break;
     const resolvedKey = normalizeRelPath(path.resolve(fileName));
     const lowerKey = resolvedKey.toLowerCase();
     const canonicalKey = ts.sys.useCaseSensitiveFileNames
@@ -788,6 +1178,10 @@ export function selectSupplementalDeclarationRoots(
       : lowerKey;
     if (changedKeys.has(canonicalKey) || seenKeys.has(canonicalKey)) continue;
     seenKeys.add(canonicalKey);
+    if (options.isEligible && !options.isEligible(fileName)) {
+      ineligibleRootCount += 1;
+      continue;
+    }
     supplementalRootCount += 1;
 
     const candidate: DeclarationRootCandidate = {
@@ -811,11 +1205,55 @@ export function selectSupplementalDeclarationRoots(
   }
 
   if (supplementalRootCount > FOCUSED_PROGRAM_DECLARATION_ROOT_LIMIT) {
+    options.markPartial?.();
     warnings.push(
       `TypeScript declaration roots capped at ${FOCUSED_PROGRAM_DECLARATION_ROOT_LIMIT} of ${supplementalRootCount}; ambient declaration coverage is partial.`,
     );
   }
+  if (ineligibleRootCount > 0) {
+    options.markPartial?.();
+    warnings.push(
+      `TypeScript skipped ${ineligibleRootCount} supplemental declaration root${ineligibleRootCount === 1 ? "" : "s"} outside focused size/path policies; ambient declaration coverage is partial.`,
+    );
+  }
   return selected.map((candidate) => candidate.fileName);
+}
+
+function isEligibleSupplementalDeclarationRoot(
+  repo: string,
+  fileName: string,
+): boolean {
+  const repoRoot = path.resolve(repo);
+  const resolvedPath = path.resolve(fileName);
+  if (!isInsideRepo(repoRoot, resolvedPath)) return false;
+  const relativeParts = normalizeRelPath(path.relative(repoRoot, resolvedPath))
+    .split("/")
+    .map((part) => part.toLowerCase());
+  if (
+    relativeParts.some((part) =>
+      SUPPLEMENTAL_DECLARATION_EXCLUDED_DIRECTORIES.has(part),
+    )
+  ) {
+    return false;
+  }
+  const baseName = path.basename(resolvedPath).toLowerCase();
+  if (
+    baseName.includes(".generated.") ||
+    baseName.includes(".min.") ||
+    baseName.startsWith("generated.")
+  ) {
+    return false;
+  }
+  try {
+    const fileStat = fs.lstatSync(resolvedPath);
+    return (
+      fileStat.isFile() &&
+      !fileStat.isSymbolicLink() &&
+      fileStat.size <= SUPPLEMENTAL_DECLARATION_ROOT_BYTE_LIMIT
+    );
+  } catch {
+    return false;
+  }
 }
 
 function insertDeclarationRootCandidate(
@@ -858,8 +1296,11 @@ export function normalizeTsConfigExtends(
   config: unknown,
   inventory: RepoFileInventory | null = null,
   shouldStop: () => boolean = () => false,
+  metadataBudget?: CompilerMetadataBudget,
 ): unknown {
   if (!isRecord(config)) return config;
+  const activeBudget =
+    metadataBudget ?? createCompilerMetadataBudget([], inventory);
   const extendsValue = config.extends;
   if (typeof extendsValue === "string") {
     const resolvedExtends = resolveTsConfigExtends(
@@ -868,6 +1309,7 @@ export function normalizeTsConfigExtends(
       extendsValue,
       inventory,
       shouldStop,
+      activeBudget,
     );
     if (resolvedExtends === extendsValue) return config;
     return {
@@ -885,6 +1327,7 @@ export function normalizeTsConfigExtends(
         value,
         inventory,
         shouldStop,
+        activeBudget,
       );
       if (resolved !== value) changed = true;
       return resolved;
@@ -904,6 +1347,7 @@ function resolveTsConfigExtends(
   extendsValue: string,
   inventory: RepoFileInventory | null,
   shouldStop: () => boolean,
+  metadataBudget?: CompilerMetadataBudget,
 ): string {
   if (extendsValue.startsWith(".") || path.isAbsolute(extendsValue)) return extendsValue;
 
@@ -915,6 +1359,7 @@ function resolveTsConfigExtends(
     parsed.packageName,
     inventory,
     shouldStop,
+    metadataBudget,
   );
   if (!packageInfo) return extendsValue;
 
@@ -923,14 +1368,20 @@ function resolveTsConfigExtends(
       packageInfo.exports !== undefined &&
       packageInfo.exports !== null
     ) {
+      const expansionBudget = createBoundedExpansionBudget();
+      const targets = packageExportTargetsForKey(
+        packageInfo.exports,
+        `./${parsed.subpath}`,
+        expansionBudget,
+      );
+      if (expansionBudget.limited) {
+        metadataBudget?.reportExpansionLimit();
+      }
       return (
         resolvePackageConfigTarget(
           repo,
           packageInfo,
-          packageExportTargetsForKey(
-            packageInfo.exports,
-            `./${parsed.subpath}`,
-          ),
+          targets,
           inventory,
           true,
         ) ?? extendsValue
@@ -959,11 +1410,20 @@ function resolveTsConfigExtends(
     packageInfo.exports !== undefined &&
     packageInfo.exports !== null
   ) {
+    const expansionBudget = createBoundedExpansionBudget();
+    const targets = packageExportTargetsForKey(
+      packageInfo.exports,
+      ".",
+      expansionBudget,
+    );
+    if (expansionBudget.limited) {
+      metadataBudget?.reportExpansionLimit();
+    }
     return (
       resolvePackageConfigTarget(
         repo,
         packageInfo,
-        packageExportTargetsForKey(packageInfo.exports, "."),
+        targets,
         inventory,
         true,
       ) ?? extendsValue
@@ -1056,15 +1516,40 @@ function findWorkspacePackageInfo(
   packageName: string,
   inventory: RepoFileInventory | null,
   shouldStop: () => boolean,
+  metadataBudget?: CompilerMetadataBudget,
 ): PackageInfo | null {
   const repoRoot = path.resolve(repo);
+  const activeBudget =
+    metadataBudget ?? createCompilerMetadataBudget([], inventory);
   if (inventory) {
-    let packageIndex = boundedWorkspacePackageIndexCache.get(inventory);
-    if (!packageIndex) {
+    const cachedIndex = boundedWorkspacePackageIndexCache.get(inventory);
+    if (cachedIndex) {
+      for (const retainedPackage of cachedIndex.retainedPackages) {
+        if (
+          !activeBudget.reserveFile(
+            retainedPackage.fileName,
+            retainedPackage.fileBytes,
+          ) ||
+          !activeBudget.reservePackage(retainedPackage.fileName)
+        ) {
+          return null;
+        }
+      }
+      return cachedIndex.packages.get(packageName) ?? null;
+    }
+    {
       const realRepoRoot = fs.realpathSync(repoRoot);
       const builtIndex = new Map<string, PackageInfo>();
+      const retainedPackages: BoundedWorkspacePackageIndex["retainedPackages"] =
+        [];
+      let complete = true;
       for (const packageJsonPath of inventory.packageJsonAbsPaths) {
-        if (shouldStop()) return null;
+        if (shouldStop()) {
+          complete = false;
+          break;
+        }
+        const rejectionCount = activeBudget.rejectionCount;
+        let retainedFileBytes = 0;
         const packageInfo = readPackageInfo(
           path.dirname(packageJsonPath),
           packageJsonPath,
@@ -1073,37 +1558,141 @@ function findWorkspacePackageInfo(
             isInsideRepo(realRepoRoot, realPath) &&
             inventory.packagePathKeys.has(canonicalPathKey(resolvedPath)) &&
             inventory.packagePathKeys.has(canonicalPathKey(realPath)),
+          activeBudget.reportFileLimit,
+          (fileName, fileBytes) => {
+            const accepted = activeBudget.reserveFile(
+              fileName,
+              fileBytes,
+            );
+            if (accepted) retainedFileBytes = fileBytes;
+            return accepted;
+          },
+          activeBudget.reservePackage,
         );
+        if (activeBudget.rejectionCount !== rejectionCount) {
+          complete = false;
+          break;
+        }
         if (packageInfo && !builtIndex.has(packageInfo.name)) {
           builtIndex.set(packageInfo.name, packageInfo);
+          retainedPackages.push({
+            fileName: packageJsonPath,
+            fileBytes: retainedFileBytes,
+          });
         }
       }
-      packageIndex = builtIndex;
-      boundedWorkspacePackageIndexCache.set(inventory, packageIndex);
+      if (complete) {
+        boundedWorkspacePackageIndexCache.set(inventory, {
+          packages: builtIndex,
+          retainedPackages,
+        });
+      }
+      return builtIndex.get(packageName) ?? null;
     }
-    return packageIndex.get(packageName) ?? null;
   }
 
   const cacheKey = `${repoRoot}\0${packageName}`;
-  if (workspacePackageInfoCache.has(cacheKey)) {
-    return workspacePackageInfoCache.get(cacheKey) ?? null;
+  const cachedPackage = workspacePackageInfoCache.get(cacheKey);
+  if (cachedPackage) {
+    if (
+      cachedPackage.fileName &&
+      (
+        !activeBudget.reserveFile(
+          cachedPackage.fileName,
+          cachedPackage.retainedBytes,
+        ) ||
+        !activeBudget.reservePackage(cachedPackage.fileName)
+      )
+    ) {
+      return null;
+    }
+    workspacePackageInfoCache.delete(cacheKey);
+    workspacePackageInfoCache.set(cacheKey, cachedPackage);
+    return cachedPackage.packageInfo;
   }
   let found: PackageInfo | null = null;
+  let foundFileName: string | null = null;
+  let foundFileBytes = 0;
+  let complete = true;
   walk(repoRoot, (absPath) => {
     if (
       found ||
-      shouldStop() ||
       path.basename(absPath) !== "package.json"
     ) {
       return;
     }
-    const packageInfo = readPackageInfo(path.dirname(absPath), absPath);
+    if (shouldStop()) {
+      complete = false;
+      return;
+    }
+    const rejectionCount = activeBudget.rejectionCount;
+    const packageInfo = readPackageInfo(
+      path.dirname(absPath),
+      absPath,
+      undefined,
+      activeBudget.reportFileLimit,
+      (fileName, fileBytes) => {
+        const accepted = activeBudget.reserveFile(fileName, fileBytes);
+        if (accepted) foundFileBytes = fileBytes;
+        return accepted;
+      },
+      activeBudget.reservePackage,
+    );
+    if (activeBudget.rejectionCount !== rejectionCount) {
+      complete = false;
+      return;
+    }
     if (packageInfo?.name === packageName) {
       found = packageInfo;
+      foundFileName = absPath;
     }
   });
-  workspacePackageInfoCache.set(cacheKey, found);
+  if (complete) {
+    cacheWorkspacePackageInfo(
+      cacheKey,
+      found,
+      foundFileName,
+      found ? foundFileBytes : 0,
+    );
+  }
   return found;
+}
+
+function cacheWorkspacePackageInfo(
+  cacheKey: string,
+  packageInfo: PackageInfo | null,
+  fileName: string | null,
+  retainedBytes: number,
+): void {
+  const existing = workspacePackageInfoCache.get(cacheKey);
+  if (existing) {
+    workspacePackageInfoCacheBytes -= existing.retainedBytes;
+    workspacePackageInfoCache.delete(cacheKey);
+  }
+  while (
+    workspacePackageInfoCache.size >= ANALYZER_PACKAGE_INFO_LIMIT ||
+    retainedBytes >
+      ANALYZER_METADATA_BYTE_LIMIT - workspacePackageInfoCacheBytes
+  ) {
+    const oldestKey = workspacePackageInfoCache.keys().next().value;
+    if (typeof oldestKey !== "string") break;
+    const evicted = workspacePackageInfoCache.get(oldestKey);
+    workspacePackageInfoCache.delete(oldestKey);
+    workspacePackageInfoCacheBytes -= evicted?.retainedBytes ?? 0;
+  }
+  if (
+    workspacePackageInfoCache.size >= ANALYZER_PACKAGE_INFO_LIMIT ||
+    retainedBytes >
+      ANALYZER_METADATA_BYTE_LIMIT - workspacePackageInfoCacheBytes
+  ) {
+    return;
+  }
+  workspacePackageInfoCache.set(cacheKey, {
+    packageInfo,
+    fileName,
+    retainedBytes,
+  });
+  workspacePackageInfoCacheBytes += retainedBytes;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

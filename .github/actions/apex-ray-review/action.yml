@@ -133,9 +133,32 @@ runs:
       shell: bash
       env:
         APEX_RAY_ACTION_REF: ${{ github.action_ref }}
+        APEX_RAY_ACTION_PATH: ${{ github.action_path }}
+        APEX_RAY_WORKSPACE: ${{ github.workspace }}
       run: |
         if [[ ! "$APEX_RAY_ACTION_REF" =~ ^[0-9a-f]{40}$ ]]; then
           echo "::error title=Untrusted Apex Ray action source::Use the remote Apex Ray action pinned to a full 40-character commit SHA; local paths and mutable tags are not supported."
+          exit 1
+        fi
+
+        APEX_RAY_CANONICAL_ACTION_PATH="$(cd "$APEX_RAY_ACTION_PATH" 2>/dev/null && pwd -P)" || {
+          echo "::error title=Untrusted Apex Ray action source::Unable to resolve the Apex Ray action path."
+          exit 1
+        }
+        APEX_RAY_CANONICAL_SOURCE="$(cd "$APEX_RAY_CANONICAL_ACTION_PATH/../../.." 2>/dev/null && pwd -P)" || {
+          echo "::error title=Untrusted Apex Ray action source::Unable to resolve the Apex Ray action source root."
+          exit 1
+        }
+        APEX_RAY_CANONICAL_WORKSPACE="$(cd "$APEX_RAY_WORKSPACE" 2>/dev/null && pwd -P)" || {
+          echo "::error title=Untrusted Apex Ray action source::Unable to resolve GITHUB_WORKSPACE."
+          exit 1
+        }
+        if [[
+          "$APEX_RAY_CANONICAL_SOURCE" == "$APEX_RAY_CANONICAL_WORKSPACE"
+          || "$APEX_RAY_CANONICAL_SOURCE" == "$APEX_RAY_CANONICAL_WORKSPACE/"*
+          || "$APEX_RAY_CANONICAL_WORKSPACE" == "$APEX_RAY_CANONICAL_SOURCE/"*
+        ]]; then
+          echo "::error title=Untrusted Apex Ray action source::The Apex Ray action runtime must resolve outside GITHUB_WORKSPACE; use the remotely pinned action, not a local action path."
           exit 1
         fi
 
@@ -152,17 +175,6 @@ runs:
             exit 2
             ;;
         esac
-
-    - name: Checkout exact review head
-      id: checkout
-      if: ${{ inputs.checkout == 'true' }}
-      uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
-      with:
-        ref: ${{ github.event.pull_request.head.sha || github.sha }}
-        path: .apex-ray/repository
-        fetch-depth: 0
-        persist-credentials: false
-        show-progress: false
 
     - name: Set up Python
       uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
@@ -198,6 +210,17 @@ runs:
         )
         uv sync --locked --no-dev --no-install-project --project "$APEX_RAY_SOURCE"
 
+    - name: Checkout exact review head
+      id: checkout
+      if: ${{ inputs.checkout == 'true' }}
+      uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      with:
+        ref: ${{ github.event.pull_request.head.sha || github.sha }}
+        path: .apex-ray-review-${{ github.run_id }}-${{ github.run_attempt }}/repository
+        fetch-depth: 0
+        persist-credentials: false
+        show-progress: false
+
     - name: Prepare safe review plan
       id: prepare
       shell: bash
@@ -216,7 +239,7 @@ runs:
         INPUT_SARIF_OUTPUT: ${{ inputs.sarif-output }}
         INPUT_ARTIFACT_NAME: ${{ inputs.artifact-name }}
         INPUT_SARIF_CATEGORY: ${{ inputs.sarif-category }}
-        APEX_RAY_REPOSITORY_PATH: ${{ inputs.checkout == 'true' && format('{0}/.apex-ray/repository', github.workspace) || github.workspace }}
+        APEX_RAY_REPOSITORY_PATH: ${{ inputs.checkout == 'true' && format('{0}/.apex-ray-review-{1}-{2}/repository', github.workspace, github.run_id, github.run_attempt) || github.workspace }}
       run: uv run --locked --no-dev --no-sync --project "$GITHUB_ACTION_PATH/../../.." python -P -s "$GITHUB_ACTION_PATH/prepare.py" plan
 
     - name: Run Apex Ray review

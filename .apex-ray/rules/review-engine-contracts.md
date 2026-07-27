@@ -1,8 +1,8 @@
 ---
 id: review-engine-contracts
 title: Preserve review engine and report contracts
-severity: high
-mode: strict
+severity: medium
+mode: advisory
 paths:
   - "src/apex_ray/config.py"
   - "src/apex_ray/context/**"

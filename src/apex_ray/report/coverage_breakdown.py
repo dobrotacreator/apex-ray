@@ -93,7 +93,7 @@ def _build_slice_coverage(
     slice_order: list[str] = []
     packs_by_slice: dict[str, list[ContextPack]] = {}
     for pack in context_packs:
-        slice_name = _pack_review_slice(pack)
+        slice_name = pack_review_slice(pack)
         if slice_name not in packs_by_slice:
             packs_by_slice[slice_name] = []
             slice_order.append(slice_name)
@@ -126,7 +126,7 @@ def _build_slice_coverage(
     return summaries
 
 
-def _pack_review_slice(pack: ContextPack) -> str:
+def pack_review_slice(pack: ContextPack) -> str:
     if _is_high_risk_pack(pack):
         return "high_risk"
     if pack.file_kind in {FileKind.SCHEMA, FileKind.CONFIG, FileKind.MIGRATION, FileKind.DEPENDENCY}:
@@ -168,7 +168,11 @@ def _source_line_coverage_ratio(file_coverage: list[LLMFileCoverageSummary]) -> 
 
 
 def _is_high_risk_pack(pack: ContextPack) -> bool:
-    if any(str(signal.severity) in {"critical", "high"} for signal in pack.risk_signals):
+    if any(
+        str(signal.severity) in {"critical", "high"}
+        and not (pack.file_kind == FileKind.TEST and signal.source == "built_in" and signal.kind == "auth")
+        for signal in pack.risk_signals
+    ):
         return True
     if any(str(rule.mode) == "strict" for rule in pack.rule_matches):
         return True
@@ -189,8 +193,7 @@ def pack_residual_priority(
     rule_modes = Counter(str(rule.mode) for rule in pack.rule_matches)
     rule_severities = Counter(str(rule.severity) for rule in pack.rule_matches)
     if (
-        risk_by_severity.get("critical", 0)
-        or risk_by_severity.get("high", 0)
+        _is_high_risk_pack(pack)
         or rule_modes.get("strict", 0)
         or rule_severities.get("critical", 0)
         or rule_severities.get("high", 0)
@@ -198,6 +201,8 @@ def pack_residual_priority(
         return "p0"
     if (
         risk_by_severity.get("medium", 0)
+        or risk_by_severity.get("critical", 0)
+        or risk_by_severity.get("high", 0)
         or pack.file_kind in {FileKind.SOURCE, FileKind.SCHEMA, FileKind.MIGRATION, FileKind.CONFIG}
         or pack.stats.truncated
     ):

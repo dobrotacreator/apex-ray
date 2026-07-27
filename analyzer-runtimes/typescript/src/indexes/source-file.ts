@@ -2,6 +2,7 @@ import path from "node:path";
 
 import ts from "typescript";
 
+import type { IndexCollectionControl } from "./collection.js";
 import { collectDiInjectionIndex, collectDiProviderIndex } from "./di.js";
 import { collectExportIndex, collectImportIndex } from "./import-export.js";
 import {
@@ -35,7 +36,10 @@ export function isAnalyzableSourceFile(filePath: string): boolean {
   return isTypeScriptOrJavaScriptFileName(normalized) && !isDeclarationFileName(normalized);
 }
 
-export function indexSourceFile(input: SourceFileIndexInput): RepoFileIndexEntry {
+export function indexSourceFile(
+  input: SourceFileIndexInput,
+  control?: IndexCollectionControl,
+): RepoFileIndexEntry {
   const source = ts.createSourceFile(input.absPath, input.text, ts.ScriptTarget.ES2022, true, scriptKindForPath(input.absPath));
   return {
     absPath: path.resolve(input.absPath),
@@ -46,13 +50,13 @@ export function indexSourceFile(input: SourceFileIndexInput): RepoFileIndexEntry
     size: input.size,
     mtimeMs: input.mtimeMs,
     ctimeMs: input.ctimeMs,
-    imports: collectImportIndex(input.repo, source),
-    exports: collectExportIndex(input.repo, source),
-    identifiers: collectIdentifierIndex(input.repo, source),
-    receivers: collectReceiverIndex(input.repo, source),
-    typeAliases: collectTypeAliasIndex(source),
-    classHeritages: collectClassHeritageIndex(source),
-    diProviders: collectDiProviderIndex(input.repo, source),
-    diInjections: collectDiInjectionIndex(input.repo, source),
+    imports: collectImportIndex(input.repo, source, control),
+    exports: collectExportIndex(input.repo, source, control),
+    identifiers: collectIdentifierIndex(input.repo, source, control),
+    receivers: collectReceiverIndex(input.repo, source, control),
+    typeAliases: collectTypeAliasIndex(source, control),
+    classHeritages: collectClassHeritageIndex(source, control),
+    diProviders: collectDiProviderIndex(input.repo, source, control),
+    diInjections: collectDiInjectionIndex(input.repo, source, control),
   };
 }

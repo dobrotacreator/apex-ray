@@ -723,3 +723,108 @@ test("workspace package resolution caches are isolated by manifest inventory", (
     fs.rmSync(repo, { recursive: true, force: true });
   }
 });
+
+test("workspace package indexes cap entries and do not cache partial scans", () => {
+  const repo = fs.mkdtempSync(
+    path.join(os.tmpdir(), "apex-ray-ts-program-package-index-budget-"),
+  );
+  const originalOpenSync = fs.openSync;
+  try {
+    const packageNames = Array.from(
+      { length: 512 },
+      (_, index) => `pkg-${String(index).padStart(3, "0")}`,
+    );
+    for (const packageName of packageNames) {
+      writeFile(
+        repo,
+        `packages/${packageName}/package.json`,
+        JSON.stringify({ name: `@workspace/${packageName}` }),
+      );
+    }
+    const targetPackageName = "zz-target";
+    writeFile(
+      repo,
+      `packages/${targetPackageName}/package.json`,
+      JSON.stringify({ name: `@workspace/${targetPackageName}` }),
+    );
+    for (const packageName of [packageNames[0], targetPackageName]) {
+      writeFile(
+        repo,
+        `packages/${packageName}/base.json`,
+        JSON.stringify({ compilerOptions: { strict: true } }),
+      );
+    }
+    writeFile(repo, "apps/web/tsconfig.json", "{}");
+    writeFile(repo, "apps/web/src/cart.ts", "export const cart = true;\n");
+    const packageFiles = [
+      ...packageNames,
+      targetPackageName,
+    ].map((packageName) => `packages/${packageName}/package.json`);
+    const manifestPath = path.join(repo, "files.json");
+    fs.writeFileSync(
+      manifestPath,
+      JSON.stringify({
+        version: 2,
+        files: ["apps/web/src/cart.ts"],
+        package_files: packageFiles,
+        config_files: [
+          `packages/${packageNames[0]}/base.json`,
+          `packages/${targetPackageName}/base.json`,
+        ],
+      }),
+      "utf8",
+    );
+    const args = parseArgs([
+      "--repo",
+      repo,
+      "--changed",
+      "apps/web/src/cart.ts",
+      "--file-manifest",
+      manifestPath,
+      "--no-index-cache",
+    ]);
+    const inventory = loadRepoFileInventory(args);
+    const packagePaths = new Set(
+      packageFiles.map((relPath) => path.join(repo, relPath)),
+    );
+    let packageOpenCount = 0;
+    fs.openSync = ((candidate: fs.PathLike, ...rest: unknown[]) => {
+      if (packagePaths.has(path.resolve(String(candidate)))) {
+        packageOpenCount += 1;
+      }
+      return (originalOpenSync as (...args: unknown[]) => number)(
+        candidate,
+        ...rest,
+      );
+    }) as typeof fs.openSync;
+    const configPath = path.join(repo, "apps/web/tsconfig.json");
+
+    const targetResult = normalizeTsConfigExtends(
+      repo,
+      configPath,
+      { extends: `@workspace/${targetPackageName}/base.json` },
+      inventory,
+    );
+    const firstPackageResult = normalizeTsConfigExtends(
+      repo,
+      configPath,
+      { extends: `@workspace/${packageNames[0]}/base.json` },
+      inventory,
+    );
+
+    assert.deepEqual(targetResult, {
+      extends: `@workspace/${targetPackageName}/base.json`,
+    });
+    assert.deepEqual(firstPackageResult, {
+      extends: path.join(
+        repo,
+        `packages/${packageNames[0]}/base.json`,
+      ),
+    });
+    assert.ok(packageOpenCount > 512);
+    assert.equal(inventory.configurationPartial, true);
+  } finally {
+    fs.openSync = originalOpenSync;
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
+});

@@ -14,7 +14,7 @@ from apex_ray.models import (
     LLMSelectionStageSummary,
     ReviewReport,
 )
-from apex_ray.report.coverage_breakdown import pack_residual_priority
+from apex_ray.report.coverage_breakdown import pack_residual_priority, pack_review_slice
 from apex_ray.risk import risk_signal_score
 
 ProviderSelector = LLMProviderName | str | Callable[[ContextPack], LLMProviderName | str | None] | None
@@ -101,21 +101,7 @@ def merge_continuation_selection(
 
 
 def pack_review_slice_for_continuation(pack: ContextPack) -> str:
-    if any(str(signal.severity) in {"critical", "high"} for signal in pack.risk_signals):
-        return "high_risk"
-    if any(str(rule.mode) == "strict" for rule in pack.rule_matches):
-        return "high_risk"
-    if any(str(rule.severity) in {"critical", "high"} for rule in pack.rule_matches):
-        return "high_risk"
-    if pack.file_kind in {FileKind.SCHEMA, FileKind.CONFIG, FileKind.MIGRATION, FileKind.DEPENDENCY}:
-        return "contracts_config"
-    if pack.file_kind == FileKind.SOURCE:
-        return "source"
-    if pack.file_kind == FileKind.TEST:
-        return "tests"
-    if pack.file_kind == FileKind.DOCS:
-        return "docs"
-    return "other"
+    return pack_review_slice(pack)
 
 
 def select_llm_context_packs(

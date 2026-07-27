@@ -23,19 +23,34 @@ export function importedBindingsForTarget(
   target: CollectedSymbol,
   targetPackage: PackageInfo,
   exportedNames: ExportedNamesForTarget,
+  onExpansionLimit?: () => void,
 ): ImportedBindingsForTarget {
   const bindings = emptyImportedBindings();
   for (const importEntry of entry.imports) {
-    const importExportNames = exportedNamesForImport(importEntry.moduleSpecifier, entry.absPath, repo, targetPackage, exportedNames);
+    const importExportNames = exportedNamesForImport(
+      importEntry.moduleSpecifier,
+      entry.absPath,
+      repo,
+      targetPackage,
+      exportedNames,
+      onExpansionLimit,
+    );
     const importNamespaceExportNames = exportedNamespaceNamesForImport(
       importEntry.moduleSpecifier,
       entry.absPath,
       repo,
       targetPackage,
       exportedNames,
+      onExpansionLimit,
     );
     if (
-      isModuleSpecifierRelatedToPath(importEntry.moduleSpecifier, entry.absPath, target.node.getSourceFile().fileName, targetPackage)
+      isModuleSpecifierRelatedToPath(
+        importEntry.moduleSpecifier,
+        entry.absPath,
+        target.node.getSourceFile().fileName,
+        targetPackage,
+        onExpansionLimit,
+      )
     ) {
       for (const name of exportedNames.allNames) {
         importExportNames.add(name);
@@ -80,9 +95,16 @@ function exportedNamesForImport(
   repo: string,
   targetPackage: PackageInfo,
   exportedNames: ExportedNamesForTarget,
+  onExpansionLimit?: () => void,
 ): Set<string> {
   const names = new Set<string>();
-  for (const candidate of moduleSpecifierCandidatePaths(specifier, importerPath, repo, targetPackage)) {
+  for (const candidate of moduleSpecifierCandidatePaths(
+    specifier,
+    importerPath,
+    repo,
+    targetPackage,
+    onExpansionLimit,
+  )) {
     const candidateNames = exportedNames.byFile.get(candidate);
     if (!candidateNames) continue;
     for (const name of candidateNames) {
@@ -98,9 +120,16 @@ function exportedNamespaceNamesForImport(
   repo: string,
   targetPackage: PackageInfo,
   exportedNames: ExportedNamesForTarget,
+  onExpansionLimit?: () => void,
 ): Map<string, Set<string>> {
   const namespaces = new Map<string, Set<string>>();
-  for (const candidate of moduleSpecifierCandidatePaths(specifier, importerPath, repo, targetPackage)) {
+  for (const candidate of moduleSpecifierCandidatePaths(
+    specifier,
+    importerPath,
+    repo,
+    targetPackage,
+    onExpansionLimit,
+  )) {
     const candidateNamespaces = exportedNames.namespacesByFile.get(candidate);
     if (!candidateNamespaces) continue;
     for (const [namespaceName, memberNames] of candidateNamespaces.entries()) {

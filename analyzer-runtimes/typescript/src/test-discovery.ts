@@ -74,7 +74,15 @@ export function findRelatedTests(
     if (testPatterns.some((pattern) => entry.relLower.includes(pattern.toLowerCase()))) {
       addCandidate(entry.relPath, relatedTestPriority("direct", entry.relPath, changedFile));
     }
-    if (importsChangedFile(entry, repo, changedPath, changedPackage)) {
+    if (
+      importsChangedFile(
+        entry,
+        repo,
+        changedPath,
+        changedPackage,
+        repoIndex.markModuleResolutionPartial,
+      )
+    ) {
       addCandidate(entry.relPath, relatedTestPriority("changed-import", entry.relPath, changedFile));
     }
   }
@@ -89,7 +97,15 @@ export function findRelatedTests(
     for (const entry of repoIndex.files) {
       if (!isTestPath(entry.relLower)) continue;
       if (!isRunnableTestPath(repo, entry.relPath)) continue;
-      if (importsChangedFile(entry, repo, referencedPath, referencedPackage)) {
+      if (
+        importsChangedFile(
+          entry,
+          repo,
+          referencedPath,
+          referencedPackage,
+          repoIndex.markModuleResolutionPartial,
+        )
+      ) {
         addCandidate(entry.relPath, relatedTestPriority("reference-import", entry.relPath, referencedFile));
       }
     }
@@ -300,11 +316,24 @@ function importsChangedFile(
   repo: string,
   changedPath: string,
   changedPackage: PackageInfo | null,
+  onExpansionLimit?: () => void,
 ): boolean {
   const normalizedChangedPath = normalizeRelPath(path.resolve(changedPath));
   return entry.imports.some((importEntry) =>
-    isModuleSpecifierRelatedToPath(importEntry.moduleSpecifier, entry.absPath, changedPath, changedPackage) ||
-    moduleSpecifierCandidatePaths(importEntry.moduleSpecifier, entry.absPath, repo, changedPackage).some(
+    isModuleSpecifierRelatedToPath(
+      importEntry.moduleSpecifier,
+      entry.absPath,
+      changedPath,
+      changedPackage,
+      onExpansionLimit,
+    ) ||
+    moduleSpecifierCandidatePaths(
+      importEntry.moduleSpecifier,
+      entry.absPath,
+      repo,
+      changedPackage,
+      onExpansionLimit,
+    ).some(
       (candidate) => candidate === normalizedChangedPath,
     ),
   );

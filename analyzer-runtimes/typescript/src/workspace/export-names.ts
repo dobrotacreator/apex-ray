@@ -34,17 +34,47 @@ export function exportedNamesForTarget(repoIndex: RepoIndex, target: CollectedSy
       for (const exportEntry of entry.exports) {
         if (exportEntry.localName === STAR_EXPORT_LOCAL_NAME) {
           if (current.exportName === "default") continue;
-          if (!isExportEntryRelatedToPath(exportEntry, entry.absPath, current.filePath, targetPackage)) continue;
+          if (
+            !isExportEntryRelatedToPath(
+              exportEntry,
+              entry.absPath,
+              current.filePath,
+              targetPackage,
+              repoIndex.markModuleResolutionPartial,
+            )
+          ) {
+            continue;
+          }
           queue.push({ filePath: path.resolve(entry.absPath), exportName: current.exportName });
           continue;
         }
         if (exportEntry.localName === NAMESPACE_EXPORT_LOCAL_NAME) {
-          if (!isExportEntryRelatedToPath(exportEntry, entry.absPath, current.filePath, targetPackage)) continue;
+          if (
+            !isExportEntryRelatedToPath(
+              exportEntry,
+              entry.absPath,
+              current.filePath,
+              targetPackage,
+              repoIndex.markModuleResolutionPartial,
+            )
+          ) {
+            continue;
+          }
           addNamespaceExportedNameForFile(namespacesByFile, entry.absPath, exportEntry.exportedName, current.exportName);
           continue;
         }
         if (exportEntry.localName !== current.exportName) continue;
-        if (!isExportEntryRelatedToPath(exportEntry, entry.absPath, current.filePath, targetPackage)) continue;
+        if (
+          !isExportEntryRelatedToPath(
+            exportEntry,
+            entry.absPath,
+            current.filePath,
+            targetPackage,
+            repoIndex.markModuleResolutionPartial,
+          )
+        ) {
+          continue;
+        }
         queue.push({ filePath: path.resolve(entry.absPath), exportName: exportEntry.exportedName });
       }
     }
@@ -79,9 +109,16 @@ function isExportEntryRelatedToPath(
   exporterPath: string,
   sourcePath: string,
   targetPackage: PackageInfo,
+  onExpansionLimit?: () => void,
 ): boolean {
   if (exportEntry.moduleSpecifier === null) {
     return path.resolve(exporterPath) === path.resolve(sourcePath);
   }
-  return isModuleSpecifierRelatedToPath(exportEntry.moduleSpecifier, exporterPath, sourcePath, targetPackage);
+  return isModuleSpecifierRelatedToPath(
+    exportEntry.moduleSpecifier,
+    exporterPath,
+    sourcePath,
+    targetPackage,
+    onExpansionLimit,
+  );
 }

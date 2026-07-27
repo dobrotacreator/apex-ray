@@ -2,6 +2,11 @@ import ts from "typescript";
 
 import { moduleExportNameText, propertyNameText } from "../ast-utils.js";
 import { referenceForNode } from "../references/utils.js";
+import {
+  appendIndexEntry,
+  collectionShouldStop,
+  type IndexCollectionControl,
+} from "./collection.js";
 import type {
   DefaultImportIndexEntry,
   ImportIndexEntry,
@@ -9,18 +14,25 @@ import type {
   NamespaceImportIndexEntry,
 } from "../types.js";
 
-export function collectImportIndex(repo: string, source: ts.SourceFile): ImportIndexEntry[] {
+export function collectImportIndex(
+  repo: string,
+  source: ts.SourceFile,
+  control?: IndexCollectionControl,
+): ImportIndexEntry[] {
   const imports: ImportIndexEntry[] = [];
   for (const statement of source.statements) {
+    if (collectionShouldStop(control)) break;
     if (ts.isVariableStatement(statement)) {
-      imports.push(...collectRequireImportIndex(repo, source, statement));
+      imports.push(
+        ...collectRequireImportIndex(repo, source, statement, control),
+      );
       continue;
     }
     if (ts.isImportEqualsDeclaration(statement)) {
       const moduleSpecifier = importEqualsModuleSpecifier(statement.moduleReference);
       if (!moduleSpecifier) continue;
       const reference = referenceForNode(repo, source, statement.name, "import");
-      imports.push({
+      if (!appendIndexEntry(imports, {
         moduleSpecifier,
         defaultImport: {
           localName: statement.name.text,
@@ -31,7 +43,7 @@ export function collectImportIndex(repo: string, source: ts.SourceFile): ImportI
           reference,
         },
         namedImports: [],
-      });
+      }, control)) break;
       continue;
     }
     if (!ts.isImportDeclaration(statement)) continue;
@@ -49,11 +61,11 @@ export function collectImportIndex(repo: string, source: ts.SourceFile): ImportI
     const namedBindings = importClause?.namedBindings;
     if (namedBindings && ts.isNamedImports(namedBindings)) {
       for (const element of namedBindings.elements) {
-        namedImports.push({
+        if (!appendIndexEntry(namedImports, {
           importedName: moduleExportNameText(element.propertyName ?? element.name),
           localName: element.name.text,
           reference: referenceForNode(repo, source, element.name, "import"),
-        });
+        }, control)) break;
       }
     } else if (namedBindings && ts.isNamespaceImport(namedBindings)) {
       namespaceImport = {
@@ -62,27 +74,37 @@ export function collectImportIndex(repo: string, source: ts.SourceFile): ImportI
       };
     }
 
-    imports.push({
+    if (!appendIndexEntry(imports, {
       moduleSpecifier: statement.moduleSpecifier.text,
       defaultImport,
       namespaceImport,
       namedImports,
-    });
+    }, control)) break;
   }
-  imports.push(...collectDynamicImportIndex(repo, source));
+  imports.push(...collectDynamicImportIndex(repo, source, control));
   return imports;
 }
 
-function collectDynamicImportIndex(repo: string, source: ts.SourceFile): ImportIndexEntry[] {
+function collectDynamicImportIndex(
+  repo: string,
+  source: ts.SourceFile,
+  control?: IndexCollectionControl,
+): ImportIndexEntry[] {
   const imports: ImportIndexEntry[] = [];
   visit(source);
   return imports;
 
   function visit(node: ts.Node): void {
+    if (collectionShouldStop(control)) return;
     if (ts.isVariableDeclaration(node)) {
-      const entry = dynamicImportIndexEntryForVariableDeclaration(repo, source, node);
+      const entry = dynamicImportIndexEntryForVariableDeclaration(
+        repo,
+        source,
+        node,
+        control,
+      );
       if (entry) {
-        imports.push(entry);
+        appendIndexEntry(imports, entry, control);
       }
     }
     ts.forEachChild(node, visit);
@@ -93,6 +115,7 @@ function dynamicImportIndexEntryForVariableDeclaration(
   repo: string,
   source: ts.SourceFile,
   declaration: ts.VariableDeclaration,
+  control?: IndexCollectionControl,
 ): ImportIndexEntry | null {
   const moduleSpecifier = dynamicImportModuleSpecifier(declaration.initializer);
   if (!moduleSpecifier) return null;
@@ -110,7 +133,12 @@ function dynamicImportIndexEntryForVariableDeclaration(
   }
 
   if (ts.isObjectBindingPattern(declaration.name)) {
-    const namedImports = namedImportsForRequireBinding(repo, source, declaration.name);
+    const namedImports = namedImportsForRequireBinding(
+      repo,
+      source,
+      declaration.name,
+      control,
+    );
     if (namedImports.length === 0) return null;
     return {
       moduleSpecifier,
@@ -167,23 +195,25 @@ function collectRequireImportIndex(
   repo: string,
   source: ts.SourceFile,
   statement: ts.VariableStatement,
+  control?: IndexCollectionControl,
 ): ImportIndexEntry[] {
   const imports: ImportIndexEntry[] = [];
   for (const declaration of statement.declarationList.declarations) {
+    if (collectionShouldStop(control)) break;
     const propertyRequire = requirePropertyAccess(declaration.initializer);
     if (propertyRequire && ts.isIdentifier(declaration.name)) {
-      imports.push({
+      const namedImports: NamedImportIndexEntry[] = [];
+      appendIndexEntry(namedImports, {
+        importedName: propertyRequire.importedName,
+        localName: declaration.name.text,
+        reference: referenceForNode(repo, source, declaration.name, "import"),
+      }, control);
+      if (!appendIndexEntry(imports, {
         moduleSpecifier: propertyRequire.moduleSpecifier,
         defaultImport: null,
         namespaceImport: null,
-        namedImports: [
-          {
-            importedName: propertyRequire.importedName,
-            localName: declaration.name.text,
-            reference: referenceForNode(repo, source, declaration.name, "import"),
-          },
-        ],
-      });
+        namedImports,
+      }, control)) break;
       continue;
     }
 
@@ -192,7 +222,7 @@ function collectRequireImportIndex(
 
     if (ts.isIdentifier(declaration.name)) {
       const reference = referenceForNode(repo, source, declaration.name, "import");
-      imports.push({
+      if (!appendIndexEntry(imports, {
         moduleSpecifier,
         defaultImport: {
           localName: declaration.name.text,
@@ -203,19 +233,24 @@ function collectRequireImportIndex(
           reference,
         },
         namedImports: [],
-      });
+      }, control)) break;
       continue;
     }
 
     if (ts.isObjectBindingPattern(declaration.name)) {
-      const namedImports = namedImportsForRequireBinding(repo, source, declaration.name);
+      const namedImports = namedImportsForRequireBinding(
+        repo,
+        source,
+        declaration.name,
+        control,
+      );
       if (namedImports.length === 0) continue;
-      imports.push({
+      if (!appendIndexEntry(imports, {
         moduleSpecifier,
         defaultImport: null,
         namespaceImport: null,
         namedImports,
-      });
+      }, control)) break;
     }
   }
   return imports;
@@ -225,19 +260,21 @@ function namedImportsForRequireBinding(
   repo: string,
   source: ts.SourceFile,
   binding: ts.ObjectBindingPattern,
+  control?: IndexCollectionControl,
 ): NamedImportIndexEntry[] {
   const namedImports: NamedImportIndexEntry[] = [];
   for (const element of binding.elements) {
+    if (collectionShouldStop(control)) break;
     if (!ts.isIdentifier(element.name)) continue;
     const importedName = element.propertyName
       ? propertyNameText(element.propertyName)
       : element.name.text;
     if (!importedName) continue;
-    namedImports.push({
+    if (!appendIndexEntry(namedImports, {
       importedName,
       localName: element.name.text,
       reference: referenceForNode(repo, source, element.name, "import"),
-    });
+    }, control)) break;
   }
   return namedImports;
 }

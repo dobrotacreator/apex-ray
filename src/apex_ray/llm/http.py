@@ -69,11 +69,22 @@ class _ValidatedAPIEndpoint:
     host: str
 
 
-def validate_api_endpoint_url(url: str) -> str:
-    return _validated_api_endpoint(url).host
+def validate_api_endpoint_url(
+    url: str,
+    *,
+    allow_insecure_loopback_http: bool = False,
+) -> str:
+    return _validated_api_endpoint(
+        url,
+        allow_insecure_loopback_http=allow_insecure_loopback_http,
+    ).host
 
 
-def _validated_api_endpoint(url: str) -> _ValidatedAPIEndpoint:
+def _validated_api_endpoint(
+    url: str,
+    *,
+    allow_insecure_loopback_http: bool = False,
+) -> _ValidatedAPIEndpoint:
     if any(ord(character) < 32 or ord(character) == 127 for character in url):
         raise ValueError("API endpoint must not contain control characters.")
     if any(character.isspace() for character in url):
@@ -113,8 +124,11 @@ def _validated_api_endpoint(url: str) -> _ValidatedAPIEndpoint:
         normalized_host = str(address)
 
     loopback = normalized_host in {"127.0.0.1", "::1", "localhost"}
-    if parsed.scheme != "https" and not (parsed.scheme == "http" and loopback):
-        raise ValueError("API endpoint must use HTTPS (HTTP is allowed only for loopback tests).")
+    allowed_loopback_http = allow_insecure_loopback_http and parsed.scheme == "http" and loopback
+    if parsed.scheme != "https" and not allowed_loopback_http:
+        if parsed.scheme == "http" and loopback:
+            raise ValueError("Loopback HTTP requires explicit opt-in.")
+        raise ValueError("API endpoint must use HTTPS.")
     if parsed.query or parsed.fragment:
         raise ValueError("API endpoint must not contain a query or fragment.")
     if (
@@ -148,6 +162,9 @@ def _validated_api_endpoint(url: str) -> _ValidatedAPIEndpoint:
 
 
 class UrllibJSONTransport:
+    def __init__(self, *, allow_insecure_loopback_http: bool = False) -> None:
+        self.allow_insecure_loopback_http = allow_insecure_loopback_http
+
     def request(
         self,
         *,
@@ -158,7 +175,10 @@ class UrllibJSONTransport:
         use_system_proxy: bool,
     ) -> JSONHTTPResponse:
         try:
-            endpoint = _validated_api_endpoint(url)
+            endpoint = _validated_api_endpoint(
+                url,
+                allow_insecure_loopback_http=self.allow_insecure_loopback_http,
+            )
         except ValueError as exc:
             raise JSONTransportError(str(exc), kind="malformed") from exc
 

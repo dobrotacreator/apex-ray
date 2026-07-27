@@ -1,20 +1,23 @@
 # GitHub Actions
 
 Apex Ray ships a composite action at `.github/actions/apex-ray-review`. It checks
-out the exact pull-request head into the isolated
-`$GITHUB_WORKSPACE/.apex-ray/repository` analysis directory, reviews the
-immutable base-SHA diff, writes Markdown/JSON/SARIF, adds a compact job summary,
-uploads the reports as an artifact, and attempts a non-blocking code-scanning
-upload.
+out the exact pull-request head into an isolated, per-run
+`$GITHUB_WORKSPACE/.apex-ray-review-<run-id>-<attempt>/repository` analysis
+directory, reviews the immutable base-SHA diff, writes Markdown/JSON/SARIF,
+adds a compact job summary, uploads the reports as an artifact, and attempts a
+non-blocking code-scanning upload.
 
 The action runs Apex Ray from the immutable action source under
 `GITHUB_ACTION_PATH`, never from the repository-under-review checkout. It
-installs Python dependencies from the pinned action commit's `uv.lock` with
-`uv sync --locked --no-install-project`, imports only that pinned Python source,
-installs TypeScript analyzer dependencies from that action commit's
-`package-lock.json` with `npm ci`, and builds only the pinned analyzer. It does
-not run package-manager hooks, build scripts, tests, analyzer scripts, or Python
-imports from the pull-request head. The reviewed checkout is parser input, not
+requires the canonical action source root to be disjoint from
+`GITHUB_WORKSPACE` and installs and builds the locked runtime before checking
+out the pull-request head. It installs Python dependencies from the pinned
+action commit's `uv.lock` with `uv sync --locked --no-install-project`, imports
+only that pinned Python source, installs TypeScript analyzer dependencies from
+that action commit's `package-lock.json` with `npm ci`, and builds only the
+pinned analyzer. It does not run package-manager hooks, build scripts, tests,
+analyzer scripts, or Python imports from the pull-request head. The reviewed
+checkout is parser input, not
 executable action code. This separation avoids both pull-request runtime
 replacement and an unrelated PyPI artifact or unlocked Python build-isolation
 environment. The Python, Node.js, and uv tool versions are also exact.
@@ -24,9 +27,10 @@ environment. The Python, Node.js, and uv tool versions are also exact.
 Replace `<full-release-commit-sha>` with the 40-character commit for the Apex
 Ray release you have reviewed. Pinning the action itself and its transitive
 actions prevents a mutable tag from changing the code that receives API
-credentials. The action verifies that `github.action_ref` is a full
-40-character commit SHA before checkout and rejects mutable tags and local
-action paths.
+credentials. Before checkout, the action verifies that `github.action_ref` is
+a full 40-character commit SHA and that the canonical action source is
+disjoint from `GITHUB_WORKSPACE`; it rejects mutable tags and local action
+paths.
 
 Do not replace the pinned remote `uses:` line with
 `uses: ./.github/actions/apex-ray-review` in a pull-request workflow that can

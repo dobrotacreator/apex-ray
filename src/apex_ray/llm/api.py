@@ -152,7 +152,13 @@ class APILLMProvider:
         random_fn: Callable[[], float] = random.random,
     ) -> None:
         self.config = config
-        self.transport = transport if transport is not None else UrllibJSONTransport()
+        self.transport = (
+            transport
+            if transport is not None
+            else UrllibJSONTransport(
+                allow_insecure_loopback_http=config.api.allow_insecure_loopback_http,
+            )
+        )
         self.environment = dict(os.environ if environment is None else environment)
         self.sleep_fn = sleep_fn
         self.random_fn = random_fn
@@ -405,26 +411,48 @@ class APILLMProvider:
         retry_after = _parse_retry_after(response.headers)
 
         category: LLMProviderErrorCategory
-        quota_tokens = (
+        terminal_quota_tokens = (
             "arrearage",
             "balance",
             "billing",
             "insufficient_quota",
+        )
+        quota_tokens = (
+            *terminal_quota_tokens,
             "quota",
         )
+        rate_limit_tokens = ("overloaded", "rate_limit", "rate limit", "ratequota")
+        auth_tokens = ("authentication", "invalid_api_key", "unauthorized")
         if status == 401:
             category = "auth"
             retryable = False
         elif status == 403:
-            category = "quota" if any(token in structured_code for token in quota_tokens) else "auth"
-            retryable = False
-        elif any(token in code for token in ("authentication", "invalid_api_key", "unauthorized")):
+            if any(token in structured_code for token in terminal_quota_tokens):
+                category = "quota"
+                retryable = False
+            elif any(token in structured_code for token in rate_limit_tokens):
+                category = "rate_limit"
+                retryable = True
+            elif any(token in structured_code for token in quota_tokens):
+                category = "quota"
+                retryable = False
+            else:
+                category = "auth"
+                retryable = False
+        elif status == 429:
+            if any(token in structured_code for token in terminal_quota_tokens):
+                category = "quota"
+                retryable = False
+            else:
+                category = "rate_limit"
+                retryable = True
+        elif any(token in code for token in auth_tokens):
             category = "auth"
             retryable = False
         elif any(token in code for token in quota_tokens):
             category = "quota"
             retryable = False
-        elif status == 429 or any(token in code for token in ("overloaded", "rate_limit", "rate limit")):
+        elif any(token in code for token in rate_limit_tokens):
             category = "rate_limit"
             retryable = True
         elif status in {408, 504, 524}:
@@ -468,6 +496,8 @@ class APILLMProvider:
             return
 
         api = self.config.api
+        if api.allow_insecure_loopback_http:
+            raise LLMProviderError("Insecure loopback HTTP endpoints are not permitted in CI.")
         if self.preset is not None:
             if api.api_key_env is not None and api.api_key_env != self.preset.api_key_env:
                 raise LLMProviderError(
@@ -520,7 +550,10 @@ class APILLMProvider:
         else:
             raise LLMProviderError("openai_compatible requires api.base_url or api.base_url_env.")
 
-        host = _validated_endpoint_host(base_url)
+        host = _validated_endpoint_host(
+            base_url,
+            allow_insecure_loopback_http=api.allow_insecure_loopback_http,
+        )
         if self.preset is not None and not (
             host in self.preset.allowed_hosts
             or any(host.endswith(suffix) for suffix in self.preset.allowed_host_suffixes)
@@ -644,7 +677,9 @@ class APILLMProvider:
                 return {"thinking": {"type": "disabled"}}
             result: dict[str, object] = {"thinking": {"type": "enabled"}}
             if self.model.lower().startswith("glm-5.2"):
-                result["reasoning_effort"] = str(effort)
+                result["reasoning_effort"] = (
+                    "max" if effort in {LLMReasoningEffort.XHIGH, LLMReasoningEffort.MAX} else "high"
+                )
             return result
         if effort == LLMReasoningEffort.NONE:
             return {}
@@ -793,9 +828,16 @@ def _append_endpoint(base_url: str, endpoint: str) -> str:
     return urlunsplit((parsed.scheme, parsed.netloc, path, "", ""))
 
 
-def _validated_endpoint_host(url: str) -> str:
+def _validated_endpoint_host(
+    url: str,
+    *,
+    allow_insecure_loopback_http: bool = False,
+) -> str:
     try:
-        return validate_api_endpoint_url(url)
+        return validate_api_endpoint_url(
+            url,
+            allow_insecure_loopback_http=allow_insecure_loopback_http,
+        )
     except ValueError as exc:
         raise LLMProviderError(str(exc), category="malformed") from exc
 

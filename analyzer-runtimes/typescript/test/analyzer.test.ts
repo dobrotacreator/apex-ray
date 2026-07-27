@@ -1893,6 +1893,748 @@ test("supplemental declaration root selection keeps a bounded deterministic top 
   ]);
 });
 
+test("config-backed programs bound aggregate transitive source files and bytes", () => {
+  const repo = fs.mkdtempSync(
+    path.join(os.tmpdir(), "apex-ray-ts-analyzer-config-program-closure-"),
+  );
+  try {
+    const changedPath = "src/consumer.ts";
+    const globalPath = "src/types/global.d.ts";
+    const hugePath = "src/types/generated/huge.generated.d.ts";
+    const chainPaths = Array.from(
+      { length: 520 },
+      (_, index) => `src/types/chain/${String(index).padStart(3, "0")}.d.ts`,
+    );
+    writeFile(
+      repo,
+      "tsconfig.json",
+      JSON.stringify({
+        compilerOptions: { target: "ES2022", strict: true },
+        files: [changedPath],
+      }),
+    );
+    writeFile(
+      repo,
+      changedPath,
+      [
+        '/// <reference path="./types/global.d.ts" />',
+        "export function usesAmbient(): number { return focusedAmbient(); }",
+      ].join("\n"),
+    );
+    writeFile(
+      repo,
+      globalPath,
+      [
+        '/// <reference path="./generated/huge.generated.d.ts" />',
+        '/// <reference path="./chain/000.d.ts" />',
+        "declare function focusedAmbient(): number;",
+      ].join("\n"),
+    );
+    writeFile(
+      repo,
+      hugePath,
+      `/*${"x".repeat(9 * 1024 * 1024)}*/\ndeclare const generatedHuge: true;\n`,
+    );
+    chainPaths.forEach((chainPath, index) => {
+      const nextPath = chainPaths[index + 1];
+      writeFile(
+        repo,
+        chainPath,
+        [
+          ...(nextPath
+            ? [`/// <reference path="./${path.basename(nextPath)}" />`]
+            : []),
+          `declare const chain${index}: true;`,
+        ].join("\n"),
+      );
+    });
+    const manifestPath = path.join(repo, "files.json");
+    fs.writeFileSync(
+      manifestPath,
+      JSON.stringify({
+        version: 2,
+        files: [changedPath, globalPath, hugePath, ...chainPaths],
+        config_files: ["tsconfig.json"],
+      }),
+      "utf8",
+    );
+    const args = parseArgs([
+      "--repo",
+      repo,
+      "--changed",
+      changedPath,
+      "--file-manifest",
+      manifestPath,
+      "--no-index-cache",
+    ]);
+    const inventory = loadRepoFileInventory(args);
+    const warnings: string[] = [];
+
+    const context = createProgramContexts(args, warnings, inventory).get(changedPath);
+
+    assert.ok(context);
+    assert.equal(inventory.partial, true);
+    assert.equal(
+      context.program.getSourceFile(path.join(repo, hugePath)),
+      undefined,
+    );
+    const repoSources = context.program
+      .getSourceFiles()
+      .filter(
+        (sourceFile) =>
+          sourceFile.fileName.startsWith(`${repo}${path.sep}`),
+      );
+    assert.ok(repoSources.length <= 512);
+    assert.ok(
+      warnings.some(
+        (warning) =>
+          warning.includes("program source budget reached") &&
+          warning.includes("compiler context is partial"),
+      ),
+    );
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("program source budget is shared across config groups and reserves every changed root first", () => {
+  const repo = fs.mkdtempSync(
+    path.join(os.tmpdir(), "apex-ray-ts-analyzer-shared-program-budget-"),
+  );
+  try {
+    const firstChangedPath = "packages/a/src/changed.ts";
+    const firstDependencyPath = "packages/a/src/large-dependency.ts";
+    const secondChangedPath = "packages/b/src/changed.ts";
+    for (const packageName of ["a", "b"]) {
+      writeFile(
+        repo,
+        `packages/${packageName}/tsconfig.json`,
+        JSON.stringify({
+          compilerOptions: {
+            module: "ESNext",
+            moduleResolution: "Bundler",
+            target: "ES2022",
+          },
+          files: ["src/changed.ts"],
+        }),
+      );
+    }
+    writeFile(
+      repo,
+      firstChangedPath,
+      [
+        'import "./large-dependency.js";',
+        "export const firstChanged = true;",
+      ].join("\n"),
+    );
+    writeFile(
+      repo,
+      firstDependencyPath,
+      `/*${"x".repeat(15 * 512 * 1024)}*/\nexport const largeDependency = true;\n`,
+    );
+    writeFile(
+      repo,
+      secondChangedPath,
+      `/*${"y".repeat(1024 * 1024)}*/\nexport const secondChanged = true;\n`,
+    );
+    const manifestPath = path.join(repo, "files.json");
+    fs.writeFileSync(
+      manifestPath,
+      JSON.stringify({
+        version: 2,
+        files: [
+          firstChangedPath,
+          firstDependencyPath,
+          secondChangedPath,
+        ],
+        config_files: [
+          "packages/a/tsconfig.json",
+          "packages/b/tsconfig.json",
+        ],
+      }),
+      "utf8",
+    );
+    const args = parseArgs([
+      "--repo",
+      repo,
+      "--changed",
+      firstChangedPath,
+      secondChangedPath,
+      "--file-manifest",
+      manifestPath,
+      "--no-index-cache",
+    ]);
+    const inventory = loadRepoFileInventory(args);
+    const warnings: string[] = [];
+
+    const contexts = createProgramContexts(args, warnings, inventory);
+    const firstContext = contexts.get(firstChangedPath);
+    const secondContext = contexts.get(secondChangedPath);
+
+    assert.ok(firstContext);
+    assert.ok(secondContext);
+    assert.ok(
+      firstContext.program.getSourceFile(path.join(repo, firstChangedPath)),
+    );
+    assert.ok(
+      secondContext.program.getSourceFile(path.join(repo, secondChangedPath)),
+    );
+    assert.equal(
+      firstContext.program.getSourceFile(path.join(repo, firstDependencyPath)),
+      undefined,
+    );
+    const programs = [
+      ...new Set(
+        [...contexts.values()].map((context) => context.program),
+      ),
+    ];
+    const retainedRepoSourceBytes = programs
+      .flatMap((program) => program.getSourceFiles())
+      .filter((sourceFile) =>
+        sourceFile.fileName.startsWith(`${repo}${path.sep}`),
+      )
+      .reduce(
+        (total, sourceFile) =>
+          total + Buffer.byteLength(sourceFile.text, "utf8"),
+        0,
+      );
+    assert.ok(retainedRepoSourceBytes <= 8 * 1024 * 1024);
+    assert.equal(inventory.partial, true);
+    assert.ok(
+      warnings.some((warning) =>
+        warning.includes("program source budget reached"),
+      ),
+    );
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("compiler config metadata is rejected before an oversized read and reported as partial", () => {
+  const repo = fs.mkdtempSync(
+    path.join(os.tmpdir(), "apex-ray-ts-analyzer-config-metadata-budget-"),
+  );
+  const originalReadFileSync = fs.readFileSync;
+  try {
+    const changedPath = "src/changed.ts";
+    writeFile(repo, changedPath, "export const changed = true;\n");
+    writeFile(
+      repo,
+      "tsconfig.json",
+      `${" ".repeat(4 * 1024 * 1024 + 1)}${JSON.stringify({
+        compilerOptions: { target: "ES2022" },
+        files: [changedPath],
+      })}`,
+    );
+    const manifestPath = path.join(repo, "files.json");
+    fs.writeFileSync(
+      manifestPath,
+      JSON.stringify({
+        version: 2,
+        files: [changedPath],
+        config_files: ["tsconfig.json"],
+      }),
+      "utf8",
+    );
+    const args = parseArgs([
+      "--repo",
+      repo,
+      "--changed",
+      changedPath,
+      "--file-manifest",
+      manifestPath,
+      "--no-index-cache",
+    ]);
+    const inventory = loadRepoFileInventory(args);
+    const warnings: string[] = [];
+    let oversizedReadAttempted = false;
+    fs.readFileSync = ((
+      candidate: fs.PathOrFileDescriptor,
+      ...rest: unknown[]
+    ) => {
+      if (
+        typeof candidate === "number" &&
+        fs.fstatSync(candidate).size > 4 * 1024 * 1024
+      ) {
+        oversizedReadAttempted = true;
+      }
+      return (originalReadFileSync as (...args: unknown[]) => string | Buffer)(
+        candidate,
+        ...rest,
+      );
+    }) as typeof fs.readFileSync;
+
+    const context = createProgramContexts(
+      args,
+      warnings,
+      inventory,
+    ).get(changedPath);
+
+    assert.ok(context);
+    assert.equal(context.tsconfigPath, null);
+    assert.equal(oversizedReadAttempted, false);
+    assert.equal(inventory.configurationPartial, true);
+    assert.ok(
+      warnings.some(
+        (warning) =>
+          warning.includes("compiler metadata byte safety limit") &&
+          warning.includes("configuration context is partial"),
+      ),
+    );
+  } finally {
+    fs.readFileSync = originalReadFileSync;
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("workspace package metadata is bounded before resolving config extends", () => {
+  const repo = fs.mkdtempSync(
+    path.join(os.tmpdir(), "apex-ray-ts-analyzer-package-metadata-budget-"),
+  );
+  const originalReadFileSync = fs.readFileSync;
+  try {
+    const changedPath = "apps/web/src/changed.ts";
+    writeFile(repo, changedPath, "export const changed = true;\n");
+    writeFile(
+      repo,
+      "apps/web/tsconfig.json",
+      JSON.stringify({
+        extends: "@workspace/config",
+        files: ["src/changed.ts"],
+      }),
+    );
+    writeFile(
+      repo,
+      "packages/config/package.json",
+      `${" ".repeat(4 * 1024 * 1024 + 1)}${JSON.stringify({
+        name: "@workspace/config",
+        tsconfig: "base.json",
+      })}`,
+    );
+    writeFile(
+      repo,
+      "packages/config/base.json",
+      JSON.stringify({ compilerOptions: { target: "ES2022" } }),
+    );
+    const manifestPath = path.join(repo, "files.json");
+    fs.writeFileSync(
+      manifestPath,
+      JSON.stringify({
+        version: 2,
+        files: [changedPath],
+        package_files: ["packages/config/package.json"],
+        config_files: [
+          "apps/web/tsconfig.json",
+          "packages/config/base.json",
+        ],
+      }),
+      "utf8",
+    );
+    const args = parseArgs([
+      "--repo",
+      repo,
+      "--changed",
+      changedPath,
+      "--file-manifest",
+      manifestPath,
+      "--no-index-cache",
+    ]);
+    const inventory = loadRepoFileInventory(args);
+    const warnings: string[] = [];
+    let oversizedReadAttempted = false;
+    fs.readFileSync = ((
+      candidate: fs.PathOrFileDescriptor,
+      ...rest: unknown[]
+    ) => {
+      if (
+        typeof candidate === "number" &&
+        fs.fstatSync(candidate).size > 4 * 1024 * 1024
+      ) {
+        oversizedReadAttempted = true;
+      }
+      return (originalReadFileSync as (...args: unknown[]) => string | Buffer)(
+        candidate,
+        ...rest,
+      );
+    }) as typeof fs.readFileSync;
+
+    createProgramContexts(args, warnings, inventory);
+
+    assert.equal(oversizedReadAttempted, false);
+    assert.equal(inventory.configurationPartial, true);
+    assert.ok(
+      warnings.some((warning) =>
+        warning.includes("compiler metadata byte safety limit"),
+      ),
+    );
+  } finally {
+    fs.readFileSync = originalReadFileSync;
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("workspace package export amplification marks configuration partial", () => {
+  const repo = fs.mkdtempSync(
+    path.join(os.tmpdir(), "apex-ray-ts-analyzer-package-export-budget-"),
+  );
+  try {
+    const changedPath = "apps/web/src/changed.ts";
+    const wildcard = "x".repeat(8_192);
+    writeFile(repo, changedPath, "export const changed = true;\n");
+    writeFile(
+      repo,
+      "apps/web/tsconfig.json",
+      JSON.stringify({
+        extends: `@workspace/config/${wildcard}`,
+        files: ["src/changed.ts"],
+      }),
+    );
+    writeFile(
+      repo,
+      "packages/config/package.json",
+      JSON.stringify({
+        name: "@workspace/config",
+        exports: {
+          "./*": "*".repeat(8_192),
+        },
+      }),
+    );
+    const manifestPath = path.join(repo, "files.json");
+    fs.writeFileSync(
+      manifestPath,
+      JSON.stringify({
+        version: 2,
+        files: [changedPath],
+        package_files: ["packages/config/package.json"],
+        config_files: ["apps/web/tsconfig.json"],
+      }),
+      "utf8",
+    );
+    const args = parseArgs([
+      "--repo",
+      repo,
+      "--changed",
+      changedPath,
+      "--file-manifest",
+      manifestPath,
+      "--no-index-cache",
+    ]);
+    const inventory = loadRepoFileInventory(args);
+    const warnings: string[] = [];
+
+    createProgramContexts(args, warnings, inventory);
+
+    assert.equal(inventory.configurationPartial, true);
+    assert.ok(
+      warnings.some(
+        (warning) =>
+          warning.includes(
+            "package export target expansion safety limit",
+          ) &&
+          warning.includes("configuration context is partial"),
+      ),
+    );
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("late package resolution limits mark analysis partial and suppress its cache", () => {
+  const repo = fs.mkdtempSync(
+    path.join(os.tmpdir(), "apex-ray-ts-analyzer-package-resolution-budget-"),
+  );
+  const cacheDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "apex-ray-ts-analyzer-package-resolution-cache-"),
+  );
+  try {
+    const changedPath = "packages/lib/src/target.ts";
+    const testPath = "tests/consumer.test.ts";
+    writeFile(repo, changedPath, "export const target = true;\n");
+    writeFile(
+      repo,
+      testPath,
+      'import { target } from "@workspace/lib/feature";\nvoid target;\n',
+    );
+    writeFile(
+      repo,
+      "packages/lib/package.json",
+      JSON.stringify({
+        name: "@workspace/lib",
+        exports: {
+          "./feature": [
+            ...Array.from(
+              { length: 512 },
+              (_, index) => `./src/other-${index}.ts`,
+            ),
+            "./src/target.ts",
+          ],
+        },
+      }),
+    );
+    const manifestPath = path.join(repo, "files.json");
+    fs.writeFileSync(
+      manifestPath,
+      JSON.stringify({
+        version: 2,
+        files: [changedPath, testPath],
+        package_files: ["packages/lib/package.json"],
+      }),
+      "utf8",
+    );
+    const args = parseArgs([
+      "--repo",
+      repo,
+      "--changed",
+      changedPath,
+      "--file-manifest",
+      manifestPath,
+      "--index-cache-dir",
+      cacheDir,
+    ]);
+
+    const result = analyze(args);
+
+    assert.equal(result.partial, true);
+    assert.equal(result.indexCache?.written, false);
+    assert.equal(
+      fs.existsSync(repoIndexCachePath(repo, cacheDir)),
+      false,
+    );
+    assert.ok(
+      result.warnings.some(
+        (warning) =>
+          warning.includes("module target expansion safety limit") &&
+          warning.includes(
+            "workspace references and related tests are partial",
+          ),
+      ),
+    );
+    assert.deepEqual(result.files[0]?.relatedTests, []);
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
+    fs.rmSync(cacheDir, { recursive: true, force: true });
+  }
+});
+
+test("compiler metadata uses one aggregate budget across config groups", () => {
+  const repo = fs.mkdtempSync(
+    path.join(os.tmpdir(), "apex-ray-ts-analyzer-config-aggregate-budget-"),
+  );
+  const originalReadFileSync = fs.readFileSync;
+  try {
+    const changedPaths = [
+      "packages/a/src/changed.ts",
+      "packages/b/src/changed.ts",
+    ];
+    for (const changedPath of changedPaths) {
+      writeFile(repo, changedPath, "export const changed = true;\n");
+    }
+    for (const packageName of ["a", "b"]) {
+      writeFile(
+        repo,
+        `packages/${packageName}/tsconfig.json`,
+        `${" ".repeat(3 * 1024 * 1024)}${JSON.stringify({
+          files: ["src/changed.ts"],
+        })}`,
+      );
+    }
+    const manifestPath = path.join(repo, "files.json");
+    fs.writeFileSync(
+      manifestPath,
+      JSON.stringify({
+        version: 2,
+        files: changedPaths,
+        config_files: [
+          "packages/a/tsconfig.json",
+          "packages/b/tsconfig.json",
+        ],
+      }),
+      "utf8",
+    );
+    const args = parseArgs([
+      "--repo",
+      repo,
+      "--changed",
+      ...changedPaths,
+      "--file-manifest",
+      manifestPath,
+      "--no-index-cache",
+    ]);
+    const inventory = loadRepoFileInventory(args);
+    const warnings: string[] = [];
+    const firstConfigIno = fs.statSync(
+      path.join(repo, "packages/a/tsconfig.json"),
+    ).ino;
+    const secondConfigIno = fs.statSync(
+      path.join(repo, "packages/b/tsconfig.json"),
+    ).ino;
+    let firstConfigReads = 0;
+    let secondConfigReads = 0;
+    fs.readFileSync = ((
+      candidate: fs.PathOrFileDescriptor,
+      ...rest: unknown[]
+    ) => {
+      if (
+        typeof candidate === "number" &&
+        fs.fstatSync(candidate).size > 2 * 1024 * 1024
+      ) {
+        const fileIno = fs.fstatSync(candidate).ino;
+        if (fileIno === firstConfigIno) firstConfigReads += 1;
+        if (fileIno === secondConfigIno) secondConfigReads += 1;
+      }
+      return (originalReadFileSync as (...args: unknown[]) => string | Buffer)(
+        candidate,
+        ...rest,
+      );
+    }) as typeof fs.readFileSync;
+
+    const contexts = createProgramContexts(args, warnings, inventory);
+
+    assert.ok(firstConfigReads >= 1);
+    assert.equal(secondConfigReads, 0);
+    assert.equal(
+      contexts.get(changedPaths[0])?.tsconfigPath,
+      path.join(repo, "packages/a/tsconfig.json"),
+    );
+    assert.equal(contexts.get(changedPaths[1])?.tsconfigPath, null);
+    assert.equal(inventory.configurationPartial, true);
+    assert.ok(
+      warnings.some(
+        (warning) =>
+          warning.includes("compiler metadata byte safety limit") &&
+          warning.includes("in aggregate"),
+      ),
+    );
+  } finally {
+    fs.readFileSync = originalReadFileSync;
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("config-backed programs reject oversized changed roots as partial failures", () => {
+  const repo = fs.mkdtempSync(
+    path.join(os.tmpdir(), "apex-ray-ts-analyzer-oversized-changed-root-"),
+  );
+  try {
+    const changedPath = "src/huge-changed.ts";
+    writeFile(
+      repo,
+      "tsconfig.json",
+      JSON.stringify({
+        compilerOptions: { target: "ES2022", strict: true },
+        files: [changedPath],
+      }),
+    );
+    writeFile(
+      repo,
+      changedPath,
+      `/*${"x".repeat(9 * 1024 * 1024)}*/\nexport const changed = true;\n`,
+    );
+    const manifestPath = path.join(repo, "files.json");
+    fs.writeFileSync(
+      manifestPath,
+      JSON.stringify({
+        version: 2,
+        files: [changedPath],
+        config_files: ["tsconfig.json"],
+      }),
+      "utf8",
+    );
+
+    const result = runAnalyzerInProcess(repo, [
+      changedPath,
+      "--range",
+      `${changedPath}:2-2`,
+      "--file-manifest",
+      manifestPath,
+      "--no-index-cache",
+    ]);
+
+    assert.equal(result.partial, true);
+    assert.deepEqual(result.files, []);
+    assert.deepEqual(result.failedFiles, [changedPath]);
+    assert.ok(
+      result.warnings.some(
+        (warning) =>
+          warning.includes("program source budget reached") &&
+          warning.includes("compiler context is partial"),
+      ),
+    );
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("manifest ingestion rejects over-limit arrays before retaining entries", () => {
+  const repo = fs.mkdtempSync(
+    path.join(os.tmpdir(), "apex-ray-ts-analyzer-manifest-entry-ingestion-"),
+  );
+  try {
+    const changedPath = "src/changed.ts";
+    writeFile(repo, changedPath, "export const changed = true;\n");
+    const supplementalPaths = Array.from(
+      { length: 4 },
+      (_, index) => `src/supplemental-${index}.ts`,
+    );
+    for (const supplementalPath of supplementalPaths) {
+      writeFile(repo, supplementalPath, "export const supplemental = true;\n");
+    }
+    const manifestPath = path.join(repo, "files.json");
+    fs.writeFileSync(
+      manifestPath,
+      JSON.stringify({ version: 2, files: supplementalPaths }),
+      "utf8",
+    );
+    const args = parseArgs([
+      "--repo",
+      repo,
+      "--changed",
+      changedPath,
+      "--file-manifest",
+      manifestPath,
+      "--no-index-cache",
+    ]);
+
+    const inventory = loadRepoFileInventory(args, { maxFiles: 3 });
+
+    assert.deepEqual(inventory.absPaths, [path.join(repo, changedPath)]);
+    assert.equal(inventory.partial, true);
+    assert.ok(inventory.partialReason?.includes("manifest entry safety limit"));
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("fallback traversal enforces its retained-path byte budget", () => {
+  const repo = fs.mkdtempSync(
+    path.join(os.tmpdir(), "apex-ray-ts-analyzer-fallback-path-bytes-"),
+  );
+  try {
+    const changedPath = "changed.ts";
+    writeFile(repo, changedPath, "export const changed = true;\n");
+    writeFile(repo, "src/extra.ts", "export const extra = true;\n");
+    const args = parseArgs([
+      "--repo",
+      repo,
+      "--changed",
+      changedPath,
+      "--no-index-cache",
+    ]);
+
+    const inventory = loadRepoFileInventory(args, { maxPathBytes: 1 });
+
+    assert.deepEqual(inventory.absPaths, [path.join(repo, changedPath)]);
+    assert.equal(inventory.partial, true);
+    assert.ok(
+      inventory.partialReason?.includes(
+        "fallback inventory scan reached the retained-path byte safety limit",
+      ),
+    );
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
+});
+
 test("analyzer exposes repo index cache write failures as warnings", () => {
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), "apex-ray-ts-analyzer-cache-warning-"));
   const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "apex-ray-ts-analyzer-cache-warning-home-"));

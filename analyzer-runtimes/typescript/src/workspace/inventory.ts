@@ -15,6 +15,7 @@ import {
 } from "../utils.js";
 
 const FALLBACK_INVENTORY_ENTRY_LIMIT = 250_000;
+const FALLBACK_INVENTORY_PATH_BYTE_LIMIT = 16 * 1024 * 1024;
 const INVENTORY_FILE_LIMIT = 50_000;
 const MANIFEST_BYTE_LIMIT = 16 * 1024 * 1024;
 
@@ -37,6 +38,7 @@ export interface RepoFileInventoryOptions {
   shouldStop?: () => boolean;
   maxEntries?: number;
   maxFiles?: number;
+  maxPathBytes?: number;
   maxManifestBytes?: number;
   openDirectory?: (directoryPath: string) => fs.Dir;
 }
@@ -55,6 +57,11 @@ interface ValidatedChangedPaths {
   absPaths: string[];
   partialReason: string | null;
 }
+
+type ManifestReadResult =
+  | { status: "ok"; text: string }
+  | { status: "byte-limit" }
+  | { status: "stopped" };
 
 export function loadRepoFileInventory(
   args: Args,
@@ -109,11 +116,16 @@ function loadManifestRepoFileInventory(
     options.maxManifestBytes,
     MANIFEST_BYTE_LIMIT,
   );
+  const maxFiles = positiveLimit(options.maxFiles, INVENTORY_FILE_LIMIT);
   let manifestText: string;
   let parsed: unknown;
   try {
-    const manifestSize = fs.statSync(manifestPath).size;
-    if (manifestSize > maxManifestBytes) {
+    const readResult = readBoundedManifestFile(
+      manifestPath,
+      maxManifestBytes,
+      shouldStop,
+    );
+    if (readResult.status === "byte-limit") {
       return partialInventory(
         changed.absPaths,
         combinePartialReasons(
@@ -123,23 +135,33 @@ function loadManifestRepoFileInventory(
         validationCache,
       );
     }
-    manifestText = fs.readFileSync(manifestPath, "utf8");
-    if (Buffer.byteLength(manifestText, "utf8") > maxManifestBytes) {
+    if (readResult.status === "stopped") {
       return partialInventory(
         changed.absPaths,
         combinePartialReasons(
           changed.partialReason,
-          `TypeScript file manifest reached the manifest byte safety limit of ${maxManifestBytes}; repository context is partial.`,
+          "TypeScript manifest inventory scan stopped because the analysis time budget was exhausted; repository context is partial.",
         ),
         validationCache,
       );
     }
+    manifestText = readResult.text;
     if (shouldStop()) {
       return partialInventory(
         changed.absPaths,
         combinePartialReasons(
           changed.partialReason,
           "TypeScript manifest inventory scan stopped because the analysis time budget was exhausted; repository context is partial.",
+        ),
+        validationCache,
+      );
+    }
+    if (manifestExceedsEntrySafetyLimit(manifestText, maxFiles)) {
+      return partialInventory(
+        changed.absPaths,
+        combinePartialReasons(
+          changed.partialReason,
+          `TypeScript file manifest reached the manifest entry safety limit of ${maxFiles} source files per array before parsing; repository context is partial.`,
         ),
         validationCache,
       );
@@ -167,7 +189,6 @@ function loadManifestRepoFileInventory(
     throw new Error(`Invalid TypeScript file manifest: ${manifestPath}`);
   }
 
-  const maxFiles = positiveLimit(options.maxFiles, INVENTORY_FILE_LIMIT);
   const relPathSet = new Set<string>();
   const absPathSet = new Set<string>();
   const packagePathsByKey = new Map<string, string>();
@@ -346,12 +367,17 @@ function loadFallbackRepoFileInventory(
   const shouldStop = options.shouldStop ?? (() => false);
   const maxEntries = positiveLimit(options.maxEntries, FALLBACK_INVENTORY_ENTRY_LIMIT);
   const maxFiles = positiveLimit(options.maxFiles, INVENTORY_FILE_LIMIT);
+  const maxPathBytes = positiveLimit(
+    options.maxPathBytes,
+    FALLBACK_INVENTORY_PATH_BYTE_LIMIT,
+  );
   const openDirectory = options.openDirectory ?? fs.opendirSync;
   const absPathSet = new Set<string>();
   const packagePathSet = new Set<string>();
   const configPathSet = new Set<string>();
   const pendingDirectories = [path.resolve(args.repo)];
   let visitedEntries = 0;
+  let retainedPathBytes = 0;
   let partialReason: string | null = changed.partialReason;
 
   scan: while (pendingDirectories.length > 0) {
@@ -410,13 +436,36 @@ function loadFallbackRepoFileInventory(
           break scan;
         }
         if (isIgnoredDirectory(entry.name)) continue;
-        const absPath = path.join(directoryPath, entry.name);
         if (entry.isDirectory()) {
+          const absPath = path.join(directoryPath, entry.name);
+          const relPath = normalizeRelPath(path.relative(args.repo, absPath));
+          const pathBytes = Buffer.byteLength(relPath, "utf8") + 1;
+          if (retainedPathBytes + pathBytes > maxPathBytes) {
+            partialReason =
+              `TypeScript fallback inventory scan reached the retained-path byte safety limit of ${maxPathBytes}; ` +
+              "repository context is partial.";
+            break scan;
+          }
+          retainedPathBytes += pathBytes;
           pendingDirectories.push(absPath);
           continue;
         }
-        if (entry.isFile() && path.extname(entry.name).toLowerCase() === ".json") {
-          const relPath = normalizeRelPath(path.relative(args.repo, absPath));
+        if (!entry.isFile()) continue;
+        const extension = path.extname(entry.name).toLowerCase();
+        const isMetadata = extension === ".json" || extension === ".jsonc";
+        const isSource = isTypeScriptOrJavaScriptFileName(entry.name);
+        if (!isMetadata && !isSource) continue;
+        const absPath = path.join(directoryPath, entry.name);
+        const relPath = normalizeRelPath(path.relative(args.repo, absPath));
+        const pathBytes = Buffer.byteLength(relPath, "utf8") + 1;
+        if (retainedPathBytes + pathBytes > maxPathBytes) {
+          partialReason =
+            `TypeScript fallback inventory scan reached the retained-path byte safety limit of ${maxPathBytes}; ` +
+            "repository context is partial.";
+          break scan;
+        }
+        retainedPathBytes += pathBytes;
+        if (isMetadata) {
           const validation = validateRepoRelativePath(
             args.repo,
             realRepoPath,
@@ -451,8 +500,6 @@ function loadFallbackRepoFileInventory(
           }
           continue;
         }
-        if (!entry.isFile() || !isTypeScriptOrJavaScriptFileName(absPath)) continue;
-        const relPath = normalizeRelPath(path.relative(args.repo, absPath));
         const validation = validateRepoRelativePath(
           args.repo,
           realRepoPath,
@@ -505,6 +552,151 @@ function loadFallbackRepoFileInventory(
     validationCache,
     false,
   );
+}
+
+function readBoundedManifestFile(
+  manifestPath: string,
+  maxBytes: number,
+  shouldStop: () => boolean,
+): ManifestReadResult {
+  let descriptor: number | null = null;
+  try {
+    const noFollow =
+      typeof fs.constants.O_NOFOLLOW === "number"
+        ? fs.constants.O_NOFOLLOW
+        : 0;
+    descriptor = fs.openSync(
+      manifestPath,
+      fs.constants.O_RDONLY | noFollow,
+    );
+    const before = fs.fstatSync(descriptor);
+    if (!before.isFile()) {
+      throw new Error("manifest is not a regular file");
+    }
+    if (before.size > maxBytes) return { status: "byte-limit" };
+
+    const chunks: Buffer[] = [];
+    let totalBytes = 0;
+    while (totalBytes <= maxBytes) {
+      if (shouldStop()) return { status: "stopped" };
+      const chunk = Buffer.allocUnsafe(
+        Math.min(64 * 1024, maxBytes + 1 - totalBytes),
+      );
+      const bytesRead = fs.readSync(
+        descriptor,
+        chunk,
+        0,
+        chunk.length,
+        null,
+      );
+      if (bytesRead === 0) break;
+      chunks.push(chunk.subarray(0, bytesRead));
+      totalBytes += bytesRead;
+    }
+    if (totalBytes > maxBytes) return { status: "byte-limit" };
+
+    const after = fs.fstatSync(descriptor);
+    if (
+      before.dev !== after.dev ||
+      before.ino !== after.ino ||
+      before.size !== after.size ||
+      before.mtimeMs !== after.mtimeMs ||
+      before.ctimeMs !== after.ctimeMs
+    ) {
+      throw new Error("manifest changed while it was being read");
+    }
+    return {
+      status: "ok",
+      text: Buffer.concat(chunks, totalBytes).toString("utf8"),
+    };
+  } finally {
+    if (descriptor !== null) fs.closeSync(descriptor);
+  }
+}
+
+function manifestExceedsEntrySafetyLimit(
+  manifestText: string,
+  maxEntriesPerArray: number,
+): boolean {
+  const stack: Array<{
+    kind: "array" | "object";
+    entries: number;
+    expectingArrayValue: boolean;
+  }> = [];
+  const maxStructuralSeparators = maxEntriesPerArray * 3 + 64;
+  let structuralSeparators = 0;
+  let inString = false;
+  let escaped = false;
+
+  const startArrayValue = (): boolean => {
+    const parent = stack.at(-1);
+    if (parent?.kind !== "array" || !parent.expectingArrayValue) {
+      return false;
+    }
+    parent.entries += 1;
+    parent.expectingArrayValue = false;
+    return parent.entries > maxEntriesPerArray;
+  };
+
+  for (let index = 0; index < manifestText.length; index += 1) {
+    const character = manifestText[index];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (character === "\\") {
+        escaped = true;
+      } else if (character === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (character === '"') {
+      if (startArrayValue()) return true;
+      inString = true;
+      continue;
+    }
+    if (
+      character === " " ||
+      character === "\n" ||
+      character === "\r" ||
+      character === "\t"
+    ) {
+      continue;
+    }
+    if (character === ",") {
+      structuralSeparators += 1;
+      if (structuralSeparators > maxStructuralSeparators) return true;
+      const parent = stack.at(-1);
+      if (parent?.kind === "array") parent.expectingArrayValue = true;
+      continue;
+    }
+    if (character === "[") {
+      if (startArrayValue()) return true;
+      stack.push({
+        kind: "array",
+        entries: 0,
+        expectingArrayValue: true,
+      });
+      if (stack.length > 128) return true;
+      continue;
+    }
+    if (character === "{") {
+      if (startArrayValue()) return true;
+      stack.push({
+        kind: "object",
+        entries: 0,
+        expectingArrayValue: false,
+      });
+      if (stack.length > 128) return true;
+      continue;
+    }
+    if (character === "]" || character === "}") {
+      stack.pop();
+      continue;
+    }
+    if (startArrayValue()) return true;
+  }
+  return false;
 }
 
 function validatedChangedAbsPaths(
@@ -668,7 +860,7 @@ function partialInventory(
 
 function positiveLimit(value: number | undefined, fallback: number): number {
   return value !== undefined && Number.isFinite(value) && value > 0
-    ? Math.floor(value)
+    ? Math.min(Math.floor(value), fallback)
     : fallback;
 }
 

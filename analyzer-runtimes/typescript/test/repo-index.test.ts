@@ -873,6 +873,553 @@ test("manifest repo inventory honors budget, byte, and source-file limits", () =
   }
 });
 
+test("repo indexing rejects an oversized source before reading or caching it", () => {
+  const repo = fs.mkdtempSync(
+    path.join(os.tmpdir(), "apex-ray-ts-index-oversized-source-"),
+  );
+  const cacheDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "apex-ray-ts-index-oversized-source-cache-"),
+  );
+  const originalReadFileSync = fs.readFileSync;
+  try {
+    const oversizedPath = "src/oversized.ts";
+    writeFile(
+      repo,
+      oversizedPath,
+      `/*${"x".repeat(9 * 1024 * 1024)}*/\nexport const oversized = true;\n`,
+    );
+    writeFile(repo, "src/small.ts", "export const small = true;\n");
+    const manifestPath = path.join(repo, "typescript-files.json");
+    fs.writeFileSync(
+      manifestPath,
+      JSON.stringify({
+        version: 2,
+        files: [oversizedPath, "src/small.ts"],
+      }),
+      "utf8",
+    );
+    const args = parseArgs([
+      "--repo",
+      repo,
+      "--changed",
+      oversizedPath,
+      "--file-manifest",
+      manifestPath,
+      "--index-cache-dir",
+      cacheDir,
+    ]);
+    const inventory = loadRepoFileInventory(args);
+    const warnings: string[] = [];
+    let oversizedReadAttempted = false;
+    fs.readFileSync = ((
+      candidate: fs.PathOrFileDescriptor,
+      ...rest: unknown[]
+    ) => {
+      if (
+        typeof candidate === "number" &&
+        fs.fstatSync(candidate).size > 8 * 1024 * 1024
+      ) {
+        oversizedReadAttempted = true;
+      }
+      return (originalReadFileSync as (...args: unknown[]) => string | Buffer)(
+        candidate,
+        ...rest,
+      );
+    }) as typeof fs.readFileSync;
+
+    const index = buildRepoIndex(args, warnings, inventory);
+
+    assert.equal(oversizedReadAttempted, false);
+    assert.deepEqual(
+      index.files.map((entry) => entry.relPath),
+      ["src/small.ts"],
+    );
+    assert.equal(index.partial, true);
+    assert.equal(index.cacheStats?.written, false);
+    assert.equal(fs.existsSync(repoIndexCachePath(repo, cacheDir)), false);
+    assert.ok(
+      warnings.some(
+        (warning) =>
+          warning.includes("repo index source budget reached") &&
+          warning.includes("workspace references are partial"),
+      ),
+    );
+  } finally {
+    fs.readFileSync = originalReadFileSync;
+    fs.rmSync(repo, { recursive: true, force: true });
+    fs.rmSync(cacheDir, { recursive: true, force: true });
+  }
+});
+
+test("repo indexing enforces the aggregate source byte ceiling before reads", () => {
+  const repo = fs.mkdtempSync(
+    path.join(os.tmpdir(), "apex-ray-ts-index-aggregate-source-bytes-"),
+  );
+  const originalReadFileSync = fs.readFileSync;
+  try {
+    const sourcePaths = ["src/first.ts", "src/second.ts", "src/third.ts"];
+    for (const [index, sourcePath] of sourcePaths.entries()) {
+      writeFile(
+        repo,
+        sourcePath,
+        `/*${String(index).repeat(3 * 1024 * 1024)}*/\nexport const value${index} = ${index};\n`,
+      );
+    }
+    const manifestPath = path.join(repo, "typescript-files.json");
+    fs.writeFileSync(
+      manifestPath,
+      JSON.stringify({
+        version: 2,
+        files: sourcePaths,
+      }),
+      "utf8",
+    );
+    const args = parseArgs([
+      "--repo",
+      repo,
+      "--changed",
+      sourcePaths[0],
+      "--file-manifest",
+      manifestPath,
+      "--no-index-cache",
+    ]);
+    const inventory = loadRepoFileInventory(args);
+    const warnings: string[] = [];
+    let sourceReadCount = 0;
+    fs.readFileSync = ((
+      candidate: fs.PathOrFileDescriptor,
+      ...rest: unknown[]
+    ) => {
+      if (
+        typeof candidate === "number" &&
+        fs.fstatSync(candidate).size > 1024 * 1024
+      ) {
+        sourceReadCount += 1;
+      }
+      return (originalReadFileSync as (...args: unknown[]) => string | Buffer)(
+        candidate,
+        ...rest,
+      );
+    }) as typeof fs.readFileSync;
+
+    const index = buildRepoIndex(args, warnings, inventory);
+
+    assert.equal(sourceReadCount, 2);
+    assert.deepEqual(
+      index.files.map((entry) => entry.relPath),
+      sourcePaths.slice(0, 2),
+    );
+    assert.ok(
+      index.files.reduce((total, entry) => total + entry.size, 0) <=
+        8 * 1024 * 1024,
+    );
+    assert.equal(index.partial, true);
+    assert.ok(
+      warnings.some((warning) =>
+        warning.includes("repo index source budget reached"),
+      ),
+    );
+  } finally {
+    fs.readFileSync = originalReadFileSync;
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("repo indexing caps semantic entries and suppresses oversized cache output", () => {
+  const repo = fs.mkdtempSync(
+    path.join(os.tmpdir(), "apex-ray-ts-index-semantic-budget-"),
+  );
+  const cacheDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "apex-ray-ts-index-semantic-budget-cache-"),
+  );
+  try {
+    const changedPath = "src/dense.ts";
+    writeFile(repo, changedPath, "dense;\n".repeat(60_000));
+    const manifestPath = path.join(repo, "typescript-files.json");
+    fs.writeFileSync(
+      manifestPath,
+      JSON.stringify({ version: 2, files: [changedPath] }),
+      "utf8",
+    );
+    const args = parseArgs([
+      "--repo",
+      repo,
+      "--changed",
+      changedPath,
+      "--file-manifest",
+      manifestPath,
+      "--index-cache-dir",
+      cacheDir,
+    ]);
+    const inventory = loadRepoFileInventory(args);
+    const warnings: string[] = [];
+
+    const index = buildRepoIndex(args, warnings, inventory);
+
+    assert.equal(index.files.length, 1);
+    assert.ok(index.files[0].identifiers.length <= 50_000);
+    assert.equal(index.partial, true);
+    assert.equal(index.cacheStats?.written, false);
+    assert.equal(fs.existsSync(repoIndexCachePath(repo, cacheDir)), false);
+    assert.ok(
+      warnings.some(
+        (warning) =>
+          warning.includes("repo index semantic entry safety limit") &&
+          warning.includes("workspace references are partial"),
+      ),
+    );
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
+    fs.rmSync(cacheDir, { recursive: true, force: true });
+  }
+});
+
+test("repo indexing cancels collection inside a dense source file", () => {
+  const repo = fs.mkdtempSync(
+    path.join(os.tmpdir(), "apex-ray-ts-index-collection-cancel-"),
+  );
+  try {
+    const changedPath = "src/dense.ts";
+    writeFile(repo, changedPath, "dense;\n".repeat(10_000));
+    const manifestPath = path.join(repo, "typescript-files.json");
+    fs.writeFileSync(
+      manifestPath,
+      JSON.stringify({ version: 2, files: [changedPath] }),
+      "utf8",
+    );
+    const args = parseArgs([
+      "--repo",
+      repo,
+      "--changed",
+      changedPath,
+      "--file-manifest",
+      manifestPath,
+      "--no-index-cache",
+    ]);
+    const inventory = loadRepoFileInventory(args);
+    const warnings: string[] = [];
+    let checks = 0;
+
+    const index = buildRepoIndex(
+      args,
+      warnings,
+      inventory,
+      () => ++checks > 100,
+    );
+
+    assert.ok(checks > 100);
+    assert.equal(index.partial, true);
+    assert.ok(index.files[0].identifiers.length < 10_000);
+    assert.ok(
+      warnings.some((warning) =>
+        warning.includes(
+          "repo index stopped because the analysis time budget was exhausted",
+        ),
+      ),
+    );
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("repo indexing checks the deadline before reading a reusable cache", () => {
+  const repo = fs.mkdtempSync(
+    path.join(os.tmpdir(), "apex-ray-ts-index-cache-deadline-"),
+  );
+  const cacheDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "apex-ray-ts-index-cache-deadline-home-"),
+  );
+  const originalReadFileSync = fs.readFileSync;
+  try {
+    const changedPath = "src/changed.ts";
+    writeFile(repo, changedPath, "export const changed = true;\n");
+    const args = parseArgs([
+      "--repo",
+      repo,
+      "--changed",
+      changedPath,
+      "--index-cache-dir",
+      cacheDir,
+    ]);
+    const inventory = loadRepoFileInventory(args);
+    const cachePath = repoIndexCachePath(repo, cacheDir);
+    buildRepoIndex(args, [], inventory);
+    assert.equal(fs.existsSync(cachePath), true);
+    let cacheContentRead = false;
+    fs.readFileSync = ((
+      candidate: fs.PathOrFileDescriptor,
+      ...rest: unknown[]
+    ) => {
+      if (
+        candidate === cachePath ||
+        (typeof candidate === "number" &&
+          fs.fstatSync(candidate).ino === fs.statSync(cachePath).ino)
+      ) {
+        cacheContentRead = true;
+      }
+      return (originalReadFileSync as (...args: unknown[]) => string | Buffer)(
+        candidate,
+        ...rest,
+      );
+    }) as typeof fs.readFileSync;
+    const warnings: string[] = [];
+
+    const index = buildRepoIndex(args, warnings, inventory, () => true);
+
+    assert.equal(cacheContentRead, false);
+    assert.equal(index.partial, true);
+    assert.ok(
+      warnings.some((warning) =>
+        warning.includes(
+          "repo index stopped because the analysis time budget was exhausted",
+        ),
+      ),
+    );
+  } finally {
+    fs.readFileSync = originalReadFileSync;
+    fs.rmSync(repo, { recursive: true, force: true });
+    fs.rmSync(cacheDir, { recursive: true, force: true });
+  }
+});
+
+test("repo indexing prioritizes changed files, importers, tests, and config roots before broad inventory", () => {
+  const repo = fs.mkdtempSync(
+    path.join(os.tmpdir(), "apex-ray-ts-index-relevance-order-"),
+  );
+  try {
+    const broadPaths = Array.from(
+      { length: 520 },
+      (_, index) => `aa/file-${String(index).padStart(3, "0")}.ts`,
+    );
+    for (const [index, broadPath] of broadPaths.entries()) {
+      writeFile(repo, broadPath, `export const broad${index} = ${index};\n`);
+    }
+    const changedPath = "zz/changed.ts";
+    const importerPath = "zz/consumer.ts";
+    const testPath = "zz/changed.test.ts";
+    const configRootPath = "zz/config-root.ts";
+    writeFile(repo, changedPath, "export const changed = true;\n");
+    writeFile(
+      repo,
+      importerPath,
+      'import { changed } from "./changed.js";\nexport { changed };\n',
+    );
+    writeFile(
+      repo,
+      testPath,
+      'import { changed } from "./changed.js";\nvoid changed;\n',
+    );
+    writeFile(repo, configRootPath, "export const configRoot = true;\n");
+    writeFile(
+      repo,
+      "zz/tsconfig.json",
+      JSON.stringify({ files: ["config-root.ts"] }),
+    );
+    const manifestPath = path.join(repo, "typescript-files.json");
+    fs.writeFileSync(
+      manifestPath,
+      JSON.stringify({
+        version: 2,
+        files: [
+          ...broadPaths,
+          changedPath,
+          importerPath,
+          testPath,
+          configRootPath,
+        ],
+        config_files: ["zz/tsconfig.json"],
+      }),
+      "utf8",
+    );
+    const args = parseArgs([
+      "--repo",
+      repo,
+      "--changed",
+      changedPath,
+      "--file-manifest",
+      manifestPath,
+      "--no-index-cache",
+    ]);
+    const inventory = loadRepoFileInventory(args);
+    const warnings: string[] = [];
+
+    const index = buildRepoIndex(args, warnings, inventory);
+    const retained = new Set(index.files.map((entry) => entry.relPath));
+
+    assert.equal(index.files.length, 512);
+    assert.equal(retained.has(changedPath), true);
+    assert.equal(retained.has(importerPath), true);
+    assert.equal(retained.has(testPath), true);
+    assert.equal(retained.has(configRootPath), true);
+    assert.equal(index.partial, true);
+    assert.ok(
+      warnings.some((warning) =>
+        warning.includes("repo index source budget reached"),
+      ),
+    );
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("repo indexing prioritizes bounded path-alias and package importers", () => {
+  const repo = fs.mkdtempSync(
+    path.join(os.tmpdir(), "apex-ray-ts-index-aliased-relevance-"),
+  );
+  try {
+    const broadPaths = Array.from(
+      { length: 520 },
+      (_, index) => `aa/file-${String(index).padStart(3, "0")}.ts`,
+    );
+    for (const [index, broadPath] of broadPaths.entries()) {
+      writeFile(repo, broadPath, `export const broad${index} = ${index};\n`);
+    }
+    const changedPath = "zz/target.ts";
+    const aliasImporterPath = "zz/alias-consumer.ts";
+    const packageImporterPath = "zz/package-consumer.ts";
+    writeFile(repo, changedPath, "export const target = true;\n");
+    writeFile(
+      repo,
+      aliasImporterPath,
+      'import { target } from "@app/target";\nexport { target };\n',
+    );
+    writeFile(
+      repo,
+      packageImporterPath,
+      'import { target } from "@workspace/app";\nexport { target };\n',
+    );
+    writeFile(
+      repo,
+      "tsconfig.json",
+      JSON.stringify({
+        compilerOptions: {
+          baseUrl: ".",
+          paths: { "@app/*": ["zz/*"] },
+        },
+      }),
+    );
+    writeFile(
+      repo,
+      "package.json",
+      JSON.stringify({
+        name: "@workspace/app",
+        module: "zz/target.ts",
+      }),
+    );
+    const manifestPath = path.join(repo, "typescript-files.json");
+    fs.writeFileSync(
+      manifestPath,
+      JSON.stringify({
+        version: 2,
+        files: [
+          ...broadPaths,
+          changedPath,
+          aliasImporterPath,
+          packageImporterPath,
+        ],
+        config_files: ["tsconfig.json"],
+        package_files: ["package.json"],
+      }),
+      "utf8",
+    );
+    const args = parseArgs([
+      "--repo",
+      repo,
+      "--changed",
+      changedPath,
+      "--file-manifest",
+      manifestPath,
+      "--no-index-cache",
+    ]);
+    const inventory = loadRepoFileInventory(args);
+
+    const index = buildRepoIndex(args, [], inventory);
+    const retained = new Set(index.files.map((entry) => entry.relPath));
+
+    assert.equal(retained.has(changedPath), true);
+    assert.equal(retained.has(aliasImporterPath), true);
+    assert.equal(retained.has(packageImporterPath), true);
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("repo relevance reports bounded alias expansion as partial", () => {
+  const repo = fs.mkdtempSync(
+    path.join(os.tmpdir(), "apex-ray-ts-index-alias-expansion-budget-"),
+  );
+  const cacheDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "apex-ray-ts-index-alias-expansion-cache-"),
+  );
+  try {
+    const broadPaths = Array.from(
+      { length: 512 },
+      (_, index) => `aa/file-${String(index).padStart(3, "0")}.ts`,
+    );
+    for (const [index, broadPath] of broadPaths.entries()) {
+      writeFile(repo, broadPath, `export const broad${index} = ${index};\n`);
+    }
+    const changedPath = "zz/target.ts";
+    const importerPath = "zz/consumer.ts";
+    const wildcard = "x".repeat(8_192);
+    writeFile(repo, changedPath, "export const target = true;\n");
+    writeFile(
+      repo,
+      importerPath,
+      `import "@amplified/${wildcard}";\n`,
+    );
+    writeFile(
+      repo,
+      "tsconfig.json",
+      JSON.stringify({
+        compilerOptions: {
+          baseUrl: ".",
+          paths: {
+            "@amplified/*": ["*".repeat(8_192)],
+          },
+        },
+      }),
+    );
+    const manifestPath = path.join(repo, "typescript-files.json");
+    fs.writeFileSync(
+      manifestPath,
+      JSON.stringify({
+        version: 2,
+        files: [...broadPaths, changedPath, importerPath],
+        config_files: ["tsconfig.json"],
+      }),
+      "utf8",
+    );
+    const args = parseArgs([
+      "--repo",
+      repo,
+      "--changed",
+      changedPath,
+      "--file-manifest",
+      manifestPath,
+      "--index-cache-dir",
+      cacheDir,
+    ]);
+    const inventory = loadRepoFileInventory(args);
+    const warnings: string[] = [];
+
+    const index = buildRepoIndex(args, warnings, inventory);
+
+    assert.equal(index.partial, true);
+    assert.equal(index.cacheStats?.written, false);
+    assert.ok(
+      warnings.some(
+        (warning) =>
+          warning.includes("module target expansion safety limit") &&
+          warning.includes("workspace references are partial"),
+      ),
+    );
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
+    fs.rmSync(cacheDir, { recursive: true, force: true });
+  }
+});
+
 test("repo indexing stops on budget exhaustion without publishing a partial cache", () => {
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), "apex-ray-ts-index-budget-"));
   const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "apex-ray-ts-index-budget-cache-"));

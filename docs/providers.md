@@ -99,8 +99,8 @@ confirm the model ID in the provider's current documentation, and set it
 explicitly. A provider preset never silently substitutes a model.
 See the official [DeepSeek](https://api-docs.deepseek.com/quick_start/pricing),
 [Qwen](https://help.aliyun.com/en/model-studio/text-generation),
-[Kimi](https://platform.kimi.ai/docs/api/chat), and
-[Z.ai](https://docs.z.ai/guides/overview/overview) catalogs.
+[Kimi](https://platform.kimi.ai/docs/guide/kimi-k3-quickstart), and
+[Z.ai](https://docs.z.ai/guides/llm/glm-5.2) catalogs.
 
 The Qwen preset defaults to the shared Beijing DashScope endpoint. For another
 region or Alibaba's recommended workspace-dedicated production endpoint, set
@@ -111,8 +111,8 @@ preset still enforces that the resolved host belongs to Alibaba Cloud.
 `effort` is translated conservatively to each Chat Completions dialect:
 DeepSeek uses its documented `high`/`max` levels, Qwen uses the thinking
 toggle, Kimi K3 maps to `low`/`high`/`max` while K2 models use their thinking
-toggle, and GLM 5.2 receives a reasoning level while older GLM models receive
-only the supported toggle.
+toggle, and GLM 5.2 maps to its supported `high`/`max` reasoning levels while
+older GLM models receive only the supported toggle.
 
 ```yaml
 review:
@@ -148,7 +148,8 @@ Supported protocols are `openai_responses`, `anthropic_messages`, and
 `openai_chat`. Supported output modes are `json_schema`, `json_object`, and
 `prompt_only`; prefer `json_schema` when the endpoint implements it.
 
-HTTPS is mandatory except for loopback integration tests. Redirects are not
+HTTPS is mandatory. Loopback HTTP is available only when
+`api.allow_insecure_loopback_http: true` is set explicitly. Redirects are not
 followed, credentials cannot appear in the URL, reserved authentication
 headers cannot be overridden, and response bodies are size-limited.
 
@@ -177,8 +178,8 @@ from checked-in Apex Ray configuration or pull-request input. Built-in presets
 always use their preset API-key variable in CI. Preset endpoint/header
 selectors and all custom-provider selectors must appear in
 `APEX_RAY_API_ALLOWED_ENV_VARS`. Outside CI, custom endpoints, selector names,
-and loopback HTTP remain configurable for local gateways and integration
-tests.
+and explicitly opted-in loopback HTTP remain configurable for local gateways
+and integration tests.
 
 ## Provider Setup Checklist
 

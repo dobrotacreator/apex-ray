@@ -29,12 +29,12 @@ from apex_ray.report.coverage_breakdown import (
     _build_slice_coverage,
     _coverage_ratio,
     _is_high_risk_pack,
-    _pack_review_slice,
     _pack_risk_by_severity,
     _pack_scope,
     _pack_symbol_names,
     _source_line_coverage_ratio,
     pack_residual_priority,
+    pack_review_slice,
 )
 from apex_ray.report.coverage_breakdown import (
     _format_pack_symbols as _format_pack_symbols,
@@ -493,15 +493,6 @@ def _build_reviewer_coverage(
             for (state_reviewer_id, _pack_id), state in effective_run_states.items()
             if state_reviewer_id == reviewer_id
         ]
-        effective_review_runs = [state.review for state in reviewer_states if state.review is not None]
-        effective_verify_runs = (
-            [run for state in reviewer_states for run in state.verify_runs] if verify_enabled else []
-        )
-        reviewed = {
-            run.context_pack_id
-            for run in effective_review_runs
-            if run.status == "ok" and run.context_pack_id is not None
-        }
         if selection is not None:
             matching_ids = list(selection.total_context_pack_ids)
             selected_ids = list(selection.selected_context_pack_ids)
@@ -513,6 +504,29 @@ def _build_reviewer_coverage(
             else:
                 matching_ids = [pack.id for pack in context_packs if pack.id in reviewer_state_ids]
                 selected_ids = list(matching_ids)
+        selected_id_set = set(selected_ids)
+        selected_states = [state for state in reviewer_states if state.context_pack_id in selected_id_set]
+        effective_review_runs = [state.review for state in selected_states if state.review is not None]
+        verification_scope_ids = {
+            pack_id
+            for (candidate_reviewer_id, pack_id), count in verification_candidate_counts.items()
+            if candidate_reviewer_id == reviewer_id and count > 0
+        }
+        verification_scope_ids.update(
+            pack_id
+            for candidate_reviewer_id, pack_id in unresolved_verification_pack_ids
+            if candidate_reviewer_id == reviewer_id
+        )
+        verification_scope_ids.update(selected_id_set)
+        verification_states = [state for state in reviewer_states if state.context_pack_id in verification_scope_ids]
+        effective_verify_runs = (
+            [run for state in verification_states for run in state.verify_runs] if verify_enabled else []
+        )
+        reviewed = {
+            run.context_pack_id
+            for run in effective_review_runs
+            if run.status == "ok" and run.context_pack_id is not None
+        }
         reviewed_ids = [pack_id for pack_id in matching_ids if pack_id in reviewed]
         missing_ids = [pack_id for pack_id in selected_ids if pack_id not in reviewed]
         reviewer_candidate_total = sum(
@@ -531,7 +545,7 @@ def _build_reviewer_coverage(
                     state.context_pack_id
                     for state in reviewer_states
                     if verify_enabled
-                    and state.context_pack_id in matching_ids
+                    and state.context_pack_id in selected_id_set
                     and state.review is not None
                     and state.review.status == "ok"
                     and state.review.findings_count > 0
@@ -623,7 +637,7 @@ def _run_state_in_reviewer_scope(
         return False
     selection = reviewer_selections.get(state.reviewer_id)
     if selection is not None:
-        return state.context_pack_id in selection.total_context_pack_ids or verification_candidate_state
+        return state.context_pack_id in selection.selected_context_pack_ids or verification_candidate_state
     if configured_reviewer_pack_ids is not None:
         return state.context_pack_id in configured_reviewer_pack_ids.get(
             state.reviewer_id,
@@ -826,7 +840,7 @@ def _build_pack_statuses(
                 file_kind=pack.file_kind,
                 status=status,
                 priority=residual.priority if residual else None,
-                slice=_pack_review_slice(pack),
+                slice=pack_review_slice(pack),
                 reason=reason,
                 review_depth=review_depth,
                 estimated_chars=pack.stats.estimated_chars,
@@ -876,7 +890,7 @@ def _build_coverage_todos(
                 file=pack.file,
                 file_kind=pack.file_kind,
                 priority=risk.priority,
-                slice=_pack_review_slice(pack),
+                slice=pack_review_slice(pack),
                 reason=risk.reason,
                 suggested_command=continue_command_for_pack(pack.id),
                 estimated_chars=pack.stats.estimated_chars,
@@ -960,7 +974,7 @@ def _build_reviewer_coverage_todos(
                     reviewer_id=reviewer.reviewer_id,
                     file_kind=pack.file_kind,
                     priority=pack_residual_priority(pack),
-                    slice=_pack_review_slice(pack),
+                    slice=pack_review_slice(pack),
                     reason=reason,
                     suggested_command=continue_command_for_pack(
                         pack.id,

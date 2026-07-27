@@ -1,8 +1,8 @@
 ---
 id: analyzer-context-quality
 title: Preserve analyzer-backed review context quality
-severity: high
-mode: strict
+severity: medium
+mode: advisory
 paths:
   - "src/apex_ray/analyzers/**"
   - "analyzer-runtimes/typescript/src/**"

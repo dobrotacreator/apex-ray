@@ -133,6 +133,7 @@ export interface RepoIndex {
   fileIdentities?: Map<string, StableFileIdentity>;
   cacheStats: RepoIndexCacheStats | null;
   partial?: boolean;
+  markModuleResolutionPartial?: () => void;
 }
 
 export interface RepoFileIndexEntry {
@@ -242,6 +243,8 @@ export interface ExportedNamesForTarget {
 export interface TsConfigPathAliases {
   basePath: string;
   mappings: TsConfigPathMapping[];
+  partial?: boolean;
+  retainedBytes?: number;
 }
 
 export interface TsConfigPathMapping {
@@ -282,6 +285,7 @@ export interface RepoIndexCacheFile {
 export interface RepoIndexCacheWriteResult {
   written: boolean;
   error: string | null;
+  limited?: boolean;
 }
 
 export interface RepoIndexCacheFileEntry {

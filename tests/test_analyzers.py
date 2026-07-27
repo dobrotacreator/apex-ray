@@ -1,6 +1,8 @@
 import json
+import os
 import shutil
 import subprocess
+import time
 import tracemalloc
 from collections.abc import Callable
 from pathlib import Path
@@ -94,6 +96,361 @@ def test_typescript_analyzer_resolves_relative_script_path_against_repo_root(
     assert result is not None
     assert seen_command is not None
     assert seen_command[1] == str(script.resolve())
+
+
+def test_typescript_analyzer_fallback_retains_custom_config_extends(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = tmp_path / "repo"
+    runtime = tmp_path / "runtime"
+    source = repo / "src" / "cart.ts"
+    base_config = repo / "configs" / "base.custom"
+    final_config = repo / "configs" / "final.rules"
+    unrelated_config = repo / "configs" / "unrelated.private"
+    script = runtime / "analyze.js"
+    source.parent.mkdir(parents=True)
+    base_config.parent.mkdir(parents=True)
+    runtime.mkdir()
+    source.write_text("export const cart = true;\n", encoding="utf-8")
+    (repo / "tsconfig.json").write_text(
+        '{"extends":"./configs/base.custom","include":["src/**/*.ts"]}\n',
+        encoding="utf-8",
+    )
+    base_config.write_text('{"extends":"./final.rules"}\n', encoding="utf-8")
+    final_config.write_text('{"compilerOptions":{"strict":true}}\n', encoding="utf-8")
+    unrelated_config.write_text('{"compilerOptions":{"strict":false}}\n', encoding="utf-8")
+    script.write_text("console.log('{}')\n", encoding="utf-8")
+    changed = ChangedFile(
+        old_path="src/cart.ts",
+        new_path="src/cart.ts",
+        language="typescript",
+        file_kind=FileKind.SOURCE,
+    )
+    seen_manifest: dict[str, object] | None = None
+
+    monkeypatch.setattr("apex_ray.analyzers.typescript.shutil.which", lambda name: "/usr/bin/node")
+
+    def fake_run(
+        args: list[str],
+        *,
+        cwd: Path,
+        timeout: float,
+    ) -> subprocess.CompletedProcess[str]:
+        nonlocal seen_manifest
+        manifest_index = args.index("--file-manifest") + 1
+        seen_manifest = json.loads(Path(args[manifest_index]).read_text(encoding="utf-8"))
+        payload = {
+            "language": "typescript",
+            "projectRoot": str(repo),
+            "tsconfigPath": None,
+            "files": [],
+            "warnings": [],
+            "indexCache": None,
+        }
+        return subprocess.CompletedProcess(args, 0, stdout=json.dumps(payload), stderr="")
+
+    monkeypatch.setattr("apex_ray.analyzers.typescript._run_analyzer_process", fake_run)
+
+    result = run_typescript_analyzer(
+        repo,
+        [changed],
+        AnalyzerConfig(script_path=str(script)),
+    )
+
+    assert result is not None
+    assert seen_manifest is not None
+    assert seen_manifest["config_files"] == [
+        "configs/base.custom",
+        "configs/final.rules",
+        "tsconfig.json",
+    ]
+    assert "configs/unrelated.private" not in seen_manifest["config_files"]
+
+
+def test_typescript_analyzer_fallback_rejects_gitignored_custom_config_extends(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = tmp_path / "repo"
+    runtime = tmp_path / "runtime"
+    source = repo / "src" / "cart.ts"
+    private_config = repo / "configs" / "private.custom"
+    script = runtime / "analyze.js"
+    source.parent.mkdir(parents=True)
+    private_config.parent.mkdir(parents=True)
+    runtime.mkdir()
+    source.write_text("export const cart = true;\n", encoding="utf-8")
+    (repo / "tsconfig.json").write_text(
+        '{"extends":"./configs/private.custom","include":["src/**/*.ts"]}\n',
+        encoding="utf-8",
+    )
+    private_config.write_text('{"compilerOptions":{"strict":true}}\n', encoding="utf-8")
+    (repo / ".gitignore").write_text("configs/private.custom\n", encoding="utf-8")
+    script.write_text("console.log('{}')\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "add", ".gitignore", "src/cart.ts", "tsconfig.json"],
+        cwd=repo,
+        check=True,
+    )
+    ignored = subprocess.run(
+        ["git", "check-ignore", "-q", "--", "configs/private.custom"],
+        cwd=repo,
+        check=False,
+    )
+    assert ignored.returncode == 0
+    changed = ChangedFile(
+        old_path="src/cart.ts",
+        new_path="src/cart.ts",
+        language="typescript",
+        file_kind=FileKind.SOURCE,
+    )
+    seen_manifest: dict[str, object] | None = None
+
+    monkeypatch.setattr("apex_ray.analyzers.typescript.shutil.which", lambda name: "/usr/bin/node")
+
+    def fake_run(
+        args: list[str],
+        *,
+        cwd: Path,
+        timeout: float,
+    ) -> subprocess.CompletedProcess[str]:
+        nonlocal seen_manifest
+        manifest_index = args.index("--file-manifest") + 1
+        seen_manifest = json.loads(Path(args[manifest_index]).read_text(encoding="utf-8"))
+        payload = {
+            "language": "typescript",
+            "projectRoot": str(repo),
+            "tsconfigPath": None,
+            "files": [],
+            "warnings": [],
+            "indexCache": None,
+        }
+        return subprocess.CompletedProcess(args, 0, stdout=json.dumps(payload), stderr="")
+
+    monkeypatch.setattr("apex_ray.analyzers.typescript._run_analyzer_process", fake_run)
+
+    result = run_typescript_analyzer(
+        repo,
+        [changed],
+        AnalyzerConfig(script_path=str(script)),
+    )
+
+    assert result is not None
+    assert seen_manifest is not None
+    assert seen_manifest["config_files"] == ["tsconfig.json"]
+
+
+def test_typescript_analyzer_fallback_retains_tracked_ignored_package_config_extends(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = tmp_path / "repo"
+    runtime = tmp_path / "runtime"
+    source = repo / "src" / "cart.ts"
+    package = repo / "packages" / "review-config"
+    exports_package = repo / "packages" / "export-review"
+    conventional_package = repo / "packages" / "conventional-review"
+    base_config = package / "base.custom"
+    nested_config = package / "nested.rules"
+    exported_config = exports_package / "strict.custom"
+    exported_nested_config = exports_package / "nested.rules"
+    conventional_config = conventional_package / "tsconfig"
+    conventional_nested_config = conventional_package / "nested.rules"
+    script = runtime / "analyze.js"
+    source.parent.mkdir(parents=True)
+    package.mkdir(parents=True)
+    exports_package.mkdir(parents=True)
+    conventional_package.mkdir(parents=True)
+    runtime.mkdir()
+    source.write_text("export const cart = true;\n", encoding="utf-8")
+    (repo / "tsconfig.json").write_text(
+        ('{"extends":["review-config","export-review/strict","conventional-review"],"include":["src/**/*.ts"]}\n'),
+        encoding="utf-8",
+    )
+    (package / "package.json").write_text(
+        '{"name":"review-config","tsconfig":"./base.custom"}\n',
+        encoding="utf-8",
+    )
+    base_config.write_text('{"extends":"./nested.rules"}\n', encoding="utf-8")
+    nested_config.write_text('{"compilerOptions":{"strict":true}}\n', encoding="utf-8")
+    (exports_package / "package.json").write_text(
+        '{"name":"export-review","exports":{"./strict":"./strict.custom"}}\n',
+        encoding="utf-8",
+    )
+    exported_config.write_text('{"extends":"./nested.rules"}\n', encoding="utf-8")
+    exported_nested_config.write_text("{}\n", encoding="utf-8")
+    (conventional_package / "package.json").write_text(
+        '{"name":"conventional-review"}\n',
+        encoding="utf-8",
+    )
+    conventional_config.write_text('{"extends":"./nested.rules"}\n', encoding="utf-8")
+    conventional_nested_config.write_text("{}\n", encoding="utf-8")
+    (repo / ".gitignore").write_text(
+        "packages/review-config/base.custom\n",
+        encoding="utf-8",
+    )
+    script.write_text("console.log('{}')\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(
+        [
+            "git",
+            "add",
+            ".gitignore",
+            "src/cart.ts",
+            "tsconfig.json",
+            "packages/conventional-review/nested.rules",
+            "packages/conventional-review/package.json",
+            "packages/conventional-review/tsconfig",
+            "packages/export-review/nested.rules",
+            "packages/export-review/package.json",
+            "packages/export-review/strict.custom",
+            "packages/review-config/package.json",
+            "packages/review-config/nested.rules",
+        ],
+        cwd=repo,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "add", "-f", "packages/review-config/base.custom"],
+        cwd=repo,
+        check=True,
+    )
+    changed = ChangedFile(
+        old_path="src/cart.ts",
+        new_path="src/cart.ts",
+        language="typescript",
+        file_kind=FileKind.SOURCE,
+    )
+    seen_manifest: dict[str, object] | None = None
+
+    monkeypatch.setattr("apex_ray.analyzers.typescript.shutil.which", lambda name: "/usr/bin/node")
+
+    def fake_run(
+        args: list[str],
+        *,
+        cwd: Path,
+        timeout: float,
+    ) -> subprocess.CompletedProcess[str]:
+        nonlocal seen_manifest
+        manifest_index = args.index("--file-manifest") + 1
+        seen_manifest = json.loads(Path(args[manifest_index]).read_text(encoding="utf-8"))
+        payload = {
+            "language": "typescript",
+            "projectRoot": str(repo),
+            "tsconfigPath": None,
+            "files": [],
+            "warnings": [],
+            "indexCache": None,
+        }
+        return subprocess.CompletedProcess(args, 0, stdout=json.dumps(payload), stderr="")
+
+    monkeypatch.setattr("apex_ray.analyzers.typescript._run_analyzer_process", fake_run)
+
+    result = run_typescript_analyzer(
+        repo,
+        [changed],
+        AnalyzerConfig(script_path=str(script)),
+    )
+
+    assert result is not None
+    assert seen_manifest is not None
+    assert seen_manifest["package_files"] == [
+        "packages/conventional-review/package.json",
+        "packages/export-review/package.json",
+        "packages/review-config/package.json",
+    ]
+    assert seen_manifest["config_files"] == [
+        "packages/conventional-review/nested.rules",
+        "packages/conventional-review/package.json",
+        "packages/conventional-review/tsconfig",
+        "packages/export-review/nested.rules",
+        "packages/export-review/package.json",
+        "packages/export-review/strict.custom",
+        "packages/review-config/base.custom",
+        "packages/review-config/nested.rules",
+        "packages/review-config/package.json",
+        "tsconfig.json",
+    ]
+
+
+def test_typescript_fallback_does_not_read_ignored_custom_config_extends(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest_path = tmp_path / "files.json"
+    (tmp_path / "tsconfig.json").write_text(
+        '{"extends":"./ignored/private.custom"}\n',
+        encoding="utf-8",
+    )
+    private_config = tmp_path / "ignored" / "private.custom"
+    private_config.parent.mkdir()
+    private_config.write_text('{"extends":"./nested.rules"}\n', encoding="utf-8")
+    (tmp_path / "ignored" / "nested.rules").write_text("{}\n", encoding="utf-8")
+    original_read = typescript_analyzer_module._read_inventory_config
+    reads: list[Path] = []
+
+    def record_read(
+        repo_root: Path,
+        relative_path: Path,
+        *,
+        check_deadline: Callable[[], None] = lambda: None,
+    ) -> str | None:
+        reads.append(relative_path)
+        return original_read(
+            repo_root,
+            relative_path,
+            check_deadline=check_deadline,
+        )
+
+    monkeypatch.setattr(typescript_analyzer_module, "_read_inventory_config", record_read)
+
+    typescript_analyzer_module._write_typescript_file_manifest(
+        tmp_path,
+        manifest_path,
+        ignored_patterns=["ignored/**"],
+    )
+
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert payload["config_files"] == ["tsconfig.json"]
+    assert Path("ignored/private.custom") not in reads
+    assert Path("ignored/nested.rules") not in reads
+
+
+def test_typescript_fallback_caps_custom_config_extends_chain(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(typescript_analyzer_module, "TS_FILE_MANIFEST_ENTRY_LIMIT", 2)
+    manifest_path = tmp_path / "files.json"
+    (tmp_path / "tsconfig.json").write_text(
+        '{"extends":"./configs/base.custom"}\n',
+        encoding="utf-8",
+    )
+    config_dir = tmp_path / "configs"
+    config_dir.mkdir()
+    (config_dir / "base.custom").write_text(
+        '{"extends":"./nested.rules"}\n',
+        encoding="utf-8",
+    )
+    (config_dir / "nested.rules").write_text(
+        '{"extends":"./unbounded.private"}\n',
+        encoding="utf-8",
+    )
+    (config_dir / "unbounded.private").write_text("{}\n", encoding="utf-8")
+
+    typescript_analyzer_module._write_typescript_file_manifest(
+        tmp_path,
+        manifest_path,
+    )
+
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert payload["config_files"] == [
+        "configs/base.custom",
+        "tsconfig.json",
+    ]
+    assert "fallback config discovery reached the 2 relevant-file safety limit" in payload["partial_reason"]
 
 
 def test_typescript_analyzer_passes_internal_time_budget(
@@ -546,6 +903,344 @@ def test_typescript_manifest_follows_wildcard_package_export_subpath(tmp_path: P
     ]
 
 
+def test_typescript_package_export_traversal_is_bounded_and_deduplicated() -> None:
+    repeated_target = "./configs/strict.custom"
+    repeated_exports = [repeated_target] * 500_000
+    deadline_checks = 0
+
+    def check_deadline() -> None:
+        nonlocal deadline_checks
+        deadline_checks += 1
+
+    tracemalloc.start()
+    started_at = time.monotonic()
+    try:
+        targets = typescript_analyzer_module._package_export_targets(
+            repeated_exports,
+            "",
+            check_deadline=check_deadline,
+        )
+        _current, peak_bytes = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert targets == (repeated_target,)
+    assert deadline_checks <= typescript_analyzer_module.TS_PACKAGE_EXPORT_ENTRY_LIMIT + 4
+    assert peak_bytes < 1024 * 1024
+    assert time.monotonic() - started_at < 1.0
+
+    unique_exports = [
+        f"./configs/target-{index}.custom"
+        for index in range(typescript_analyzer_module.TS_PACKAGE_EXPORT_TARGET_LIMIT + 10)
+    ]
+    unique_targets = typescript_analyzer_module._package_export_targets(
+        unique_exports,
+        "",
+    )
+    assert len(unique_targets) == typescript_analyzer_module.TS_PACKAGE_EXPORT_TARGET_LIMIT
+    assert len(set(unique_targets)) == len(unique_targets)
+
+
+def test_typescript_package_export_truncation_is_reported_only_for_rejected_work(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(typescript_analyzer_module, "TS_PACKAGE_EXPORT_ENTRY_LIMIT", 20)
+    monkeypatch.setattr(typescript_analyzer_module, "TS_PACKAGE_EXPORT_TARGET_LIMIT", 3)
+    complete_reasons: list[str] = []
+
+    complete_targets = typescript_analyzer_module._package_export_targets(
+        ["./one", "./two", "./three"],
+        "",
+        on_limit=complete_reasons.append,
+    )
+
+    assert complete_targets == ("./one", "./two", "./three")
+    assert complete_reasons == []
+
+    exact_key_reasons: list[str] = []
+    exact_key_targets = typescript_analyzer_module._package_export_targets(
+        {
+            "./miss-0/*": "./miss-0/*.custom",
+            "./miss-1/*": "./miss-1/*.custom",
+            "./miss-2/*": "./miss-2/*.custom",
+            "./wanted": "./wanted.custom",
+        },
+        "wanted",
+        on_limit=exact_key_reasons.append,
+    )
+
+    assert exact_key_targets == ("./wanted.custom",)
+    assert exact_key_reasons == []
+
+    truncated_reasons: list[str] = []
+    truncated_targets = typescript_analyzer_module._package_export_targets(
+        ["./one", "./two", "./three", "./four"],
+        "",
+        on_limit=truncated_reasons.append,
+    )
+
+    assert truncated_targets == ("./one", "./two", "./three")
+    assert len(truncated_reasons) == 1
+    assert "package exports traversal reached" in truncated_reasons[0]
+
+
+def test_typescript_package_export_entry_truncation_marks_manifest_partial(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(typescript_analyzer_module, "TS_PACKAGE_EXPORT_ENTRY_LIMIT", 4)
+    project_content = {
+        Path("tsconfig.json"): '{"extends":"review-config/wanted"}',
+        Path("packages/review-config/package.json"): json.dumps(
+            {
+                "name": "review-config",
+                "exports": {
+                    "./miss-0/*": "./miss-0/*.custom",
+                    "./miss-1/*": "./miss-1/*.custom",
+                    "./miss-2/*": "./miss-2/*.custom",
+                    "./*": "./*.custom",
+                },
+            }
+        ),
+        Path("packages/review-config/wanted.custom"): "{}",
+    }
+    for relative_path, content in project_content.items():
+        target = tmp_path / relative_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+    manifest_path = tmp_path / "files.json"
+
+    typescript_analyzer_module._write_typescript_file_manifest(
+        tmp_path,
+        manifest_path,
+        project_files=list(project_content),
+    )
+
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert "package exports traversal reached" in payload["partial_reason"]
+
+
+def test_typescript_package_export_rejects_giant_wildcard_target_before_materializing() -> None:
+    wildcard_pattern = "*" * 100_000
+    wildcard_value = "x" * 100_000
+    partial_reasons: list[str] = []
+
+    tracemalloc.start()
+    try:
+        targets = typescript_analyzer_module._package_export_targets(
+            {"./*": wildcard_pattern},
+            wildcard_value,
+            on_limit=partial_reasons.append,
+        )
+        _current, peak_bytes = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert targets == ()
+    assert len(partial_reasons) == 1
+    assert "retained-target-byte safety limits" in partial_reasons[0]
+    assert peak_bytes < 2 * 1024 * 1024
+
+
+def test_typescript_package_export_charges_aggregate_bytes_after_deduplication(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        typescript_analyzer_module,
+        "TS_PACKAGE_EXPORT_SINGLE_TARGET_BYTE_LIMIT",
+        100,
+    )
+    monkeypatch.setattr(
+        typescript_analyzer_module,
+        "TS_PACKAGE_EXPORT_TARGET_BYTES_LIMIT",
+        13,
+    )
+    partial_reasons: list[str] = []
+
+    targets = typescript_analyzer_module._package_export_targets(
+        {"./*": ["./aa*", "./bb*", "./aa*", "./*"]},
+        "x",
+        on_limit=partial_reasons.append,
+    )
+
+    assert targets == ("./aax", "./bbx", "./x")
+    assert partial_reasons == []
+
+
+def test_typescript_package_export_handles_surrogateescaped_and_invalid_targets() -> None:
+    surrogateescape_reasons: list[str] = []
+
+    targets = typescript_analyzer_module._package_export_targets(
+        ["./config-\udcff.custom"],
+        "",
+        on_limit=surrogateescape_reasons.append,
+    )
+
+    assert targets == ("./config-\udcff.custom",)
+    assert surrogateescape_reasons == []
+
+    invalid_reasons: list[str] = []
+    invalid_targets = typescript_analyzer_module._package_export_targets(
+        ["./config-\ud800.custom"],
+        "",
+        on_limit=invalid_reasons.append,
+    )
+
+    assert invalid_targets == ()
+    assert len(invalid_reasons) == 1
+    assert "package exports traversal reached" in invalid_reasons[0]
+
+
+def test_typescript_manifest_marks_invalid_package_export_surrogate_partial(
+    tmp_path: Path,
+) -> None:
+    project_content = {
+        Path("tsconfig.json"): '{"extends":"review-config"}',
+        Path("packages/review-config/package.json"): json.dumps(
+            {
+                "name": "review-config",
+                "exports": {".": "./config-\ud800.custom"},
+            }
+        ),
+    }
+    for relative_path, content in project_content.items():
+        target = tmp_path / relative_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+    manifest_path = tmp_path / "files.json"
+
+    typescript_analyzer_module._write_typescript_file_manifest(
+        tmp_path,
+        manifest_path,
+        project_files=list(project_content),
+    )
+
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert payload["config_files"] == [
+        "packages/review-config/package.json",
+        "tsconfig.json",
+    ]
+    assert payload["partial_reason"].count("package exports traversal reached") == 1
+
+
+def test_typescript_package_index_uses_aggregate_byte_and_object_budgets(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    invalid_package_paths = [
+        Path("packages/00-invalid/package.json"),
+        Path("packages/01-nameless/package.json"),
+    ]
+    for package_path, content in zip(
+        invalid_package_paths,
+        ("{", '{"exports": "./base.custom"}'),
+        strict=True,
+    ):
+        target = tmp_path / package_path
+        target.parent.mkdir(parents=True)
+        target.write_text(content, encoding="utf-8")
+    package_paths: list[Path] = []
+    for index in range(4):
+        package_path = Path(f"packages/config-{index}/package.json")
+        target = tmp_path / package_path
+        target.parent.mkdir(parents=True)
+        target.write_text(
+            json.dumps(
+                {
+                    "name": f"config-{index}",
+                    "exports": {".": ["./base.custom"] * 1_000},
+                }
+            ),
+            encoding="utf-8",
+        )
+        package_paths.append(package_path)
+    inventory_by_path = {path.as_posix(): path for path in [*invalid_package_paths, *package_paths]}
+    reads: list[Path] = []
+    original_read = typescript_analyzer_module._read_inventory_config
+
+    def record_read(
+        repo_root: Path,
+        relative_path: Path,
+        *,
+        check_deadline: Callable[[], None] = lambda: None,
+    ) -> str | None:
+        reads.append(relative_path)
+        return original_read(
+            repo_root,
+            relative_path,
+            check_deadline=check_deadline,
+        )
+
+    monkeypatch.setattr(typescript_analyzer_module, "_read_inventory_config", record_read)
+    monkeypatch.setattr(typescript_analyzer_module, "TS_PACKAGE_INDEX_ENTRY_LIMIT", 2)
+    monkeypatch.setattr(
+        typescript_analyzer_module,
+        "TS_PACKAGE_INDEX_BYTE_LIMIT",
+        sum((tmp_path / path).stat().st_size for path in package_paths[:2]),
+    )
+
+    tracemalloc.start()
+    try:
+        package_index = typescript_analyzer_module._build_typescript_package_index(
+            tmp_path,
+            inventory_by_path,
+        )
+        _current, peak_bytes = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert sorted(package_index.packages) == ["config-0", "config-1"]
+    assert reads == [*invalid_package_paths, *package_paths[:2]]
+    assert peak_bytes < 2 * 1024 * 1024
+    assert package_index.partial_reason is not None
+    assert "package metadata index reached" in package_index.partial_reason
+    assert "2-object" in package_index.partial_reason
+
+    root_config = Path("tsconfig.json")
+    (tmp_path / root_config).write_text(
+        '{"extends":"config-3"}\n',
+        encoding="utf-8",
+    )
+    manifest_path = tmp_path / "files.json"
+    typescript_analyzer_module._write_typescript_file_manifest(
+        tmp_path,
+        manifest_path,
+        project_files=[root_config, *invalid_package_paths, *package_paths],
+    )
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert "package metadata index reached" in payload["partial_reason"]
+
+
+def test_typescript_package_candidate_groups_have_one_aggregate_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        typescript_analyzer_module,
+        "TS_PACKAGE_EXTENDS_CANDIDATE_GROUP_LIMIT",
+        3,
+    )
+    packages = tuple(
+        typescript_analyzer_module._TypescriptPackageConfig(
+            directory=f"packages/config-{index}",
+            tsconfig=None,
+            exports={"./strict": [f"./target-{target}.custom" for target in range(10)]},
+        )
+        for index in range(10)
+    )
+
+    partial_reasons: list[str] = []
+    candidate_groups = typescript_analyzer_module._inventory_package_extends_candidate_groups(
+        ("review-config", "strict"),
+        {"review-config": packages},
+        on_limit=partial_reasons.append,
+    )
+
+    assert len(candidate_groups) == 3
+    assert candidate_groups == tuple(sorted(set(candidate_groups)))
+    assert len(partial_reasons) == 1
+    assert "3-candidate-group safety limit" in partial_reasons[0]
+
+
 def test_typescript_manifest_reads_utf16_config_chain(tmp_path: Path) -> None:
     manifest_path = tmp_path / "files.json"
     root_config = tmp_path / "tsconfig.json"
@@ -763,6 +1458,530 @@ def test_typescript_manifest_marks_entry_limit_truncation_without_exceeding_cons
     assert "producer reached the 3-entry safety limit" in payload["partial_reason"]
 
 
+def test_typescript_manifest_deduplicates_canonical_paths_before_limits(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(typescript_analyzer_module, "TS_FILE_MANIFEST_ENTRY_LIMIT", 2)
+    monkeypatch.setattr(typescript_analyzer_module, "TS_INVENTORY_CASE_SENSITIVE", False)
+    inventory = [
+        Path("A.ts"),
+        Path("a.ts"),
+        Path("A.ts"),
+        Path("b.ts"),
+        Path("b.ts"),
+    ]
+    manifest_path = tmp_path / "files.json"
+
+    typescript_analyzer_module._write_typescript_file_manifest(
+        tmp_path,
+        manifest_path,
+        project_files=inventory,
+    )
+
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert payload["files"] == ["A.ts", "b.ts"]
+    assert "partial_reason" not in payload
+
+    exact_size = manifest_path.stat().st_size
+    monkeypatch.setattr(
+        typescript_analyzer_module,
+        "TS_FILE_MANIFEST_BYTE_LIMIT",
+        exact_size,
+    )
+    typescript_analyzer_module._write_typescript_file_manifest(
+        tmp_path,
+        manifest_path,
+        project_files=inventory,
+    )
+
+    assert json.loads(manifest_path.read_text(encoding="utf-8"))["files"] == [
+        "A.ts",
+        "b.ts",
+    ]
+
+
+def test_typescript_supplied_inventory_filters_candidates_before_retention(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(typescript_analyzer_module, "TS_FALLBACK_INVENTORY_ENTRY_LIMIT", 2)
+    manifest_path = tmp_path / "files.json"
+
+    typescript_analyzer_module._write_typescript_file_manifest(
+        tmp_path,
+        manifest_path,
+        project_files=[
+            Path("a.txt"),
+            Path("b.md"),
+            Path("../outside.ts"),
+            Path("/absolute.ts"),
+            Path("src/changed.ts"),
+            Path("tsconfig.json"),
+            Path("src/dropped.ts"),
+        ],
+    )
+
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert payload["files"] == ["src/changed.ts"]
+    assert payload["package_files"] == []
+    assert payload["config_files"] == ["tsconfig.json"]
+    assert "supplied project inventory reached the 2-entry safety limit" in payload["partial_reason"]
+
+
+@pytest.mark.parametrize("inventory_source", ["supplied", "git", "walk"])
+def test_typescript_inventory_source_limit_does_not_starve_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    inventory_source: str,
+) -> None:
+    monkeypatch.setattr(typescript_analyzer_module, "TS_FILE_MANIFEST_ENTRY_LIMIT", 2)
+    monkeypatch.setattr(typescript_analyzer_module, "TS_FALLBACK_INVENTORY_ENTRY_LIMIT", 20)
+    source_paths = [Path(f"a-source-{index}.ts") for index in range(3)]
+    package_path = Path("z-metadata/package.json")
+    config_path = Path("z-metadata/tsconfig.json")
+    project_files = [*source_paths, package_path, config_path]
+    for source_path in source_paths:
+        (tmp_path / source_path).write_text(
+            f"export const value{source_path.stem[-1]} = true;\n",
+            encoding="utf-8",
+        )
+    (tmp_path / package_path).parent.mkdir()
+    (tmp_path / package_path).write_text('{"name":"metadata"}\n', encoding="utf-8")
+    (tmp_path / config_path).write_text("{}\n", encoding="utf-8")
+
+    if inventory_source == "git":
+        subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+        subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+        supplied_files: list[Path] | None = None
+    elif inventory_source == "walk":
+        original_scandir = typescript_analyzer_module.os.scandir
+
+        class _SortedScandir:
+            def __init__(self, directory: str | os.PathLike[str]) -> None:
+                with original_scandir(directory) as entries:
+                    self._entries = sorted(entries, key=lambda entry: entry.name)
+
+            def __enter__(self) -> object:
+                return iter(self._entries)
+
+            def __exit__(self, *_args: object) -> None:
+                return None
+
+        monkeypatch.setattr(typescript_analyzer_module.os, "scandir", _SortedScandir)
+        supplied_files = None
+    else:
+        supplied_files = project_files
+
+    manifest_path = tmp_path / "files.json"
+    typescript_analyzer_module._write_typescript_file_manifest(
+        tmp_path,
+        manifest_path,
+        project_files=supplied_files,
+    )
+
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert payload["files"] == [path.as_posix() for path in source_paths[:2]]
+    assert payload["package_files"] == [package_path.as_posix()]
+    assert payload["config_files"] == [
+        package_path.as_posix(),
+        config_path.as_posix(),
+    ]
+    expected_limit_reason = (
+        "producer reached the 2-entry safety limit"
+        if inventory_source == "supplied"
+        else "2 relevant-file safety limit"
+    )
+    assert expected_limit_reason in payload["partial_reason"]
+
+
+@pytest.mark.parametrize("inventory_source", ["supplied", "git"])
+def test_typescript_inventory_prioritizes_critical_configs_over_ordinary_json(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    inventory_source: str,
+) -> None:
+    monkeypatch.setattr(typescript_analyzer_module, "TS_FILE_MANIFEST_ENTRY_LIMIT", 3)
+    monkeypatch.setattr(typescript_analyzer_module, "TS_FALLBACK_INVENTORY_ENTRY_LIMIT", 20)
+    project_content = {
+        Path("a.json"): "{}",
+        Path("b.json"): "{}",
+        Path("z/package.json"): '{"name":"review-config"}',
+        Path("z/tsconfig.json"): '{"extends":"./base.custom"}',
+        Path("z/base.custom"): "{}",
+    }
+    for relative_path, content in project_content.items():
+        target = tmp_path / relative_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+    supplied_files: list[Path] | None = list(project_content)
+    if inventory_source == "git":
+        subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+        subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+        supplied_files = None
+    manifest_path = tmp_path / "files.json"
+
+    typescript_analyzer_module._write_typescript_file_manifest(
+        tmp_path,
+        manifest_path,
+        project_files=supplied_files,
+    )
+
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert payload["package_files"] == ["z/package.json"]
+    assert payload["config_files"] == [
+        "z/base.custom",
+        "z/package.json",
+        "z/tsconfig.json",
+    ]
+    assert "partial_reason" in payload
+
+
+def test_typescript_inventory_byte_limits_prioritize_critical_configs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(typescript_analyzer_module, "TS_FALLBACK_INVENTORY_PATH_BYTE_LIMIT", 180)
+    ordinary_paths = [Path(f"{prefix}/{'x' * 100}.json") for prefix in ("a", "b")]
+    critical_paths = [
+        Path("z/package.json"),
+        Path("z/tsconfig.json"),
+        Path("z/base.custom"),
+    ]
+    project_content = {
+        ordinary_paths[0]: "{}",
+        ordinary_paths[1]: "{}",
+        critical_paths[0]: '{"name":"review-config"}',
+        critical_paths[1]: '{"extends":"./base.custom"}',
+        critical_paths[2]: "{}",
+    }
+    for relative_path, content in project_content.items():
+        target = tmp_path / relative_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+    manifest_path = tmp_path / "files.json"
+
+    typescript_analyzer_module._write_typescript_file_manifest(
+        tmp_path,
+        manifest_path,
+        project_files=list(project_content),
+    )
+
+    raw_manifest = manifest_path.read_bytes()
+    payload = json.loads(raw_manifest)
+    assert len(raw_manifest) <= typescript_analyzer_module.TS_FILE_MANIFEST_BYTE_LIMIT
+    assert payload["package_files"] == ["z/package.json"]
+    assert set(
+        [
+            "z/base.custom",
+            "z/package.json",
+            "z/tsconfig.json",
+        ]
+    ) <= set(payload["config_files"])
+    assert "partial_reason" in payload
+
+
+def test_typescript_manifest_config_byte_budget_prioritizes_critical_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    byte_reason = typescript_analyzer_module._typescript_manifest_partial_reason(
+        entry_limited=False,
+        byte_limited=True,
+    )
+    assert byte_reason is not None
+    manifest_limit = typescript_analyzer_module._typescript_file_manifest_base_size(byte_reason) + 90
+    monkeypatch.setattr(
+        typescript_analyzer_module,
+        "TS_FILE_MANIFEST_BYTE_LIMIT",
+        manifest_limit,
+    )
+    ordinary_paths = [Path(f"{prefix}/{'x' * 200}.json") for prefix in ("a", "b")]
+    project_content = {
+        ordinary_paths[0]: "{}",
+        ordinary_paths[1]: "{}",
+        Path("z/package.json"): '{"name":"review-config"}',
+        Path("z/tsconfig.json"): '{"extends":"./base.custom"}',
+        Path("z/base.custom"): "{}",
+    }
+    for relative_path, content in project_content.items():
+        target = tmp_path / relative_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+    manifest_path = tmp_path / "files.json"
+
+    typescript_analyzer_module._write_typescript_file_manifest(
+        tmp_path,
+        manifest_path,
+        project_files=list(project_content),
+    )
+
+    raw_manifest = manifest_path.read_bytes()
+    payload = json.loads(raw_manifest)
+    assert len(raw_manifest) <= manifest_limit
+    assert payload["package_files"] == ["z/package.json"]
+    assert payload["config_files"] == [
+        "z/base.custom",
+        "z/package.json",
+        "z/tsconfig.json",
+    ]
+    assert f"{manifest_limit}-byte safety limit" in payload["partial_reason"]
+
+
+@pytest.mark.parametrize("metadata_first", [False, True])
+def test_typescript_retained_byte_budget_keeps_source_and_ordinary_metadata_fair_share(
+    monkeypatch: pytest.MonkeyPatch,
+    metadata_first: bool,
+) -> None:
+    monkeypatch.setattr(typescript_analyzer_module, "TS_FALLBACK_INVENTORY_PATH_BYTE_LIMIT", 240)
+    monkeypatch.setattr(typescript_analyzer_module, "TS_FALLBACK_INVENTORY_ENTRY_LIMIT", 20)
+    source_paths = [Path(f"src/source-{index}-{'s' * 35}.ts") for index in range(3)]
+    metadata_paths = [Path(f"meta/config-{index}-{'m' * 35}.json") for index in range(3)]
+    ordered_paths = [*metadata_paths, *source_paths] if metadata_first else [*source_paths, *metadata_paths]
+    retention = typescript_analyzer_module._TypescriptInventoryRetention(
+        "TypeScript fairness test",
+        enforce_section_entry_limits=False,
+    )
+
+    for path in ordered_paths:
+        retention.add(path)
+
+    inventory = retention.build()
+    assert sorted(path for path in inventory.paths if path.suffix == ".ts") == source_paths[:2]
+    assert sorted(path for path in inventory.paths if path.suffix == ".json") == metadata_paths[:2]
+    assert "retained-path safety limit" in inventory.partial_reason
+
+
+@pytest.mark.parametrize("inventory_source", ["supplied", "git"])
+def test_typescript_source_like_config_is_critical_in_both_manifest_sections(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    inventory_source: str,
+) -> None:
+    monkeypatch.setattr(typescript_analyzer_module, "TS_FILE_MANIFEST_ENTRY_LIMIT", 2)
+    monkeypatch.setattr(typescript_analyzer_module, "TS_FALLBACK_INVENTORY_ENTRY_LIMIT", 20)
+    project_content = {
+        Path("a.ts"): "export const a = true;",
+        Path("b.ts"): "export const b = true;",
+        Path("z/base.ts"): "{}",
+        Path("tsconfig.json"): '{"extends":"./z/base.ts"}',
+    }
+    for relative_path, content in project_content.items():
+        target = tmp_path / relative_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+    supplied_files: list[Path] | None = list(project_content)
+    if inventory_source == "git":
+        subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+        subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+        supplied_files = None
+    manifest_path = tmp_path / "files.json"
+
+    typescript_analyzer_module._write_typescript_file_manifest(
+        tmp_path,
+        manifest_path,
+        project_files=supplied_files,
+    )
+
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert payload["files"] == ["a.ts", "z/base.ts"]
+    assert payload["config_files"] == ["tsconfig.json", "z/base.ts"]
+    assert "partial_reason" in payload
+
+
+def test_typescript_manifest_byte_limit_reserves_metadata_sections(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(typescript_analyzer_module, "TS_FILE_MANIFEST_BYTE_LIMIT", 420)
+    source_paths = [Path(f"src/{character * 180}.ts") for character in ("a", "b", "c")]
+    package_path = Path("meta/package.json")
+    config_path = Path("meta/tsconfig.json")
+    manifest_path = tmp_path / "files.json"
+
+    typescript_analyzer_module._write_typescript_file_manifest(
+        tmp_path,
+        manifest_path,
+        project_files=[*source_paths, package_path, config_path],
+    )
+
+    raw = manifest_path.read_bytes()
+    payload = json.loads(raw)
+    assert len(raw) <= 420
+    assert payload["package_files"] == [package_path.as_posix()]
+    assert payload["config_files"] == [
+        package_path.as_posix(),
+        config_path.as_posix(),
+    ]
+    assert "420-byte safety limit" in payload["partial_reason"]
+
+
+def test_typescript_supplied_inventory_uses_case_insensitive_config_lookup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(typescript_analyzer_module, "TS_INVENTORY_CASE_SENSITIVE", False)
+    manifest_path = tmp_path / "files.json"
+    root_config = Path("tsconfig.json")
+    actual_extended_config = Path("Configs/Base.Custom")
+    (tmp_path / root_config).write_text(
+        '{"extends":"./configs/base.custom"}\n',
+        encoding="utf-8",
+    )
+    (tmp_path / actual_extended_config).parent.mkdir()
+    (tmp_path / actual_extended_config).write_text("{}\n", encoding="utf-8")
+
+    typescript_analyzer_module._write_typescript_file_manifest(
+        tmp_path,
+        manifest_path,
+        project_files=[root_config, actual_extended_config],
+    )
+
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert payload["config_files"] == [
+        actual_extended_config.as_posix(),
+        root_config.as_posix(),
+    ]
+
+
+def test_typescript_supplied_inventory_accepts_surrogateescaped_paths(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "files.json"
+    surrogate_path = Path("src/bad\udcff.ts")
+
+    typescript_analyzer_module._write_typescript_file_manifest(
+        tmp_path,
+        manifest_path,
+        project_files=[surrogate_path],
+    )
+
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert payload["files"] == [surrogate_path.as_posix()]
+
+
+def test_typescript_supplied_inventory_rejects_invalid_surrogate_without_crashing(
+    tmp_path: Path,
+) -> None:
+    manifest_path = tmp_path / "files.json"
+
+    typescript_analyzer_module._write_typescript_file_manifest(
+        tmp_path,
+        manifest_path,
+        project_files=[Path("src/bad\ud800.ts")],
+    )
+
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert payload["files"] == []
+    assert "filesystem-unrepresentable paths" in payload["partial_reason"]
+
+
+def test_typescript_fallback_rejects_invalid_surrogate_extends_without_crashing(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "tsconfig.json").write_text(
+        json.dumps({"extends": "./config-\ud800.custom"}),
+        encoding="utf-8",
+    )
+    manifest_path = tmp_path / "files.json"
+
+    typescript_analyzer_module._write_typescript_file_manifest(
+        tmp_path,
+        manifest_path,
+    )
+
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert payload["config_files"] == ["tsconfig.json"]
+    assert "filesystem-unrepresentable config path" in payload["partial_reason"]
+
+
+def test_typescript_fallback_inventory_filters_and_caps_during_traversal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(typescript_analyzer_module, "TS_FILE_MANIFEST_ENTRY_LIMIT", 2)
+    source_dir = tmp_path / "src"
+    source_dir.mkdir()
+    for index in range(100):
+        (source_dir / f"irrelevant-{index:03d}.txt").write_text("ignored\n", encoding="utf-8")
+    for index in range(3):
+        (source_dir / f"source-{index}.ts").write_text(
+            f"export const source{index} = true;\n",
+            encoding="utf-8",
+        )
+    manifest_path = tmp_path / "files.json"
+
+    typescript_analyzer_module._write_typescript_file_manifest(
+        tmp_path,
+        manifest_path,
+    )
+
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert len(payload["files"]) == 2
+    assert set(payload["files"]) <= {
+        "src/source-0.ts",
+        "src/source-1.ts",
+        "src/source-2.ts",
+    }
+    assert "fallback inventory reached the 2 relevant-file safety limit" in payload["partial_reason"]
+
+
+def test_typescript_walk_inventory_aggregates_many_filesystem_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path.resolve()
+
+    class _Entry:
+        def __init__(self, path: Path, kind: str) -> None:
+            self.path = str(path)
+            self._kind = kind
+
+        def is_dir(self, *, follow_symlinks: bool) -> bool:
+            assert not follow_symlinks
+            if self._kind == "inspect":
+                raise OSError("inspect failed")
+            return self._kind == "directory"
+
+        def is_file(self, *, follow_symlinks: bool) -> bool:
+            assert not follow_symlinks
+            if self._kind == "file-inspect":
+                raise OSError("file inspect failed")
+            return False
+
+    entries = [
+        *(_Entry(root / f"inspect-{index}", "inspect") for index in range(500)),
+        *(_Entry(root / f"file-inspect-{index}", "file-inspect") for index in range(500)),
+        *(_Entry(root / f"directory-{index}", "directory") for index in range(1_000)),
+    ]
+
+    class _Scandir:
+        def __enter__(self) -> object:
+            return iter(entries)
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+    def failing_scandir(directory: str | os.PathLike[str]) -> _Scandir:
+        if Path(directory) == root:
+            return _Scandir()
+        raise OSError("directory read failed")
+
+    monkeypatch.setattr(typescript_analyzer_module.os, "scandir", failing_scandir)
+    manifest_path = tmp_path / "files.json"
+
+    typescript_analyzer_module._write_typescript_file_manifest(
+        tmp_path,
+        manifest_path,
+    )
+
+    raw_manifest = manifest_path.read_bytes()
+    payload = json.loads(raw_manifest)
+    assert payload["files"] == []
+    assert "could not inspect 1000 filesystem entries" in payload["partial_reason"]
+    assert "could not read 1000 directories" in payload["partial_reason"]
+    assert len(payload["partial_reason"]) < 500
+    assert len(raw_manifest) <= typescript_analyzer_module.TS_FILE_MANIFEST_BYTE_LIMIT
+
+
 def test_typescript_manifest_byte_limit_includes_partial_marker_and_closing_bytes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -867,6 +2086,45 @@ def test_typescript_manifest_generation_stops_at_the_total_deadline(
     assert list(tmp_path.glob(".files.json.*.tmp")) == []
 
 
+def test_typescript_fallback_inventory_reports_the_total_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest_path = tmp_path / "files.json"
+    manifest_path.write_text('{"version":1,"files":["original.ts"]}', encoding="utf-8")
+    source_dir = tmp_path / "src"
+    source_dir.mkdir()
+    for index in range(20):
+        (source_dir / f"file-{index:02d}.ts").write_text(
+            f"export const value{index} = {index};\n",
+            encoding="utf-8",
+        )
+    clock = [0.0]
+
+    def advancing_clock() -> float:
+        clock[0] += 0.2
+        return clock[0]
+
+    monkeypatch.setattr("apex_ray.analyzers.typescript.time.monotonic", advancing_clock)
+
+    with pytest.raises(
+        AnalyzerError,
+        match="total timeout after 1s while building repository inventory",
+    ):
+        typescript_analyzer_module._write_typescript_file_manifest(
+            tmp_path,
+            manifest_path,
+            deadline=1.0,
+            total_timeout_seconds=1.0,
+        )
+
+    assert json.loads(manifest_path.read_text(encoding="utf-8")) == {
+        "version": 1,
+        "files": ["original.ts"],
+    }
+    assert list(tmp_path.glob(".files.json.*.tmp")) == []
+
+
 def test_run_analyzers_reuses_supplied_project_inventory_for_typescript_manifest(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -883,7 +2141,7 @@ def test_run_analyzers_reuses_supplied_project_inventory_for_typescript_manifest
 
     monkeypatch.setattr("apex_ray.analyzers.typescript.shutil.which", lambda name: "/usr/bin/node")
     monkeypatch.setattr(
-        "apex_ray.analyzers.typescript.list_project_files",
+        "apex_ray.analyzers.typescript._walk_bounded_typescript_inventory",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("unexpected second inventory scan")),
     )
 

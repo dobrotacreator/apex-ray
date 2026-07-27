@@ -175,6 +175,48 @@ def test_render_markdown_counts_empty_reviewer_ids_as_general() -> None:
     assert "Deep/shallow selected: `1`/`0`; findings: `1`; failed runs: `0`" in markdown
 
 
+def test_builtin_auth_heuristic_does_not_make_test_only_packs_p0() -> None:
+    source_pack = ContextPack(
+        id="src/auth.ts#authorize:1",
+        file="src/auth.ts",
+        file_kind=FileKind.SOURCE,
+        risk_signals=[
+            RiskSignal(
+                kind="auth",
+                severity=RiskSeverity.HIGH,
+                reason="Authorization-sensitive code changed.",
+                file="src/auth.ts",
+            )
+        ],
+    )
+    test_pack = ContextPack(
+        id="tests/auth.test.ts#authorize:1",
+        file="tests/auth.test.ts",
+        file_kind=FileKind.TEST,
+        risk_signals=[
+            RiskSignal(
+                kind="auth",
+                severity=RiskSeverity.HIGH,
+                reason="Authorization-sensitive test text changed.",
+                file="tests/auth.test.ts",
+            )
+        ],
+    )
+    config = ReviewConfig()
+    config.llm.enabled = True
+
+    report = build_report(
+        ProjectProfile(root="/repo", is_git_repo=True),
+        config,
+        DiffSummary(target_mode=TargetMode.PATCH),
+        context_packs=[source_pack, test_pack],
+    )
+
+    priorities = {status.context_pack_id: status.priority for status in report.llm_coverage.pack_statuses}
+    assert priorities[source_pack.id] == "p0"
+    assert priorities[test_pack.id] == "p1"
+
+
 def test_render_markdown_lists_legacy_configured_reviewers_when_selection_data_is_missing() -> None:
     config = ReviewConfig(
         reviewers=[
@@ -763,6 +805,64 @@ def test_reviewer_usage_excludes_superseded_disabled_verify_and_out_of_scope_run
     assert reviewer.estimated_input_tokens == 20
     assert reviewer.actual_total_tokens == 20
     assert reviewer.estimated_cost_usd == 0.2
+
+
+def test_unselected_pack_verifier_failure_does_not_fail_reviewer_coverage() -> None:
+    selected_pack_id = "src/auth.ts#authorize:1"
+    unselected_pack_id = "docs/session-refresh.md#file"
+    config = ReviewConfig(
+        reviewers=[
+            ReviewerConfig(
+                id="security",
+                focus="Authorization.",
+                required=True,
+                verify=True,
+            )
+        ]
+    )
+    config.llm.enabled = True
+    selection = LLMContextSelection(
+        total_context_pack_ids=[selected_pack_id, unselected_pack_id],
+        selected_context_pack_ids=[selected_pack_id],
+        deep_selected_context_pack_ids=[selected_pack_id],
+    )
+    report = build_report(
+        ProjectProfile(root="/repo", is_git_repo=True),
+        config,
+        DiffSummary(target_mode=TargetMode.PATCH),
+        context_packs=[
+            ContextPack(id=selected_pack_id, file="src/auth.ts", file_kind=FileKind.SOURCE),
+            ContextPack(id=unselected_pack_id, file="docs/session-refresh.md", file_kind=FileKind.DOCS),
+        ],
+        llm_runs=[
+            LLMRun(
+                provider="openai_api",
+                reviewer_id="security",
+                context_pack_id=selected_pack_id,
+                status="ok",
+                duration_ms=1,
+            ),
+            LLMRun(
+                kind="verify",
+                provider="openai_api",
+                reviewer_id="security",
+                context_pack_id=unselected_pack_id,
+                status="failed_rate_limit",
+                duration_ms=1,
+                estimated_input_tokens=40,
+                actual_total_tokens=40,
+            ),
+        ],
+        reviewer_selections={"security": selection},
+    )
+
+    reviewer = report.llm_coverage.reviewers[0]
+    assert reviewer.status == "pass"
+    assert reviewer.failed_verify_runs == 0
+    assert reviewer.actual_total_tokens == 0
+    assert all("failed verification run" not in reason for reason in reviewer.reasons)
+    assert report.llm_coverage.partial_severity == "minor"
+    assert all("verifier run" not in reason for reason in report.llm_coverage.partial_reasons)
 
 
 def test_sibling_verifier_failure_is_not_hidden_by_later_success() -> None:

@@ -49,6 +49,7 @@ def create_plan(options: PlanOptions) -> dict[str, Any]:
 
     workspace = options.workspace.resolve()
     runner_temp = options.runner_temp.resolve()
+    _require_isolated_action_runtime(workspace, _action_root())
     runner_temp.mkdir(parents=True, exist_ok=True)
     requested_config = _safe_repo_path(options.config_path, label="Config path")
     reviewers = parse_reviewers(options.reviewers)
@@ -86,11 +87,16 @@ def create_plan(options: PlanOptions) -> dict[str, Any]:
         repository=options.repository,
         actor=options.actor,
     )
-    base_ref = options.base.strip() or _event_base_ref(options.event)
-    base_sha = _resolve_commit(workspace, base_ref) if base_ref else ""
+    use_head_config = bool(pr_data is not None and options.trust_pr_config and not untrusted_pr)
+    # INPUT_BASE selects only the analyzed diff. Restricted configuration has a
+    # separate, fail-closed trust root supplied by the pull-request event.
+    config_base_sha = (
+        "" if pr_data is None or use_head_config else _resolve_pull_request_config_base(workspace, pr_data)
+    )
+    analysis_base_ref = options.base.strip() or _event_base_ref(options.event)
+    base_sha = _resolve_commit(workspace, analysis_base_ref) if analysis_base_ref else ""
 
     if pr_data is not None:
-        use_head_config = options.trust_pr_config and not untrusted_pr
         if use_head_config:
             head_config = safe_workspace_path(
                 workspace,
@@ -99,7 +105,6 @@ def create_plan(options: PlanOptions) -> dict[str, Any]:
             )
             raw_config = head_config.read_text(encoding="utf-8") if head_config.is_file() else None
         else:
-            config_base_sha = _resolve_pull_request_config_base(workspace, pr_data)
             raw_config = _read_git_file(workspace, config_base_sha, requested_config)
         config_document = _load_config_document(raw_config)
         safe_config = _sanitize_config(config_document, runner_temp)
@@ -168,6 +173,7 @@ def create_plan(options: PlanOptions) -> dict[str, Any]:
         "config_path": str(config_path) if config_path is not None else "",
         "config_source": config_source,
         "base_sha": base_sha,
+        "config_base_sha": config_base_sha,
         "untrusted_pr": untrusted_pr,
         "llm_mode": llm_mode,
         "reviewers": reviewers,
@@ -227,6 +233,19 @@ def safe_workspace_path(workspace: Path, value: str, *, label: str) -> Path:
     if not candidate.resolve().is_relative_to(resolved_workspace):
         raise ValueError(f"{label} must be a workspace-relative path.")
     return candidate
+
+
+def _action_root() -> Path:
+    return Path(__file__).resolve().parents[3]
+
+
+def _require_isolated_action_runtime(workspace: Path, action_root: Path) -> None:
+    resolved_workspace = workspace.resolve()
+    resolved_action_root = action_root.resolve()
+    if resolved_action_root.is_relative_to(resolved_workspace) or resolved_workspace.is_relative_to(
+        resolved_action_root
+    ):
+        raise ValueError("The locked Apex Ray Action runtime must resolve outside the repository under review.")
 
 
 def _safe_repo_path(value: str, *, label: str) -> str:
@@ -627,6 +646,8 @@ def _run(plan_path: Path) -> int:
     ):
         raise ValueError("Invalid Apex Ray Action command plan.")
     workspace_path = Path(workspace)
+    action_root = _action_root()
+    _require_isolated_action_runtime(workspace_path, action_root)
     for key, label in (
         ("markdown_output", "Markdown output"),
         ("json_output", "JSON output"),
@@ -639,7 +660,6 @@ def _run(plan_path: Path) -> int:
         if output_path.is_dir():
             raise ValueError(f"{label} must be a file path.")
         output_path.unlink(missing_ok=True)
-    action_root = Path(__file__).resolve().parents[3]
     for required_path in (
         action_root / "pyproject.toml",
         action_root / "uv.lock",

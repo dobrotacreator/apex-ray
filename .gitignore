@@ -1,5 +1,12 @@
 .venv/
 .ci-smoke-venv/
+.[eE][nN][vV]
+.[eE][nN][vV].*
+!.[eE][nN][vV]*.[eE][xX][aA][mM][pP][lL][eE]
+!.[eE][nN][vV]*.[sS][aA][mM][pP][lL][eE]
+!.[eE][nN][vV]*.[tT][eE][mM][pP][lL][aA][tT][eE]
+*.[pP][eE][mM]
+*.[kK][eE][yY]
 .worktrees/
 .pytest_cache/
 __pycache__/

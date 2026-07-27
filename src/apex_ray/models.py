@@ -1,6 +1,7 @@
 import re
 from datetime import datetime
 from enum import StrEnum
+from ipaddress import ip_address
 from typing import Literal, Self
 from urllib.parse import urlsplit
 
@@ -264,6 +265,7 @@ class LLMAPIConfig(StrictApexModel):
     retry_backoff_seconds: float = Field(default=0.5, gt=0.0, le=60.0)
     retry_max_seconds: float = Field(default=8.0, gt=0.0, le=300.0)
     use_system_proxy: bool = True
+    allow_insecure_loopback_http: bool = False
 
     @model_validator(mode="after")
     def validate_endpoint_and_headers(self) -> Self:
@@ -271,9 +273,17 @@ class LLMAPIConfig(StrictApexModel):
             raise ValueError("Use only one of base_url or base_url_env")
         if self.base_url:
             parsed = urlsplit(self.base_url)
-            loopback = parsed.hostname in {"localhost", "127.0.0.1", "::1"}
-            if parsed.scheme != "https" and not (parsed.scheme == "http" and loopback):
-                raise ValueError("API base_url must use HTTPS (HTTP is allowed only for loopback tests)")
+            raw_host = parsed.hostname or ""
+            try:
+                normalized_host = str(ip_address(raw_host))
+            except ValueError:
+                normalized_host = raw_host.lower().rstrip(".")
+            loopback = normalized_host in {"localhost", "127.0.0.1", "::1"}
+            allowed_loopback_http = self.allow_insecure_loopback_http and parsed.scheme == "http" and loopback
+            if parsed.scheme != "https" and not allowed_loopback_http:
+                raise ValueError(
+                    "API base_url must use HTTPS; loopback HTTP requires allow_insecure_loopback_http=true"
+                )
             if not parsed.hostname:
                 raise ValueError("API base_url must include a host")
             if parsed.username or parsed.password:

@@ -3,7 +3,13 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { REPO_INDEX_CACHE_FILE, REPO_INDEX_CACHE_VERSION } from "../constants.js";
+import {
+  ANALYZER_SOURCE_FILE_LIMIT,
+  REPO_INDEX_CACHE_BYTE_LIMIT,
+  REPO_INDEX_CACHE_FILE,
+  REPO_INDEX_CACHE_VERSION,
+  REPO_INDEX_SEMANTIC_ENTRY_LIMIT,
+} from "../constants.js";
 import type {
   ClassHeritageIndexEntry,
   DefaultImportIndexEntry,
@@ -23,7 +29,8 @@ import type {
   RepoIndexCacheWriteResult,
   TypeAliasIndexEntry,
 } from "../types.js";
-import { isRecord } from "../utils.js";
+import { isRecord, readStableFile } from "../utils.js";
+import { semanticEntryCountForFile } from "./collection.js";
 
 export function repoIndexCachePath(repo: string, cacheDir: string | null): string {
   const resolvedCacheDir = cacheDir ? path.resolve(repo, cacheDir) : defaultRepoIndexCacheDir(repo);
@@ -48,18 +55,190 @@ function defaultCacheHome(): string {
 export function readRepoIndexCache(
   cachePath: string,
   _inventoryFingerprint: string | null = null,
+  shouldStop: () => boolean = () => false,
 ): RepoIndexCacheFile | null {
+  if (shouldStop()) return null;
   try {
-    const parsed = JSON.parse(fs.readFileSync(cachePath, "utf-8")) as RepoIndexCacheFile;
-    if (parsed.version !== REPO_INDEX_CACHE_VERSION || !Array.isArray(parsed.files)) return null;
-    if (!parsed.files.every(isRepoIndexCacheFileEntry)) return null;
+    const snapshot = readStableFile(
+      cachePath,
+      () => true,
+      (identity) =>
+        !shouldStop() &&
+        identity.size <= REPO_INDEX_CACHE_BYTE_LIMIT,
+    );
+    if (
+      snapshot?.text === null ||
+      snapshot?.text === undefined ||
+      shouldStop()
+    ) {
+      return null;
+    }
+    if (
+      cacheVersionBeforeParse(snapshot.text) !==
+        REPO_INDEX_CACHE_VERSION ||
+      cacheJsonExceedsEntrySafetyLimit(snapshot.text, shouldStop)
+    ) {
+      return null;
+    }
+    if (shouldStop()) return null;
+    const parsed = JSON.parse(snapshot.text) as RepoIndexCacheFile;
+    if (
+      parsed.version !== REPO_INDEX_CACHE_VERSION ||
+      !Array.isArray(parsed.files) ||
+      parsed.files.length > ANALYZER_SOURCE_FILE_LIMIT
+    ) {
+      return null;
+    }
+    let semanticEntries = 0;
+    for (const file of parsed.files) {
+      if (
+        shouldStop() ||
+        !isRepoIndexCacheFileEntry(file, shouldStop)
+      ) {
+        return null;
+      }
+      const fileEntries = semanticEntryCountForFile(file);
+      if (
+        fileEntries >
+        REPO_INDEX_SEMANTIC_ENTRY_LIMIT - semanticEntries
+      ) {
+        return null;
+      }
+      semanticEntries += fileEntries;
+    }
     return parsed;
   } catch {
     return null;
   }
 }
 
-function isRepoIndexCacheFileEntry(value: unknown): value is RepoIndexCacheFileEntry {
+function cacheVersionBeforeParse(text: string): number | null {
+  const match = /^\s*\{\s*"version"\s*:\s*(-?\d+)/u.exec(text);
+  if (!match) return null;
+  const version = Number(match[1]);
+  return Number.isSafeInteger(version) ? version : null;
+}
+
+function cacheJsonExceedsEntrySafetyLimit(
+  text: string,
+  shouldStop: () => boolean,
+): boolean {
+  const stack: Array<{
+    kind: "array" | "object";
+    entries: number;
+    expectingArrayValue: boolean;
+    filesArray: boolean;
+  }> = [];
+  const aggregateArrayEntryLimit =
+    ANALYZER_SOURCE_FILE_LIMIT + REPO_INDEX_SEMANTIC_ENTRY_LIMIT;
+  let aggregateArrayEntries = 0;
+  let inString = false;
+  let escaped = false;
+  let stringValue = "";
+  let lastString: string | null = null;
+  let pendingProperty: string | null = null;
+
+  const startArrayValue = (): boolean => {
+    const parent = stack.at(-1);
+    if (parent?.kind !== "array" || !parent.expectingArrayValue) {
+      return false;
+    }
+    parent.entries += 1;
+    parent.expectingArrayValue = false;
+    aggregateArrayEntries += 1;
+    return (
+      aggregateArrayEntries > aggregateArrayEntryLimit ||
+      (parent.filesArray &&
+        parent.entries > ANALYZER_SOURCE_FILE_LIMIT)
+    );
+  };
+
+  for (let index = 0; index < text.length; index += 1) {
+    if (index % 4_096 === 0 && shouldStop()) return true;
+    const character = text[index];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (character === "\\") {
+        escaped = true;
+      } else if (character === '"') {
+        inString = false;
+        lastString = stringValue;
+      } else if (stringValue.length <= 16) {
+        stringValue += character;
+      }
+      continue;
+    }
+    if (character === '"') {
+      if (startArrayValue()) return true;
+      inString = true;
+      escaped = false;
+      stringValue = "";
+      continue;
+    }
+    if (
+      character === " " ||
+      character === "\n" ||
+      character === "\r" ||
+      character === "\t"
+    ) {
+      continue;
+    }
+    if (character === ":") {
+      pendingProperty = lastString;
+      continue;
+    }
+    if (character === ",") {
+      const parent = stack.at(-1);
+      if (parent?.kind === "array") {
+        parent.expectingArrayValue = true;
+      }
+      pendingProperty = null;
+      continue;
+    }
+    if (character === "[") {
+      if (startArrayValue()) return true;
+      const filesArray =
+        stack.length === 1 &&
+        stack[0]?.kind === "object" &&
+        pendingProperty === "files";
+      stack.push({
+        kind: "array",
+        entries: 0,
+        expectingArrayValue: true,
+        filesArray,
+      });
+      pendingProperty = null;
+      if (stack.length > 128) return true;
+      continue;
+    }
+    if (character === "{") {
+      if (startArrayValue()) return true;
+      stack.push({
+        kind: "object",
+        entries: 0,
+        expectingArrayValue: false,
+        filesArray: false,
+      });
+      pendingProperty = null;
+      if (stack.length > 128) return true;
+      continue;
+    }
+    if (character === "]" || character === "}") {
+      stack.pop();
+      pendingProperty = null;
+      continue;
+    }
+    if (startArrayValue()) return true;
+    pendingProperty = null;
+  }
+  return false;
+}
+
+function isRepoIndexCacheFileEntry(
+  value: unknown,
+  shouldStop: () => boolean,
+): value is RepoIndexCacheFileEntry {
   if (!isRecord(value)) return false;
   return (
     typeof value.relPath === "string" &&
@@ -69,32 +248,76 @@ function isRepoIndexCacheFileEntry(value: unknown): value is RepoIndexCacheFileE
     typeof value.mtimeMs === "number" &&
     typeof value.ctimeMs === "number" &&
     Array.isArray(value.imports) &&
-    value.imports.every(isImportIndexEntry) &&
+    everyCacheValue(
+      value.imports,
+      (entry): entry is ImportIndexEntry =>
+        isImportIndexEntry(entry, shouldStop),
+      shouldStop,
+    ) &&
     Array.isArray(value.exports) &&
-    value.exports.every(isExportIndexEntry) &&
+    everyCacheValue(value.exports, isExportIndexEntry, shouldStop) &&
     Array.isArray(value.identifiers) &&
-    value.identifiers.every(isIdentifierIndexEntry) &&
+    everyCacheValue(
+      value.identifiers,
+      isIdentifierIndexEntry,
+      shouldStop,
+    ) &&
     Array.isArray(value.receivers) &&
-    value.receivers.every(isReceiverIndexEntry) &&
+    everyCacheValue(value.receivers, isReceiverIndexEntry, shouldStop) &&
     Array.isArray(value.typeAliases) &&
-    value.typeAliases.every(isTypeAliasIndexEntry) &&
+    everyCacheValue(
+      value.typeAliases,
+      isTypeAliasIndexEntry,
+      shouldStop,
+    ) &&
     Array.isArray(value.classHeritages) &&
-    value.classHeritages.every(isClassHeritageIndexEntry) &&
+    everyCacheValue(
+      value.classHeritages,
+      (entry): entry is ClassHeritageIndexEntry =>
+        isClassHeritageIndexEntry(entry, shouldStop),
+      shouldStop,
+    ) &&
     Array.isArray(value.diProviders) &&
-    value.diProviders.every(isDiProviderIndexEntry) &&
+    everyCacheValue(
+      value.diProviders,
+      isDiProviderIndexEntry,
+      shouldStop,
+    ) &&
     Array.isArray(value.diInjections) &&
-    value.diInjections.every(isDiInjectionIndexEntry)
+    everyCacheValue(
+      value.diInjections,
+      isDiInjectionIndexEntry,
+      shouldStop,
+    )
   );
 }
 
-function isImportIndexEntry(value: unknown): value is ImportIndexEntry {
+function everyCacheValue<T>(
+  values: unknown[],
+  predicate: (value: unknown) => value is T,
+  shouldStop: () => boolean,
+): values is T[] {
+  for (const value of values) {
+    if (shouldStop() || !predicate(value)) return false;
+  }
+  return true;
+}
+
+function isImportIndexEntry(
+  value: unknown,
+  shouldStop: () => boolean,
+): value is ImportIndexEntry {
   return (
     isRecord(value) &&
     typeof value.moduleSpecifier === "string" &&
     (value.defaultImport === null || isDefaultImportIndexEntry(value.defaultImport)) &&
     (value.namespaceImport === null || isNamespaceImportIndexEntry(value.namespaceImport)) &&
     Array.isArray(value.namedImports) &&
-    value.namedImports.every(isNamedImportIndexEntry)
+    everyCacheValue(
+      value.namedImports,
+      isNamedImportIndexEntry,
+      shouldStop,
+    )
   );
 }
 
@@ -159,12 +382,19 @@ function isTypeAliasIndexEntry(value: unknown): value is TypeAliasIndexEntry {
   return isRecord(value) && typeof value.name === "string" && typeof value.targetName === "string";
 }
 
-function isClassHeritageIndexEntry(value: unknown): value is ClassHeritageIndexEntry {
+function isClassHeritageIndexEntry(
+  value: unknown,
+  shouldStop: () => boolean,
+): value is ClassHeritageIndexEntry {
   return (
     isRecord(value) &&
     typeof value.className === "string" &&
     Array.isArray(value.baseNames) &&
-    value.baseNames.every((name) => typeof name === "string")
+    everyCacheValue(
+      value.baseNames,
+      (name): name is string => typeof name === "string",
+      shouldStop,
+    )
   );
 }
 
@@ -197,15 +427,38 @@ export function writeRepoIndexCache(
   cachePath: string,
   files: RepoFileIndexEntry[],
   inventoryFingerprint: string | null = null,
+  shouldStop: () => boolean = () => false,
 ): RepoIndexCacheWriteResult {
   let tmpPath: string | null = null;
+  let descriptor: number | null = null;
   try {
+    if (
+      shouldStop() ||
+      files.length > ANALYZER_SOURCE_FILE_LIMIT ||
+      exceedsSemanticEntryLimit(files, shouldStop)
+    ) {
+      return { written: false, error: null, limited: true };
+    }
     fs.mkdirSync(path.dirname(cachePath), { recursive: true });
     tmpPath = `${cachePath}.${process.pid}.${Date.now()}.tmp`;
-    const payload: RepoIndexCacheFile = {
-      version: REPO_INDEX_CACHE_VERSION,
-      inventoryFingerprint,
-      files: files.map((file) => ({
+    descriptor = fs.openSync(tmpPath, "wx", 0o600);
+    const prefix =
+      `{"version":${REPO_INDEX_CACHE_VERSION},` +
+      `"inventoryFingerprint":${JSON.stringify(inventoryFingerprint)},` +
+      '"files":[';
+    const suffix = "]}";
+    let writtenBytes =
+      Buffer.byteLength(prefix, "utf8") +
+      Buffer.byteLength(suffix, "utf8");
+    if (writtenBytes > REPO_INDEX_CACHE_BYTE_LIMIT) {
+      return { written: false, error: null, limited: true };
+    }
+    writeUtf8(descriptor, prefix);
+    for (const [index, file] of files.entries()) {
+      if (shouldStop()) {
+        return { written: false, error: null, limited: true };
+      }
+      const cacheEntry: RepoIndexCacheFileEntry = {
         relPath: file.relPath,
         dev: file.dev,
         ino: file.ino,
@@ -220,22 +473,79 @@ export function writeRepoIndexCache(
         classHeritages: file.classHeritages,
         diProviders: file.diProviders,
         diInjections: file.diInjections,
-      })),
-    };
-    fs.writeFileSync(tmpPath, JSON.stringify(payload), "utf-8");
+      };
+      const serialized = `${index === 0 ? "" : ","}${JSON.stringify(cacheEntry)}`;
+      const serializedBytes = Buffer.byteLength(serialized, "utf8");
+      if (
+        serializedBytes >
+        REPO_INDEX_CACHE_BYTE_LIMIT - writtenBytes
+      ) {
+        return { written: false, error: null, limited: true };
+      }
+      writeUtf8(descriptor, serialized);
+      writtenBytes += serializedBytes;
+    }
+    writeUtf8(descriptor, suffix);
+    fs.closeSync(descriptor);
+    descriptor = null;
     fs.renameSync(tmpPath, cachePath);
+    tmpPath = null;
     return { written: true, error: null };
   } catch (error) {
-    if (tmpPath !== null) {
-      try {
-        fs.rmSync(tmpPath, { force: true });
-      } catch {
-        // Preserve the original write error as the actionable diagnostic.
-      }
-    }
     return {
       written: false,
       error: error instanceof Error ? error.message : String(error),
     };
+  } finally {
+    if (descriptor !== null) {
+      try {
+        fs.closeSync(descriptor);
+      } catch {
+        // Preserve the original write or limit result.
+      }
+    }
+    if (tmpPath !== null) {
+      try {
+        fs.rmSync(tmpPath, { force: true });
+      } catch {
+        // Preserve the original write or limit result.
+      }
+    }
+  }
+}
+
+function exceedsSemanticEntryLimit(
+  files: RepoFileIndexEntry[],
+  shouldStop: () => boolean,
+): boolean {
+  let semanticEntries = 0;
+  for (const file of files) {
+    if (shouldStop()) return true;
+    const fileEntries = semanticEntryCountForFile(file);
+    if (
+      fileEntries >
+      REPO_INDEX_SEMANTIC_ENTRY_LIMIT - semanticEntries
+    ) {
+      return true;
+    }
+    semanticEntries += fileEntries;
+  }
+  return false;
+}
+
+function writeUtf8(descriptor: number, text: string): void {
+  const buffer = Buffer.from(text, "utf8");
+  let offset = 0;
+  while (offset < buffer.length) {
+    const written = fs.writeSync(
+      descriptor,
+      buffer,
+      offset,
+      buffer.length - offset,
+    );
+    if (written <= 0) {
+      throw new Error("repo index cache write made no progress");
+    }
+    offset += written;
   }
 }

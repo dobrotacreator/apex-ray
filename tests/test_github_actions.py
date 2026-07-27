@@ -224,10 +224,13 @@ def test_action_builds_its_pinned_source_with_hash_locked_dependencies() -> None
     runtime = next(step for step in steps if step["name"] == "Prepare locked Apex Ray runtime")
 
     assert steps.index(verify_source) < steps.index(checkout)
+    assert steps.index(runtime) < steps.index(checkout)
     assert verify_source["env"]["APEX_RAY_ACTION_REF"] == "${{ github.action_ref }}"
+    assert verify_source["env"]["APEX_RAY_ACTION_PATH"] == "${{ github.action_path }}"
+    assert verify_source["env"]["APEX_RAY_WORKSPACE"] == "${{ github.workspace }}"
     assert "^[0-9a-f]{40}$" in verify_source["run"]
     assert "local paths and mutable tags are not supported" in verify_source["run"]
-    assert checkout["with"]["path"] == ".apex-ray/repository"
+    assert checkout["with"]["path"] == (".apex-ray-review-${{ github.run_id }}-${{ github.run_attempt }}/repository")
     assert re.fullmatch(r"3\.14\.\d+", setup_python["with"]["python-version"])
     assert re.fullmatch(r"24\.\d+\.\d+", setup_node["with"]["node-version"])
     assert re.fullmatch(r"\d+\.\d+\.\d+", setup_uv["with"]["version"])
@@ -248,7 +251,9 @@ def test_action_builds_its_pinned_source_with_hash_locked_dependencies() -> None
         assert step["env"]["PYTHONNOUSERSITE"] == "1"
     prepare = next(step for step in steps if step.get("id") == "prepare")
     assert prepare["env"]["APEX_RAY_REPOSITORY_PATH"] == (
-        "${{ inputs.checkout == 'true' && format('{0}/.apex-ray/repository', github.workspace) || github.workspace }}"
+        "${{ inputs.checkout == 'true' && "
+        "format('{0}/.apex-ray-review-{1}-{2}/repository', "
+        "github.workspace, github.run_id, github.run_attempt) || github.workspace }}"
     )
 
     upload_artifact = next(step for step in steps if step.get("id") == "upload-artifact")
@@ -271,13 +276,74 @@ def test_action_builds_its_pinned_source_with_hash_locked_dependencies() -> None
     assert "apex-ray==" not in serialized
 
 
+@pytest.mark.parametrize(
+    "source_kind",
+    ["remote", "local", "symlink-to-local"],
+)
+def test_action_rejects_a_local_runtime_inside_the_review_workspace(
+    tmp_path: Path,
+    source_kind: str,
+) -> None:
+    action = yaml.safe_load(ACTION_PATH.read_text(encoding="utf-8"))
+    verify_source = next(step for step in action["runs"]["steps"] if step.get("id") == "verify-source")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    action_root = tmp_path / "remote-action-root" if source_kind == "remote" else workspace
+    real_action_path = action_root / ".github" / "actions" / "apex-ray-review"
+    real_action_path.mkdir(parents=True)
+    if source_kind == "symlink-to-local":
+        action_path = tmp_path / "linked-action"
+        action_path.symlink_to(real_action_path, target_is_directory=True)
+    else:
+        action_path = real_action_path
+
+    result = subprocess.run(
+        ["bash", "-c", verify_source["run"]],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            "APEX_RAY_ACTION_REF": "a" * 40,
+            "APEX_RAY_ACTION_PATH": str(action_path),
+            "APEX_RAY_WORKSPACE": str(workspace),
+        },
+    )
+
+    expected_returncode = 0 if source_kind == "remote" else 1
+    assert result.returncode == expected_returncode
+    if expected_returncode:
+        assert "outside GITHUB_WORKSPACE" in result.stdout
+
+
+def test_prepare_rejects_an_action_runtime_that_contains_the_analysis_checkout(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    helper = _load_helper()
+    action_root = tmp_path / "local-action-root"
+    repository = action_root / ".apex-ray-review-1-1" / "repository"
+    runner_temp = tmp_path / "runner"
+    repository.mkdir(parents=True)
+    monkeypatch.setattr(helper, "_action_root", lambda: action_root)
+
+    with pytest.raises(ValueError, match="outside the repository under review"):
+        helper.create_plan(
+            _plan_options(
+                helper,
+                workspace=repository,
+                runner_temp=runner_temp,
+                event={},
+            )
+        )
+
+
 def test_plan_environment_uses_the_isolated_repository_checkout(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     helper = _load_helper()
     github_workspace = tmp_path / "trusted-caller-workspace"
-    repository = github_workspace / ".apex-ray" / "repository"
+    repository = github_workspace / ".apex-ray-review-1-1" / "repository"
     runner_temp = tmp_path / "runner"
     repository.mkdir(parents=True)
     runner_temp.mkdir()
@@ -503,6 +569,7 @@ review:
     plan = helper.create_plan(options)
 
     assert plan["base_sha"] == analysis_base_sha
+    assert plan["config_base_sha"] == trusted_base_sha
     assert plan["args"][plan["args"].index("--base") + 1] == analysis_base_sha
     assert plan["config_source"] == "restricted-base"
     safe_config = yaml.safe_load(Path(plan["config_path"]).read_text(encoding="utf-8"))
@@ -646,6 +713,7 @@ def test_same_repository_pr_can_use_sanitized_declarative_head_config(tmp_path: 
 
     assert plan["untrusted_pr"] is False
     assert plan["config_source"] == "restricted-head"
+    assert plan["config_base_sha"] == ""
     assert plan["config_path"] == str(runner_temp / "apex-ray-ci" / "config.yml")
     assert "--llm" in plan["args"]
     assert "--no-llm" not in plan["args"]
@@ -694,20 +762,20 @@ def test_pull_request_target_runtime_never_resolves_from_the_review_checkout() -
     runtime = next(step for step in steps if step["name"] == "Prepare locked Apex Ray runtime")
 
     assert checkout["with"]["ref"] == "${{ github.event.pull_request.head.sha || github.sha }}"
-    assert checkout["with"]["path"] == ".apex-ray/repository"
+    assert checkout["with"]["path"] == (".apex-ray-review-${{ github.run_id }}-${{ github.run_attempt }}/repository")
     assert checkout["with"]["persist-credentials"] is False
     assert runtime["env"]["APEX_RAY_SOURCE"] == "${{ github.action_path }}/../../.."
     assert runtime["env"]["APEX_RAY_TYPESCRIPT_RUNTIME"] == (
         "${{ github.action_path }}/../../../analyzer-runtimes/typescript"
     )
     assert runtime["env"]["PYTHONPATH"] == "${{ github.action_path }}/../../../src"
-    assert ".apex-ray/repository" not in runtime["run"]
+    assert ".apex-ray-review-" not in runtime["run"]
 
     for step_id in ("prepare", "review", "finalize"):
         step = next(candidate for candidate in steps if candidate.get("id") == step_id)
         assert "$GITHUB_ACTION_PATH/prepare.py" in step["run"]
         assert step["env"]["PYTHONPATH"] == "${{ github.action_path }}/../../../src"
-        assert ".apex-ray/repository" not in step["run"]
+        assert ".apex-ray-review-" not in step["run"]
 
 
 def test_fork_plan_executes_static_review_and_finalizes_sarif(
@@ -1125,4 +1193,4 @@ def test_documented_workflows_are_valid_yaml_and_avoid_pull_request_target() -> 
     assert "required: true" not in docs
     assert all("uses: ./.github/actions/apex-ray-review" not in block for block in blocks)
     assert "Do not replace the pinned remote `uses:` line" in docs
-    assert ".apex-ray/repository" in docs
+    assert ".apex-ray-review-<run-id>-<attempt>/repository" in docs

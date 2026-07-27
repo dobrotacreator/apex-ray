@@ -42,6 +42,7 @@ from apex_ray.pipeline import (
     continue_review_from_report,
     plan_llm_context_selection,
     run_review_pipeline,
+    select_continuation_context_packs,
     select_llm_context_packs,
 )
 from apex_ray.pipeline.runner import _apply_active_verifications_to_findings
@@ -682,6 +683,37 @@ def test_continue_review_from_report_reviews_residual_pack(tmp_path: Path) -> No
     assert continued.llm_coverage.reviewed_context_pack_ids == [reviewed.id, residual.id]
     assert continued.findings[0].context_pack_id == residual.id
     assert any(stage.stage == "continue_deep" for stage in continued.llm_selection.stages)
+
+
+def test_legacy_continuation_keeps_builtin_auth_tests_in_test_slice() -> None:
+    pack = ContextPack(
+        id="tests/auth.test.ts#authorize:1",
+        file="tests/auth.test.ts",
+        file_kind=FileKind.TEST,
+        risk_signals=[
+            RiskSignal(
+                kind="auth",
+                severity=RiskSeverity.HIGH,
+                reason="Authorization-sensitive test text changed.",
+                file="tests/auth.test.ts",
+                source="built_in",
+            )
+        ],
+    )
+    config = ReviewConfig()
+    config.llm.enabled = True
+    report = build_report(
+        ProjectProfile(root="/repo", is_git_repo=True),
+        config,
+        DiffSummary(target_mode=TargetMode.PATCH),
+        context_packs=[pack],
+    )
+    report.llm_coverage.pack_statuses = []
+
+    selected = select_continuation_context_packs(report, slices={"tests"})
+
+    assert selected == [pack]
+    assert select_continuation_context_packs(report, slices={"high_risk"}) == []
 
 
 def test_capped_continuation_preserves_archived_residual_priority(tmp_path: Path) -> None:

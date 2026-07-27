@@ -13,6 +13,11 @@ import {
   indexedReferenceForNode,
   referenceForNode,
 } from "../references/utils.js";
+import {
+  appendIndexEntry,
+  collectionShouldStop,
+  type IndexCollectionControl,
+} from "./collection.js";
 import type {
   ClassHeritageIndexEntry,
   IdentifierIndexEntry,
@@ -21,50 +26,70 @@ import type {
   TypeAliasIndexEntry,
 } from "../types.js";
 
-export function collectIdentifierIndex(repo: string, source: ts.SourceFile): IdentifierIndexEntry[] {
+export function collectIdentifierIndex(
+  repo: string,
+  source: ts.SourceFile,
+  control?: IndexCollectionControl,
+): IdentifierIndexEntry[] {
   const identifiers: IdentifierIndexEntry[] = [];
   visit(source);
   return identifiers;
 
   function visit(node: ts.Node): void {
+    if (collectionShouldStop(control)) return;
     if (ts.isIdentifier(node) && !hasAncestor(node, ts.isImportDeclaration)) {
-      identifiers.push({
+      appendIndexEntry(identifiers, {
         name: node.text,
         namespaceQualifier: namespaceQualifierForIdentifier(node),
         reference: indexedReferenceForIdentifier(repo, source, node),
-      });
+      }, control);
     }
     if (ts.isStringLiteralLike(node)) {
       const namespaceQualifier = namespaceQualifierForElementAccessArgument(node);
       if (namespaceQualifier) {
-        identifiers.push({
+        appendIndexEntry(identifiers, {
           name: node.text,
           namespaceQualifier,
           reference: indexedReferenceForNode(repo, source, node, referenceKindForElementAccessArgument(node)),
-        });
+        }, control);
       }
     }
     ts.forEachChild(node, visit);
   }
 }
 
-export function collectReceiverIndex(repo: string, source: ts.SourceFile): ReceiverIndexEntry[] {
+export function collectReceiverIndex(
+  repo: string,
+  source: ts.SourceFile,
+  control?: IndexCollectionControl,
+): ReceiverIndexEntry[] {
   const receivers: ReceiverIndexEntry[] = [];
   const seen = new Set<string>();
   visit(source);
   return receivers;
 
   function add(receiverName: string | null, typeName: string | null, node: ts.Node, scopeNode?: ts.Node): void {
-    if (!receiverName) return;
+    if (!receiverName || collectionShouldStop(control)) return;
     const scope = receiverScopeLines(source, scopeNode ?? node);
     const reference = referenceForNode(repo, source, node, "type");
     const key = `${receiverName}:${typeName ?? ""}:${scope.startLine}:${scope.endLine}:${reference.file}:${reference.line}`;
     if (seen.has(key)) return;
     seen.add(key);
-    receivers.push({ receiverName, typeName, startLine: scope.startLine, endLine: scope.endLine, reference });
+    appendIndexEntry(
+      receivers,
+      {
+        receiverName,
+        typeName,
+        startLine: scope.startLine,
+        endLine: scope.endLine,
+        reference,
+      },
+      control,
+    );
   }
 
   function visit(node: ts.Node): void {
+    if (collectionShouldStop(control)) return;
     if (ts.isClassDeclaration(node) && node.name) {
       add("this", node.name.text, node.name, node);
       const extended = classExtendedTypeName(node);
@@ -93,39 +118,60 @@ export function collectReceiverIndex(repo: string, source: ts.SourceFile): Recei
   }
 }
 
-export function collectTypeAliasIndex(source: ts.SourceFile): TypeAliasIndexEntry[] {
+export function collectTypeAliasIndex(
+  source: ts.SourceFile,
+  control?: IndexCollectionControl,
+): TypeAliasIndexEntry[] {
   const aliases: TypeAliasIndexEntry[] = [];
   for (const statement of source.statements) {
+    if (collectionShouldStop(control)) break;
     if (!ts.isTypeAliasDeclaration(statement)) continue;
     const targetName = typeNameForReceiver(statement.type);
     if (!targetName) continue;
-    aliases.push({ name: statement.name.text, targetName });
+    if (!appendIndexEntry(
+      aliases,
+      { name: statement.name.text, targetName },
+      control,
+    )) break;
   }
   return aliases;
 }
 
-export function collectClassHeritageIndex(source: ts.SourceFile): ClassHeritageIndexEntry[] {
+export function collectClassHeritageIndex(
+  source: ts.SourceFile,
+  control?: IndexCollectionControl,
+): ClassHeritageIndexEntry[] {
   const heritages: ClassHeritageIndexEntry[] = [];
   visit(source);
   return heritages;
 
   function visit(node: ts.Node): void {
+    if (collectionShouldStop(control)) return;
     if ((ts.isClassDeclaration(node) || ts.isInterfaceDeclaration(node)) && node.name) {
-      const baseNames = heritageTypeNames(node);
+      const baseNames = heritageTypeNames(node, control);
       if (baseNames.length > 0) {
-        heritages.push({ className: node.name.text, baseNames });
+        appendIndexEntry(
+          heritages,
+          { className: node.name.text, baseNames },
+          control,
+        );
       }
     }
     ts.forEachChild(node, visit);
   }
 }
 
-function heritageTypeNames(node: ts.ClassDeclaration | ts.InterfaceDeclaration): string[] {
+function heritageTypeNames(
+  node: ts.ClassDeclaration | ts.InterfaceDeclaration,
+  control?: IndexCollectionControl,
+): string[] {
   const names: string[] = [];
   for (const clause of node.heritageClauses ?? []) {
+    if (collectionShouldStop(control)) break;
     for (const heritageType of clause.types) {
+      if (collectionShouldStop(control)) break;
       const name = expressionNameText(heritageType.expression);
-      if (name) names.push(name);
+      if (name && !appendIndexEntry(names, name, control)) break;
     }
   }
   return names;

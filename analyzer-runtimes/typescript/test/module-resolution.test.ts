@@ -92,6 +92,201 @@ test("module resolution expands relative imports and tsconfig path aliases", () 
   }
 });
 
+test("path alias resolution bounds mappings, targets, and wildcard amplification", () => {
+  const repo = fs.mkdtempSync(
+    path.join(os.tmpdir(), "apex-ray-ts-module-alias-budget-"),
+  );
+  try {
+    const amplifiedWildcard = "x".repeat(8_192);
+    writeFile(
+      repo,
+      "tsconfig.json",
+      JSON.stringify({
+        compilerOptions: {
+          baseUrl: ".",
+          paths: {
+            "@amplified/*": ["*".repeat(8_192)],
+            "@many": Array.from(
+              { length: 2_000 },
+              (_, index) => `src/target-${index}`,
+            ),
+          },
+        },
+      }),
+    );
+    writeFile(repo, "src/use.ts", "export const use = 1;\n");
+    const importerPath = path.join(repo, "src/use.ts");
+    let amplifiedLimitReports = 0;
+
+    const amplified = moduleSpecifierCandidatePaths(
+      `@amplified/${amplifiedWildcard}`,
+      importerPath,
+      repo,
+      null,
+      () => {
+        amplifiedLimitReports += 1;
+      },
+    );
+
+    assert.deepEqual(amplified, []);
+    assert.equal(amplifiedLimitReports, 1);
+
+    let targetLimitReports = 0;
+    const first = moduleSpecifierCandidatePaths(
+      "@many",
+      importerPath,
+      repo,
+      null,
+      () => {
+        targetLimitReports += 1;
+      },
+    );
+    const second = moduleSpecifierCandidatePaths(
+      "@many",
+      importerPath,
+      repo,
+      null,
+      () => {
+        targetLimitReports += 1;
+      },
+    );
+
+    assert.ok(first.length > 0);
+    assert.ok(first.length <= 512);
+    assert.deepEqual(second, first);
+    assert.equal(targetLimitReports, 2);
+    assertIncludesPath(first, path.join(repo, "src/target-0.ts"));
+
+    writeFile(
+      repo,
+      "nested/tsconfig.json",
+      JSON.stringify({
+        compilerOptions: {
+          baseUrl: ".",
+          paths: Object.fromEntries(
+            Array.from({ length: 2_000 }, (_, index) => [
+              `@mapping-${index}`,
+              [`src/mapping-${index}.ts`],
+            ]),
+          ),
+        },
+      }),
+    );
+    writeFile(
+      repo,
+      "nested/src/use.ts",
+      "export const nestedUse = 1;\n",
+    );
+    const nestedImporter = path.join(
+      repo,
+      "nested/src/use.ts",
+    );
+    let mappingLimitReports = 0;
+
+    const retainedMapping = moduleSpecifierCandidatePaths(
+      "@mapping-0",
+      nestedImporter,
+      repo,
+      null,
+      () => {
+        mappingLimitReports += 1;
+      },
+    );
+    const skippedMapping = moduleSpecifierCandidatePaths(
+      "@mapping-1999",
+      nestedImporter,
+      repo,
+      null,
+      () => {
+        mappingLimitReports += 1;
+      },
+    );
+
+    assertIncludesPath(
+      retainedMapping,
+      path.join(repo, "nested/src/mapping-0.ts"),
+    );
+    assert.deepEqual(skippedMapping, []);
+    assert.equal(mappingLimitReports, 2);
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("path alias cache evicts least-recently-used configs", () => {
+  const repo = fs.mkdtempSync(
+    path.join(os.tmpdir(), "apex-ray-ts-module-alias-cache-"),
+  );
+  try {
+    const configCount = 130;
+    for (let index = 0; index < configCount; index += 1) {
+      writeFile(
+        repo,
+        `apps/app-${index}/tsconfig.json`,
+        JSON.stringify({
+          compilerOptions: {
+            baseUrl: ".",
+            paths: {
+              "@value": [`src/value-${index}.ts`],
+            },
+          },
+        }),
+      );
+      writeFile(
+        repo,
+        `apps/app-${index}/src/use.ts`,
+        "export const use = true;\n",
+      );
+    }
+    const firstImporter = path.join(
+      repo,
+      "apps/app-0/src/use.ts",
+    );
+    assertIncludesPath(
+      moduleSpecifierCandidatePaths(
+        "@value",
+        firstImporter,
+        repo,
+        null,
+      ),
+      path.join(repo, "apps/app-0/src/value-0.ts"),
+    );
+    for (let index = 1; index < configCount; index += 1) {
+      moduleSpecifierCandidatePaths(
+        "@value",
+        path.join(repo, `apps/app-${index}/src/use.ts`),
+        repo,
+        null,
+      );
+    }
+
+    writeFile(
+      repo,
+      "apps/app-0/tsconfig.json",
+      JSON.stringify({
+        compilerOptions: {
+          baseUrl: ".",
+          paths: {
+            "@value": ["src/refreshed.ts"],
+          },
+        },
+      }),
+    );
+
+    assertIncludesPath(
+      moduleSpecifierCandidatePaths(
+        "@value",
+        firstImporter,
+        repo,
+        null,
+      ),
+      path.join(repo, "apps/app-0/src/refreshed.ts"),
+    );
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
+});
+
 test("path alias resolution follows transitive workspace package configs", () => {
   const repo = fs.mkdtempSync(
     path.join(os.tmpdir(), "apex-ray-ts-module-transitive-config-"),
@@ -334,6 +529,52 @@ test("module resolution expands workspace package root, subpath, and wildcard ex
       findIndexedPackageForFile(repo, repoIndex, path.join(packageRoot, "src/index.ts")),
       indexedPackage,
     );
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("bounded related-path resolution reports incomplete package expansion", () => {
+  const repo = fs.mkdtempSync(
+    path.join(os.tmpdir(), "apex-ray-ts-package-related-budget-"),
+  );
+  try {
+    const packageRoot = path.join(repo, "packages/lib");
+    const importerPath = path.join(repo, "tests/consumer.test.ts");
+    const targetPath = path.join(packageRoot, "src/target.ts");
+    const packageInfo: PackageInfo = {
+      root: packageRoot,
+      name: "@acme/lib",
+      exports: {
+        "./feature": [
+          ...Array.from(
+            { length: 512 },
+            (_, index) => `./src/other-${index}.ts`,
+          ),
+          "./src/target.ts",
+        ],
+      },
+      main: null,
+      module: null,
+      tsconfig: null,
+      types: null,
+      typings: null,
+    };
+    let limitReports = 0;
+
+    assert.equal(
+      isModuleSpecifierRelatedToPath(
+        "@acme/lib/feature",
+        importerPath,
+        targetPath,
+        packageInfo,
+        () => {
+          limitReports += 1;
+        },
+      ),
+      false,
+    );
+    assert.equal(limitReports, 1);
   } finally {
     fs.rmSync(repo, { recursive: true, force: true });
   }

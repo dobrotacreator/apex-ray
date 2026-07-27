@@ -387,7 +387,7 @@ def test_stdlib_transport_allows_intentional_loopback_http(
 
     monkeypatch.setattr(http_module, "build_opener", fake_build_opener)
 
-    response = UrllibJSONTransport().request(
+    response = UrllibJSONTransport(allow_insecure_loopback_http=True).request(
         url=url,
         headers={"Authorization": "Bearer local-secret"},
         payload={},
@@ -400,6 +400,31 @@ def test_stdlib_transport_allows_intentional_loopback_http(
     assert opener.request.full_url == url
     proxy_handler = next(handler for handler in installed_handlers if isinstance(handler, http_module.ProxyHandler))
     assert getattr(proxy_handler, "proxies", None) == {}
+
+
+def test_stdlib_transport_rejects_loopback_http_without_explicit_opt_in(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    opener_calls = 0
+
+    def fail_if_built(*handlers: object) -> StubOpener:
+        nonlocal opener_calls
+        opener_calls += 1
+        raise AssertionError("insecure endpoint reached the network opener")
+
+    monkeypatch.setattr(http_module, "build_opener", fail_if_built)
+
+    with pytest.raises(JSONTransportError, match="explicit opt-in") as caught:
+        UrllibJSONTransport().request(
+            url="http://127.0.0.1:11434/v1/review",
+            headers={"Authorization": "Bearer local-secret"},
+            payload={},
+            timeout_seconds=7,
+            use_system_proxy=False,
+        )
+
+    assert caught.value.kind == "malformed"
+    assert opener_calls == 0
 
 
 def test_stdlib_transport_keeps_http_status_for_non_json_error(
@@ -921,7 +946,14 @@ def test_qwen_preset_allows_official_workspace_dedicated_endpoint() -> None:
             "ZAI_API_KEY",
             "glm-5.2",
             LLMReasoningEffort.MEDIUM,
-            {"thinking": {"type": "enabled"}, "reasoning_effort": "medium"},
+            {"thinking": {"type": "enabled"}, "reasoning_effort": "high"},
+        ),
+        (
+            LLMProviderName.ZAI_API,
+            "ZAI_API_KEY",
+            "glm-5.2",
+            LLMReasoningEffort.XHIGH,
+            {"thinking": {"type": "enabled"}, "reasoning_effort": "max"},
         ),
         (
             LLMProviderName.ZAI_API,
@@ -1066,6 +1098,7 @@ def test_generic_compatible_provider_preserves_local_loopback_endpoint() -> None
             structured_output=LLMStructuredOutput.JSON_OBJECT,
             base_url_env="LOCAL_LLM_URL",
             api_key_env="LOCAL_LLM_KEY",
+            allow_insecure_loopback_http=True,
         ),
     )
 
@@ -1079,6 +1112,62 @@ def test_generic_compatible_provider_preserves_local_loopback_endpoint() -> None
     ).review_context_pack(make_pack(), Path("."))
 
     assert transport.calls[0].url == "http://127.0.0.1:11434/v1/chat/completions"
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        pytest.param("http://localhost.:11434/v1", id="localhost-trailing-dot"),
+        pytest.param(
+            "http://[0:0:0:0:0:0:0:1]:11434/v1",
+            id="expanded-ipv6-loopback",
+        ),
+    ],
+)
+def test_literal_loopback_endpoint_uses_runtime_host_normalization(base_url: str) -> None:
+    transport = StubTransport(success_response())
+    config = LLMConfig(
+        provider=LLMProviderName.OPENAI_COMPATIBLE,
+        model="local-model",
+        api=LLMAPIConfig(
+            protocol=LLMAPIProtocol.OPENAI_CHAT,
+            structured_output=LLMStructuredOutput.JSON_OBJECT,
+            base_url=base_url,
+            api_key_env="LOCAL_LLM_KEY",
+            allow_insecure_loopback_http=True,
+        ),
+    )
+
+    provider(
+        config,
+        transport,
+        {"LOCAL_LLM_KEY": "local-secret"},
+    ).review_context_pack(make_pack(), Path("."))
+
+    assert len(transport.calls) == 1
+
+
+def test_generic_compatible_provider_rejects_loopback_http_without_explicit_opt_in() -> None:
+    config = LLMConfig(
+        provider=LLMProviderName.OPENAI_COMPATIBLE,
+        model="local-model",
+        api=LLMAPIConfig(
+            protocol=LLMAPIProtocol.OPENAI_CHAT,
+            structured_output=LLMStructuredOutput.JSON_OBJECT,
+            base_url_env="LOCAL_LLM_URL",
+            api_key_env="LOCAL_LLM_KEY",
+        ),
+    )
+
+    with pytest.raises(LLMProviderError, match="explicit opt-in"):
+        provider(
+            config,
+            StubTransport(success_response()),
+            {
+                "LOCAL_LLM_URL": "http://127.0.0.1:11434/v1",
+                "LOCAL_LLM_KEY": "local-secret",
+            },
+        )
 
 
 def test_generic_provider_can_use_native_anthropic_protocol() -> None:
@@ -1301,6 +1390,33 @@ def test_ci_custom_provider_cannot_select_the_host_allowlist_variable() -> None:
         )
 
 
+def test_ci_rejects_insecure_loopback_http_opt_in() -> None:
+    config = LLMConfig(
+        provider=LLMProviderName.OPENAI_COMPATIBLE,
+        model="local-model",
+        api=LLMAPIConfig(
+            protocol=LLMAPIProtocol.OPENAI_CHAT,
+            structured_output=LLMStructuredOutput.JSON_OBJECT,
+            base_url_env="LOCAL_LLM_URL",
+            api_key_env="LOCAL_LLM_KEY",
+            allow_insecure_loopback_http=True,
+        ),
+    )
+
+    with pytest.raises(LLMProviderError, match="not permitted in CI"):
+        provider(
+            config,
+            StubTransport(success_response()),
+            {
+                "CI": "true",
+                "LOCAL_LLM_URL": "http://127.0.0.1:11434/v1",
+                "LOCAL_LLM_KEY": "local-secret",
+                "APEX_RAY_API_ALLOWED_HOSTS": "127.0.0.1",
+                "APEX_RAY_API_ALLOWED_ENV_VARS": "LOCAL_LLM_URL,LOCAL_LLM_KEY",
+            },
+        )
+
+
 @pytest.mark.parametrize(
     ("config", "environment", "message"),
     [
@@ -1434,6 +1550,38 @@ def test_quota_error_is_terminal_and_classified_separately() -> None:
     assert len(transport.calls) == 1
 
 
+def test_dashscope_request_rate_quota_is_retried() -> None:
+    sleeps: list[float] = []
+    transport = StubTransport(
+        JSONHTTPResponse(
+            status_code=429,
+            headers={"Retry-After": "2"},
+            data={
+                "error": {
+                    "code": "Throttling.RateQuota",
+                    "message": "Requests rate limit exceeded.",
+                }
+            },
+        ),
+        success_response(),
+    )
+    config = LLMConfig(
+        provider=LLMProviderName.QWEN_API,
+        model="qwen-plus",
+        api=LLMAPIConfig(max_retries=1),
+    )
+
+    provider(
+        config,
+        transport,
+        {"DASHSCOPE_API_KEY": "secret"},
+        sleeps=sleeps,
+    ).review_context_pack(make_pack(), Path("."))
+
+    assert len(transport.calls) == 2
+    assert sleeps == [2.0]
+
+
 def test_http_403_quota_details_are_not_collapsed_into_auth() -> None:
     transport = StubTransport(
         JSONHTTPResponse(
@@ -1464,6 +1612,39 @@ def test_http_403_quota_details_are_not_collapsed_into_auth() -> None:
 
     assert caught.value.category == "quota"
     assert len(transport.calls) == 1
+
+
+def test_http_403_structured_rate_limit_details_are_retried() -> None:
+    sleeps: list[float] = []
+    transport = StubTransport(
+        JSONHTTPResponse(
+            status_code=403,
+            headers={"Retry-After": "2"},
+            data={
+                "error": {
+                    "type": "rate_limit_error",
+                    "code": "rate_limit_exceeded",
+                    "message": "Slow down.",
+                }
+            },
+        ),
+        responses_success_response(),
+    )
+    config = LLMConfig(
+        provider=LLMProviderName.OPENAI_API,
+        model="gpt-5.6",
+        api=LLMAPIConfig(max_retries=1),
+    )
+
+    provider(
+        config,
+        transport,
+        {"OPENAI_API_KEY": "secret"},
+        sleeps=sleeps,
+    ).review_context_pack(make_pack(), Path("."))
+
+    assert len(transport.calls) == 2
+    assert sleeps == [2.0]
 
 
 def test_http_403_permission_error_is_not_retried_for_rate_limit_message_text() -> None:
@@ -1569,6 +1750,33 @@ def test_malformed_endpoint_configuration_is_terminal_before_transport() -> None
 
     assert caught.value.category == "malformed"
     assert classify_llm_provider_error(caught.value) == "failed_malformed"
+    assert transport.calls == []
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        pytest.param("https://[::1", id="unterminated-ipv6"),
+        pytest.param("https://gateway.example\uff0fadmin", id="nfkc-netloc"),
+    ],
+)
+def test_malformed_endpoint_netloc_is_translated_to_provider_error(endpoint: str) -> None:
+    transport = StubTransport(success_response())
+    config = LLMConfig(
+        provider=LLMProviderName.OPENAI_COMPATIBLE,
+        model="model",
+        api=LLMAPIConfig(
+            protocol=LLMAPIProtocol.OPENAI_CHAT,
+            structured_output=LLMStructuredOutput.JSON_OBJECT,
+            base_url_env="ENDPOINT",
+            api_key_env="KEY",
+        ),
+    )
+
+    with pytest.raises(LLMProviderError) as caught:
+        provider(config, transport, {"ENDPOINT": endpoint, "KEY": "secret"})
+
+    assert caught.value.category == "malformed"
     assert transport.calls == []
 
 

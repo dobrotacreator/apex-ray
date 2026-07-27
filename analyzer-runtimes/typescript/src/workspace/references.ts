@@ -35,7 +35,14 @@ export function collectWorkspaceImportReferences(repo: string, repoIndex: RepoIn
     if (refs.length >= limit) break;
     if (entry.absPath === targetFile) continue;
 
-    const importedBindings = importedBindingsForTarget(entry, repo, target, targetPackage, exportedNames);
+    const importedBindings = importedBindingsForTarget(
+      entry,
+      repo,
+      target,
+      targetPackage,
+      exportedNames,
+      repoIndex.markModuleResolutionPartial,
+    );
     if (importedBindings.localNames.size === 0 && importedBindings.namespaceLocalNames.size === 0) continue;
 
     for (const importReference of [
@@ -84,7 +91,14 @@ export function collectWorkspaceMemberReferences(repo: string, repoIndex: RepoIn
 
     const importedBindings =
       targetPackage && exportedNames
-        ? importedBindingsForTarget(entry, repo, containerTarget, targetPackage, exportedNames)
+        ? importedBindingsForTarget(
+            entry,
+            repo,
+            containerTarget,
+            targetPackage,
+            exportedNames,
+            repoIndex.markModuleResolutionPartial,
+          )
         : emptyImportedBindings();
     if (importedBindings.localNames.size === 0 && importedBindings.namespaceLocalNames.size === 0) continue;
 
@@ -102,7 +116,14 @@ export function collectWorkspaceMemberReferences(repo: string, repoIndex: RepoIn
 
     const importedBindings =
       targetPackage && exportedNames
-        ? importedBindingsForTarget(entry, repo, containerTarget, targetPackage, exportedNames)
+        ? importedBindingsForTarget(
+            entry,
+            repo,
+            containerTarget,
+            targetPackage,
+            exportedNames,
+            repoIndex.markModuleResolutionPartial,
+          )
         : emptyImportedBindings();
     if (importedBindings.localNames.size === 0 && importedBindings.namespaceLocalNames.size === 0) continue;
 
@@ -144,7 +165,14 @@ export function filterInvalidWorkspaceMemberReferences(
     if (!entry) return true;
     const importedBindings =
       targetPackage && exportedNames
-        ? importedBindingsForTarget(entry, repo, containerTarget, targetPackage, exportedNames)
+        ? importedBindingsForTarget(
+            entry,
+            repo,
+            containerTarget,
+            targetPackage,
+            exportedNames,
+            repoIndex.markModuleResolutionPartial,
+          )
         : emptyImportedBindings();
     const indexedIdentifiers = entry.identifiers.filter(
       (identifier) =>
@@ -182,7 +210,14 @@ export function collectWorkspaceDiReferences(repo: string, repoIndex: RepoIndex,
     if (refs.length >= limit) break;
     if (entry.absPath === targetFile) continue;
 
-    const importedBindings = importedBindingsForTarget(entry, repo, diTarget, targetPackage, exportedNames);
+    const importedBindings = importedBindingsForTarget(
+      entry,
+      repo,
+      diTarget,
+      targetPackage,
+      exportedNames,
+      repoIndex.markModuleResolutionPartial,
+    );
     if (importedBindings.localNames.size === 0 && importedBindings.namespaceLocalNames.size === 0) continue;
 
     for (const provider of entry.diProviders) {
