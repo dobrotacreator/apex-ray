@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from apex_ray.llm import (
+    APILLMProvider,
     ClaudeCodeCLIProvider,
     CodexCLIProvider,
     FakeLLMProvider,
@@ -24,6 +25,7 @@ from apex_ray.llm import (
     parse_finding_response,
     parse_verification_batch_response,
     parse_verification_response,
+    provider_from_config,
     review_cache_key,
     review_config_for_pack,
     review_context_packs,
@@ -41,6 +43,7 @@ from apex_ray.llm.cache import (
     verification_cache_key,
 )
 from apex_ray.llm.cli import claude_result_text
+from apex_ray.llm.prompts import render_review_prompt
 from apex_ray.llm.review import LLMRouteCircuitBreaker
 from apex_ray.llm.usage import parse_claude_usage_from_json, parse_codex_usage_from_jsonl
 from apex_ray.models import (
@@ -365,6 +368,64 @@ def test_profile_provider_change_does_not_inherit_another_api_credentials() -> N
     assert resolved.api == LLMAPIConfig()
 
 
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        pytest.param(
+            "http://127.0.0.2:11434/v1",
+            id="ipv4-loopback-range",
+        ),
+        pytest.param(
+            "http://2130706434:11434/v1",
+            id="legacy-ipv4-loopback-range",
+        ),
+        pytest.param(
+            "http://[::ffff:127.0.0.2]:11434/v1",
+            id="ipv4-mapped-ipv6-loopback",
+        ),
+    ],
+)
+def test_literal_loopback_api_config_reaches_public_provider_factory(
+    base_url: str,
+) -> None:
+    config = LLMConfig(
+        provider=LLMProviderName.OPENAI_COMPATIBLE,
+        model="local-review-model",
+        api=LLMAPIConfig(
+            protocol=LLMAPIProtocol.OPENAI_CHAT,
+            structured_output=LLMStructuredOutput.JSON_OBJECT,
+            base_url=base_url,
+            api_key_env="LOCAL_REVIEW_KEY",
+            allow_insecure_loopback_http=True,
+        ),
+    )
+
+    result = provider_from_config(
+        config,
+        environment={"LOCAL_REVIEW_KEY": "local-secret"},
+    )
+
+    assert isinstance(result, APILLMProvider)
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        pytest.param("https://4294967296/v1", id="decimal-dword-overflow"),
+        pytest.param("https://040000000000/v1", id="octal-dword-overflow"),
+        pytest.param("https://0x100000000/v1", id="hex-dword-overflow"),
+    ],
+)
+def test_literal_api_config_rejects_out_of_range_legacy_ipv4(
+    base_url: str,
+) -> None:
+    with pytest.raises(ValueError, match="malformed host"):
+        LLMAPIConfig(
+            base_url=base_url,
+            allow_insecure_loopback_http=True,
+        )
+
+
 def test_review_circuit_preserves_quota_fallback_for_later_packs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -598,6 +659,119 @@ def test_review_context_packs_records_provider_reported_usage() -> None:
     assert runs[0].actual_reasoning_output_tokens == 5
     assert runs[0].actual_total_tokens == 185
     assert runs[0].estimated_cost_usd == 0.0012
+
+
+def test_review_context_packs_passes_pre_rendered_prompt_to_capable_provider() -> None:
+    pack = make_pack()
+    rendered_prompts = {}
+    rendered = render_review_prompt(pack, cache=rendered_prompts)
+    seen_prompts: list[str] = []
+
+    class RenderedPromptProvider:
+        def review_rendered_prompt_with_usage(
+            self,
+            reviewed_pack: ContextPack,
+            repo_root: Path,
+            prompt: str,
+        ) -> LLMReviewResult:
+            assert reviewed_pack is pack
+            seen_prompts.append(prompt)
+            return LLMReviewResult(findings=[])
+
+        def review_context_pack(self, reviewed_pack: ContextPack, repo_root: Path) -> list[Finding]:
+            raise AssertionError("pre-rendered review path should be used")
+
+        def verify_finding(
+            self,
+            finding: Finding,
+            reviewed_pack: ContextPack,
+            repo_root: Path,
+        ) -> FindingVerification:
+            raise AssertionError("not used")
+
+    _, runs = review_context_packs(
+        [pack],
+        LLMConfig(provider=LLMProviderName.FAKE),
+        Path("."),
+        provider=RenderedPromptProvider(),
+        rendered_prompts=rendered_prompts,
+    )
+
+    assert seen_prompts == [rendered.text]
+    assert runs[0].input_chars == len(rendered.text)
+
+
+def test_review_prompt_cache_isolates_reviewer_prompt_contexts() -> None:
+    pack = make_pack()
+    seen_prompts: list[str] = []
+    rendered_prompts = {}
+
+    class RenderedPromptProvider:
+        def review_rendered_prompt_with_usage(
+            self,
+            reviewed_pack: ContextPack,
+            repo_root: Path,
+            prompt: str,
+        ) -> LLMReviewResult:
+            seen_prompts.append(prompt)
+            return LLMReviewResult(findings=[])
+
+        def review_context_pack(self, reviewed_pack: ContextPack, repo_root: Path) -> list[Finding]:
+            raise AssertionError("pre-rendered review path should be used")
+
+        def verify_finding(
+            self,
+            finding: Finding,
+            reviewed_pack: ContextPack,
+            repo_root: Path,
+        ) -> FindingVerification:
+            raise AssertionError("not used")
+
+    config = LLMConfig(provider=LLMProviderName.FAKE)
+    provider = RenderedPromptProvider()
+    review_context_packs(
+        [pack],
+        config,
+        Path("."),
+        provider=provider,
+        reviewer=ReviewerConfig(id="security", focus="Authorization boundaries."),
+        rendered_prompts=rendered_prompts,
+    )
+    review_context_packs(
+        [pack],
+        config,
+        Path("."),
+        provider=provider,
+        reviewer=ReviewerConfig(id="finance", focus="Financial settlement risk."),
+        rendered_prompts=rendered_prompts,
+    )
+
+    assert len(rendered_prompts) == 2
+    assert "Authorization boundaries." in seen_prompts[0]
+    assert "Financial settlement risk." not in seen_prompts[0]
+    assert "Financial settlement risk." in seen_prompts[1]
+    assert "Authorization boundaries." not in seen_prompts[1]
+
+
+def test_review_prompt_cache_isolates_changed_pack_content_with_same_id() -> None:
+    pack = make_pack()
+    rendered_prompts = {}
+    first = render_review_prompt(pack, cache=rendered_prompts)
+    changed_pack = pack.model_copy(
+        update={
+            "impact_notes": [
+                *pack.impact_notes,
+                "Financial settlement behavior changed.",
+            ]
+        }
+    )
+
+    changed = render_review_prompt(changed_pack, cache=rendered_prompts)
+
+    assert changed is not first
+    assert len(rendered_prompts) == 2
+    assert "Financial settlement behavior changed." not in first.text
+    assert "Financial settlement behavior changed." in changed.text
 
 
 def test_verify_findings_records_provider_reported_usage() -> None:
@@ -953,6 +1127,18 @@ def test_review_cache_key_changes_when_context_pack_changes() -> None:
     changed_pack = pack.model_copy(update={"diff_snippet": ["+return 1;"]})
 
     assert review_cache_key(pack, config) != review_cache_key(changed_pack, config)
+
+
+def test_review_cache_key_reuses_rendered_prompt_payload_without_changing_identity() -> None:
+    config = LLMConfig(provider=LLMProviderName.FAKE)
+    pack = make_pack()
+    rendered = render_review_prompt(pack)
+
+    assert review_cache_key(
+        pack,
+        config,
+        prompt_payload=rendered.prompt_payload,
+    ) == review_cache_key(pack, config)
 
 
 def test_review_cache_key_changes_when_model_changes() -> None:

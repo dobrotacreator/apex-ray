@@ -112,7 +112,7 @@ def discover_project_with_files(
 ) -> tuple[ProjectProfile, list[Path]]:
     deadline = None if timeout_seconds is None else time.monotonic() + max(0.0, timeout_seconds)
     root = (
-        discover_repo_root(cwd)
+        discover_repo_root(cwd, timeout_seconds=None)
         if deadline is None
         else discover_repo_root(
             cwd,

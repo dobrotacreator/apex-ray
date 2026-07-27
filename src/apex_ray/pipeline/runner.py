@@ -33,6 +33,7 @@ from apex_ray.llm import (
     review_context_packs,
     verify_findings,
 )
+from apex_ray.llm.prompts import ReviewPromptCache
 from apex_ray.llm.routing import config_for_profile_or_model, verification_config_for_finding
 from apex_ray.models import (
     ChangedFile,
@@ -161,6 +162,7 @@ def run_review_pipeline(
         try:
             for reviewer in reviewers:
                 reviewer_config = llm_config_for_reviewer(config.llm, reviewer)
+                rendered_prompts: ReviewPromptCache = {}
                 scoped_context_packs = [pack for pack in context_packs if reviewer_matches_pack(reviewer, pack)]
                 progress.event(
                     f"planning LLM context selection for reviewer {reviewer.id}",
@@ -172,6 +174,7 @@ def run_review_pipeline(
                     reviewer_config,
                     reviewer,
                     max_pack_chars=config.context.max_pack_chars,
+                    rendered_prompts=rendered_prompts,
                 )
                 reviewer_selections[reviewer.id] = selection
                 deep_selected_ids = set(selection.deep_selected_context_pack_ids)
@@ -205,6 +208,7 @@ def run_review_pipeline(
                     progress=progress,
                     reviewer=reviewer,
                     circuit_breaker=route_circuit,
+                    rendered_prompts=rendered_prompts,
                 )
                 deep_findings, deep_runs = review_context_packs(
                     deep_context_packs,
@@ -215,6 +219,7 @@ def run_review_pipeline(
                     progress=progress,
                     reviewer=reviewer,
                     circuit_breaker=route_circuit,
+                    rendered_prompts=rendered_prompts,
                 )
                 reviewer_findings = consolidate_findings([*shallow_findings, *deep_findings])
                 llm_runs.extend([*shallow_runs, *deep_runs])
@@ -283,6 +288,7 @@ def _plan_reviewer_context_selection(
     reviewer: ReviewerConfig,
     *,
     max_pack_chars: int,
+    rendered_prompts: ReviewPromptCache | None = None,
 ) -> LLMContextSelection:
     budgeted_context_packs = [pack_for_reviewer(pack, reviewer) for pack in context_packs]
     coverage_mode = llm_config.coverage_mode
@@ -301,6 +307,7 @@ def _plan_reviewer_context_selection(
         max_pack_chars=max_pack_chars,
         coverage_mode=coverage_mode,
         provider=lambda pack: review_config_for_pack(llm_config, pack)[0].provider,
+        rendered_prompts=rendered_prompts,
     )
 
 
@@ -393,11 +400,16 @@ def _merge_reviewer_context_selections(
             {selection.skipped_context_pack_reasons.get(pack_id, "not selected") for selection in relevant.values()}
         )
         skipped_reasons[pack_id] = "; ".join(reasons)
-    stages = [
-        stage.model_copy(update={"stage": f"{reviewer_id}:{stage.stage}"})
-        for reviewer_id, selection in reviewer_selections.items()
-        for stage in selection.stages
-    ]
+    # Preserve the pre-reviewer stage contract for the default/single-reviewer
+    # projection; reviewer_selections carries provenance without changing it.
+    if len(reviewer_selections) == 1:
+        stages = [stage.model_copy() for selection in reviewer_selections.values() for stage in selection.stages]
+    else:
+        stages = [
+            stage.model_copy(update={"stage": f"{reviewer_id}:{stage.stage}"})
+            for reviewer_id, selection in reviewer_selections.items()
+            for stage in selection.stages
+        ]
     return LLMContextSelection(
         total_context_pack_ids=total_ids,
         selected_context_pack_ids=[pack_id for pack_id in total_ids if pack_id in selected],

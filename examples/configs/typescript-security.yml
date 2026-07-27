@@ -68,17 +68,16 @@ review:
     enabled: true
     provider: codex_cli
     profiles:
+      # Model IDs are intentionally omitted so this portable example uses
+      # the caller's configured Codex CLI defaults.
       broad:
         provider: codex_cli
-        model: gpt-5.6-terra
         effort: low
       security:
         provider: codex_cli
-        model: gpt-5.6-sol
         effort: high
       verify:
         provider: codex_cli
-        model: gpt-5.6-sol
         effort: medium
     routing:
       review_profile: broad

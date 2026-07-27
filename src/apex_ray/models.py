@@ -1,9 +1,7 @@
 import re
 from datetime import datetime
 from enum import StrEnum
-from ipaddress import ip_address
 from typing import Literal, Self
-from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -272,24 +270,26 @@ class LLMAPIConfig(StrictApexModel):
         if self.base_url and self.base_url_env:
             raise ValueError("Use only one of base_url or base_url_env")
         if self.base_url:
-            parsed = urlsplit(self.base_url)
-            raw_host = parsed.hostname or ""
+            # Keep literal config validation on the same canonical URL path as
+            # provider construction. The lazy import avoids the llm package's
+            # public re-export cycle back through these foundational models.
+            from apex_ray.llm.http import validate_api_endpoint_url
+
             try:
-                normalized_host = str(ip_address(raw_host))
-            except ValueError:
-                normalized_host = raw_host.lower().rstrip(".")
-            loopback = normalized_host in {"localhost", "127.0.0.1", "::1"}
-            allowed_loopback_http = self.allow_insecure_loopback_http and parsed.scheme == "http" and loopback
-            if parsed.scheme != "https" and not allowed_loopback_http:
-                raise ValueError(
-                    "API base_url must use HTTPS; loopback HTTP requires allow_insecure_loopback_http=true"
+                validate_api_endpoint_url(
+                    self.base_url,
+                    allow_insecure_loopback_http=self.allow_insecure_loopback_http,
                 )
-            if not parsed.hostname:
-                raise ValueError("API base_url must include a host")
-            if parsed.username or parsed.password:
-                raise ValueError("API base_url must not contain credentials")
-            if parsed.query or parsed.fragment:
-                raise ValueError("API base_url must not contain a query or fragment")
+            except ValueError as exc:
+                detail = str(exc)
+                if detail in {
+                    "API endpoint must use HTTPS.",
+                    "Loopback HTTP requires explicit opt-in.",
+                }:
+                    detail = "API base_url must use HTTPS; loopback HTTP requires allow_insecure_loopback_http=true"
+                else:
+                    detail = detail.replace("API endpoint", "API base_url")
+                raise ValueError(detail) from exc
         for header, env_name in self.headers_from_env.items():
             if _HTTP_FIELD_NAME.fullmatch(header) is None:
                 raise ValueError(f"Invalid API header name: {header!r}")

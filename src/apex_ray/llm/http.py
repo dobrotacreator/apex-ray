@@ -5,7 +5,8 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from http.client import HTTPException
-from ipaddress import ip_address
+from ipaddress import IPv4Address, IPv6Address, ip_address
+from socket import inet_aton
 from typing import Literal, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlsplit, urlunsplit
@@ -13,7 +14,34 @@ from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_ope
 
 _MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 _HOST_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
+_LEGACY_IPV4_HOST = re.compile(r"(?:0x[0-9a-f]+|[0-9]+)(?:\.(?:0x[0-9a-f]+|[0-9]+))*")
 _INVALID_PERCENT_ESCAPE = re.compile(r"%(?![0-9a-fA-F]{2})")
+
+
+def _legacy_ipv4_host_is_in_range(host: str) -> bool:
+    limits_by_component_count = {
+        1: (0xFFFFFFFF,),
+        2: (0xFF, 0xFFFFFF),
+        3: (0xFF, 0xFF, 0xFFFF),
+        4: (0xFF, 0xFF, 0xFF, 0xFF),
+    }
+    components = host.split(".")
+    limits = limits_by_component_count.get(len(components))
+    if limits is None:
+        return False
+
+    values: list[int] = []
+    try:
+        for component in components:
+            if component.startswith("0x"):
+                values.append(int(component[2:], 16))
+            elif len(component) > 1 and component.startswith("0"):
+                values.append(int(component, 8))
+            else:
+                values.append(int(component, 10))
+    except ValueError:
+        return False
+    return all(value <= limit for value, limit in zip(values, limits, strict=True))
 
 
 @dataclass(frozen=True)
@@ -67,6 +95,7 @@ class _NoRedirectHandler(HTTPRedirectHandler):
 class _ValidatedAPIEndpoint:
     url: str
     host: str
+    is_loopback: bool
 
 
 def validate_api_endpoint_url(
@@ -105,28 +134,38 @@ def _validated_api_endpoint(
         raise ValueError("API endpoint contains an invalid port.")
     if any(character.isspace() or character in "/\\?#@" for character in host):
         raise ValueError("API endpoint contains a malformed host.")
+    address: IPv4Address | IPv6Address | None = None
     try:
         address = ip_address(host)
     except ValueError:
-        try:
-            normalized_host = host.encode("idna").decode("ascii").lower()
-        except UnicodeError as exc:
-            raise ValueError("API endpoint contains a malformed host.") from exc
-        labels = normalized_host.split(".")
-        numeric_address = len(labels) > 1 and all(label.isdigit() for label in labels)
-        if (
-            len(normalized_host) > 253
-            or numeric_address
-            or any(_HOST_LABEL.fullmatch(label) is None for label in labels)
-        ):
+        legacy_numeric_host = _LEGACY_IPV4_HOST.fullmatch(host) is not None
+        if legacy_numeric_host and not _legacy_ipv4_host_is_in_range(host):
             raise ValueError("API endpoint contains a malformed host.") from None
+        try:
+            address = IPv4Address(inet_aton(host))
+            normalized_host = str(address)
+        except OSError:
+            if legacy_numeric_host:
+                raise ValueError("API endpoint contains a malformed host.") from None
+            try:
+                normalized_host = host.encode("idna").decode("ascii").lower()
+            except UnicodeError as exc:
+                raise ValueError("API endpoint contains a malformed host.") from exc
+            labels = normalized_host.split(".")
+            numeric_address = all(label.isdigit() for label in labels)
+            if (
+                len(normalized_host) > 253
+                or numeric_address
+                or any(_HOST_LABEL.fullmatch(label) is None for label in labels)
+            ):
+                raise ValueError("API endpoint contains a malformed host.") from None
     else:
         normalized_host = str(address)
 
-    loopback = normalized_host in {"127.0.0.1", "::1", "localhost"}
-    allowed_loopback_http = allow_insecure_loopback_http and parsed.scheme == "http" and loopback
+    is_loopback = normalized_host == "localhost" or (address is not None and address.is_loopback)
+    allowed_loopback_http = allow_insecure_loopback_http and parsed.scheme == "http" and is_loopback
     if parsed.scheme != "https" and not allowed_loopback_http:
-        if parsed.scheme == "http" and loopback:
+        if parsed.scheme == "http" and is_loopback:
             raise ValueError("Loopback HTTP requires explicit opt-in.")
         raise ValueError("API endpoint must use HTTPS.")
     if parsed.query or parsed.fragment:
@@ -158,7 +197,11 @@ def _validated_api_endpoint(
             "",
         )
     )
-    return _ValidatedAPIEndpoint(url=normalized_url, host=normalized_host)
+    return _ValidatedAPIEndpoint(
+        url=normalized_url,
+        host=normalized_host,
+        is_loopback=is_loopback,
+    )
 
 
 class UrllibJSONTransport:
@@ -184,7 +227,18 @@ class UrllibJSONTransport:
 
         request_headers = {name: value for name, value in headers.items() if name.lower() != "accept-encoding"}
         request_headers["Accept-Encoding"] = "identity"
-        request_data = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
+        try:
+            request_data = json.dumps(
+                payload,
+                ensure_ascii=False,
+                allow_nan=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        except (TypeError, ValueError, RecursionError) as exc:
+            raise JSONTransportError(
+                "API request payload could not be encoded as valid UTF-8 JSON.",
+                kind="malformed",
+            ) from exc
         try:
             request = Request(
                 endpoint.url,
@@ -198,7 +252,7 @@ class UrllibJSONTransport:
                 kind="malformed",
             ) from exc
         try:
-            if use_system_proxy and endpoint.host not in {"127.0.0.1", "::1", "localhost"}:
+            if use_system_proxy and not endpoint.is_loopback:
                 opener = build_opener(_NoRedirectHandler())
             else:
                 opener = build_opener(ProxyHandler({}), _NoRedirectHandler())

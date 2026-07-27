@@ -1,9 +1,14 @@
-import json
 from collections.abc import Callable
 from typing import Literal
 
-from apex_ray.llm import estimate_review_input_tokens
-from apex_ray.memory import pack_prompt_payload
+from apex_ray.llm.prompts import (
+    ReviewPromptCache,
+    ReviewPromptCacheKey,
+    render_review_prompt,
+    review_prompt_cache_key,
+    review_prompt_payload_chars,
+)
+from apex_ray.llm.usage import estimate_provider_input_tokens
 from apex_ray.models import (
     ChangedFile,
     ContextPack,
@@ -130,16 +135,31 @@ def plan_llm_context_selection(
     max_pack_chars: int | None = None,
     coverage_mode: LLMCoverageMode | str = LLMCoverageMode.BALANCED,
     provider: ProviderSelector = None,
+    rendered_prompts: ReviewPromptCache | None = None,
 ) -> LLMContextSelection:
     mode = LLMCoverageMode(coverage_mode)
+    initial_rendered_prompt_keys: set[ReviewPromptCacheKey] = (
+        set(rendered_prompts) if rendered_prompts is not None else set()
+    )
     deep_over_budget_ids = {
         pack.id for pack in context_packs if max_pack_chars is not None and pack.stats.estimated_chars > max_pack_chars
     }
-    shallow_over_budget_ids = {
-        pack.id
-        for pack in context_packs
-        if (max_pack_chars is not None and _review_payload_chars(pack, review_depth="shallow") > max_pack_chars)
-    }
+    shallow_over_budget_ids = (
+        set()
+        if mode == LLMCoverageMode.FAST
+        else {
+            pack.id
+            for pack in context_packs
+            if (
+                max_pack_chars is not None
+                and _review_payload_chars(
+                    pack,
+                    review_depth="shallow",
+                )
+                > max_pack_chars
+            )
+        }
+    )
     effective_over_budget_ids = (
         deep_over_budget_ids if mode == LLMCoverageMode.FAST else deep_over_budget_ids & shallow_over_budget_ids
     )
@@ -165,6 +185,7 @@ def plan_llm_context_selection(
         review_depth="deep",
         token_budget=token_budget_remaining,
         provider=provider,
+        rendered_prompts=rendered_prompts,
     )
     if token_budget_remaining is not None:
         token_budget_remaining = max(0, token_budget_remaining - deep_tokens)
@@ -205,6 +226,7 @@ def plan_llm_context_selection(
             review_depth="shallow",
             token_budget=token_budget_remaining,
             provider=provider,
+            rendered_prompts=rendered_prompts,
         )
         shallow_selected_ids = [context_packs[index].id for index in sorted(shallow_selected_indexes)]
         stages.append(
@@ -250,6 +272,13 @@ def plan_llm_context_selection(
         )
         for pack_id in unselected_ids
     }
+    _retain_selected_rendered_prompts(
+        rendered_prompts,
+        context_packs,
+        deep_selected_index_set,
+        set(shallow_selected_indexes),
+        initial_rendered_prompt_keys,
+    )
     return LLMContextSelection(
         total_context_pack_ids=total_ids,
         selected_context_pack_ids=selected_ids,
@@ -278,9 +307,29 @@ def _review_payload_chars(
     *,
     review_depth: Literal["deep", "shallow"],
 ) -> int:
-    payload = pack_prompt_payload(pack, "review", depth=review_depth)
-    payload.pop("stats", None)
-    return len(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+    # Sizing can touch every matching pack before pack-cap narrowing. Keep
+    # those transient payloads out of the render cache so memory stays
+    # bounded by review candidates rather than repository size.
+    return review_prompt_payload_chars(
+        pack,
+        review_depth=review_depth,
+    )
+
+
+def _retain_selected_rendered_prompts(
+    rendered_prompts: ReviewPromptCache | None,
+    context_packs: list[ContextPack],
+    deep_selected_indexes: set[int],
+    shallow_selected_indexes: set[int],
+    initial_keys: set[ReviewPromptCacheKey],
+) -> None:
+    if rendered_prompts is None:
+        return
+    retained_keys = {review_prompt_cache_key(context_packs[index], "deep") for index in deep_selected_indexes}
+    retained_keys.update(review_prompt_cache_key(context_packs[index], "shallow") for index in shallow_selected_indexes)
+    for cache_key in list(rendered_prompts):
+        if cache_key not in initial_keys and cache_key not in retained_keys:
+            rendered_prompts.pop(cache_key, None)
 
 
 def _select_llm_context_pack_indexes(
@@ -402,15 +451,21 @@ def _select_indexes_with_token_budget(
     review_depth: Literal["deep", "shallow"],
     token_budget: int | None,
     provider: ProviderSelector,
+    rendered_prompts: ReviewPromptCache | None,
 ) -> tuple[list[int], int]:
     if not candidate_indexes:
         return [], 0
     candidate_set = set(candidate_indexes)
     if token_budget is None:
         tokens = sum(
-            estimate_review_input_tokens(
-                context_packs[index],
-                review_depth=review_depth,
+            estimate_provider_input_tokens(
+                len(
+                    render_review_prompt(
+                        context_packs[index],
+                        review_depth=review_depth,
+                        cache=rendered_prompts,
+                    ).text
+                ),
                 provider=_provider_for_pack(provider, context_packs[index]),
             )
             for index in candidate_indexes
@@ -429,9 +484,14 @@ def _select_indexes_with_token_budget(
     selected: list[int] = []
     used_tokens = 0
     for index, pack in prioritized:
-        pack_tokens = estimate_review_input_tokens(
-            pack,
-            review_depth=review_depth,
+        pack_tokens = estimate_provider_input_tokens(
+            len(
+                render_review_prompt(
+                    pack,
+                    review_depth=review_depth,
+                    cache=rendered_prompts,
+                ).text
+            ),
             provider=_provider_for_pack(provider, pack),
         )
         if used_tokens + pack_tokens > token_budget:

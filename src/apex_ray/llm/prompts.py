@@ -1,5 +1,10 @@
+import hashlib
 import json
+from collections.abc import MutableMapping
+from copy import deepcopy
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal
 
 from apex_ray.discovery import LANGUAGE_EXTENSIONS
 from apex_ray.memory import pack_prompt_payload
@@ -12,8 +17,79 @@ LANGUAGE_HINTS = {
 }
 
 
+@dataclass(frozen=True)
+class RenderedReviewPrompt:
+    text: str
+    _prompt_payload: dict[str, object] = field(repr=False)
+    payload_chars: int
+
+    @property
+    def prompt_payload(self) -> dict[str, object]:
+        # Keep cached render artifacts immutable to callers. The returned
+        # payload is short-lived while deriving the durable LLM cache key.
+        return deepcopy(self._prompt_payload)
+
+
+type ReviewPromptCacheKey = tuple[str, Literal["deep", "shallow"], str]
+type ReviewPromptCache = MutableMapping[ReviewPromptCacheKey, RenderedReviewPrompt]
+
+
+def review_prompt_cache_key(
+    pack: ContextPack,
+    review_depth: Literal["deep", "shallow"],
+) -> tuple[str, Literal["deep", "shallow"], str]:
+    render_identity = hashlib.sha256(
+        pack.model_dump_json().encode("utf-8"),
+    )
+    return (pack.id, review_depth, render_identity.hexdigest())
+
+
+def review_prompt_payload_chars(
+    pack: ContextPack,
+    *,
+    review_depth: Literal["deep", "shallow"],
+) -> int:
+    return _prompt_payload_chars(pack_prompt_payload(pack, "review", depth=review_depth))
+
+
+def render_review_prompt(
+    pack: ContextPack,
+    *,
+    review_depth: Literal["deep", "shallow"] = "deep",
+    cache: ReviewPromptCache | None = None,
+) -> RenderedReviewPrompt:
+    cache_key = review_prompt_cache_key(pack, review_depth)
+    if cache is not None and (cached := cache.get(cache_key)) is not None:
+        return cached
+    payload = pack_prompt_payload(pack, "review", depth=review_depth)
+    text = (
+        _build_shallow_review_prompt(pack, payload)
+        if review_depth == "shallow"
+        else _build_review_prompt(pack, payload)
+    )
+    rendered = RenderedReviewPrompt(
+        text=text,
+        _prompt_payload=payload,
+        payload_chars=_prompt_payload_chars(payload),
+    )
+    if cache is not None:
+        cache[cache_key] = rendered
+    return rendered
+
+
+def _prompt_payload_chars(payload: dict[str, object]) -> int:
+    budget_payload = {key: value for key, value in payload.items() if key != "stats"}
+    return len(json.dumps(budget_payload, sort_keys=True, separators=(",", ":")))
+
+
 def build_review_prompt(pack: ContextPack) -> str:
-    payload = pack_prompt_payload(pack, "review", depth="deep")
+    return render_review_prompt(pack, review_depth="deep").text
+
+
+def _build_review_prompt(
+    pack: ContextPack,
+    payload: dict[str, object],
+) -> str:
     return (
         "You are Apex Ray, a strict senior code reviewer.\n"
         "Review exactly one context pack from a code diff.\n"
@@ -38,7 +114,13 @@ def build_review_prompt(pack: ContextPack) -> str:
 
 
 def build_shallow_review_prompt(pack: ContextPack) -> str:
-    payload = pack_prompt_payload(pack, "review", depth="shallow")
+    return render_review_prompt(pack, review_depth="shallow").text
+
+
+def _build_shallow_review_prompt(
+    pack: ContextPack,
+    payload: dict[str, object],
+) -> str:
     return (
         "You are Apex Ray's fast shallow code-review pass.\n"
         "Review exactly one compact code context pack from a diff.\n"

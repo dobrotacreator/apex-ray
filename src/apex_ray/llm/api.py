@@ -124,12 +124,25 @@ _ENDPOINTS = {
 }
 _RESERVED_HEADERS = {
     "accept",
+    "anthropic-version",
     "authorization",
     "content-length",
     "content-type",
     "host",
     "proxy-authorization",
     "x-api-key",
+}
+_EXPLICIT_TERMINAL_AUTH_CODES = {
+    "authentication",
+    "authentication_error",
+    "invalid_api_key",
+    "unauthorized",
+}
+_EXPLICIT_TERMINAL_QUOTA_CODES = {
+    "arrearage",
+    "balance",
+    "billing",
+    "insufficient_quota",
 }
 _TRUTHY_ENV_VALUES = {"1", "on", "true", "yes"}
 _CI_ALLOWED_ENV_SELECTORS_ENV = "APEX_RAY_API_ALLOWED_ENV_VARS"
@@ -201,6 +214,14 @@ class APILLMProvider:
         prompt = (
             build_shallow_review_prompt(pack) if self.config.review_depth == "shallow" else build_review_prompt(pack)
         )
+        return self.review_rendered_prompt_with_usage(pack, repo_root, prompt)
+
+    def review_rendered_prompt_with_usage(
+        self,
+        pack: ContextPack,
+        repo_root: Path,
+        prompt: str,
+    ) -> LLMReviewResult:
         response_text, usage = self._complete(
             prompt=prompt,
             schema=finding_response_schema(),
@@ -403,9 +424,12 @@ class APILLMProvider:
         error = _as_mapping(response.data)
         nested = _as_mapping(error.get("error")) if error is not None else None
         details = nested or error or {}
-        structured_code = " ".join(
-            str(details.get(key, "")) for key in ("type", "code", "status") if details.get(key) is not None
-        ).lower()
+        structured_values = tuple(
+            str(details.get(key, "")).strip().lower()
+            for key in ("type", "code", "status")
+            if details.get(key) is not None
+        )
+        structured_code = " ".join(structured_values)
         message_code = str(details.get("message", "")).lower()
         code = f"{structured_code} {message_code}"
         retry_after = _parse_retry_after(response.headers)
@@ -423,7 +447,23 @@ class APILLMProvider:
         )
         rate_limit_tokens = ("overloaded", "rate_limit", "rate limit", "ratequota")
         auth_tokens = ("authentication", "invalid_api_key", "unauthorized")
-        if status == 401:
+        if status >= 500:
+            if any(value in _EXPLICIT_TERMINAL_AUTH_CODES for value in structured_values):
+                category = "auth"
+                retryable = False
+            elif any(value in _EXPLICIT_TERMINAL_QUOTA_CODES for value in structured_values):
+                category = "quota"
+                retryable = False
+            elif any(token in structured_code for token in rate_limit_tokens):
+                category = "rate_limit"
+                retryable = True
+            elif status in {504, 524}:
+                category = "timeout"
+                retryable = True
+            else:
+                category = "provider"
+                retryable = True
+        elif status == 401:
             category = "auth"
             retryable = False
         elif status == 403:
@@ -856,7 +896,9 @@ def _parse_retry_after(headers: Mapping[str, str]) -> float | None:
     except ValueError:
         try:
             retry_at = parsedate_to_datetime(value)
-        except TypeError, ValueError:
+        except TypeError:
+            return None
+        except ValueError:
             return None
         if retry_at.tzinfo is None:
             retry_at = retry_at.replace(tzinfo=UTC)

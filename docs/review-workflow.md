@@ -22,7 +22,8 @@ apex-ray review \
   --llm \
   --output .apex-ray/reports/review.md \
   --json .apex-ray/reports/review.json \
-  --html .apex-ray/reports/review.html
+  --html .apex-ray/reports/review.html \
+  --sarif .apex-ray/reports/review.sarif
 ```
 
 ## Review Modes
@@ -35,7 +36,8 @@ apex-ray review --worktree --no-llm
 
 It still parses the diff, runs available language analyzers, builds context packs, and reports review coverage surfaces.
 
-LLM mode sends selected context packs to the configured local CLI provider:
+LLM mode sends selected context packs to the configured provider, which may be
+a local CLI, a built-in direct API, or a custom compatible endpoint:
 
 ```bash
 apex-ray review --worktree --llm
@@ -50,6 +52,7 @@ Apex Ray writes:
 - Markdown for local reading.
 - JSON for durable automation and continuation.
 - Optional HTML for browser-based inspection.
+- Optional SARIF 2.1.0 for GitHub code scanning and other compatible systems.
 
 Reports include findings, analyzer warnings, selected context packs, skipped packs, LLM routes, cache usage, token estimates, coverage status, and continuation commands.
 
@@ -177,7 +180,17 @@ apex-ray review --worktree --llm --no-cache
 
 Without `--llm`, Apex Ray stays local and deterministic.
 
-With `--llm`, Apex Ray sends selected diff and context-pack content to the configured local CLI provider. Review that provider's privacy and retention policy before using Apex Ray on private code. Caches, telemetry, and archived reports are local files, but they may contain repository paths, model names, finding counts, provider metadata, and source snippets.
+With `--llm`, Apex Ray sends selected diff and context-pack content to the
+configured provider. A local CLI controls its own network and account boundary;
+a direct API provider sends HTTPS requests to its configured service endpoint.
+Review the applicable CLI, API, gateway, account, privacy, and retention policy
+before using Apex Ray on private code. Caches, telemetry, and archived reports
+are local files, while CI artifacts and SARIF follow the retention and access
+policy of the CI platform. All may contain repository paths, model names,
+finding counts, provider metadata, and source snippets.
+
+For a pull-request workflow with protected API secrets, reviewer matrices,
+artifacts, and SARIF upload, see [GitHub Actions](github-actions.md).
 
 ## Common Troubleshooting
 
@@ -192,5 +205,6 @@ Typical issues:
 - `Config: not found`: run `apex-ray init` in the target repository or pass `--config`.
 - `Python analyzer available: false`: reinstall Apex Ray or run from a healthy source checkout. The Python analyzer is built in and should normally be available whenever the CLI imports successfully.
 - `TypeScript analyzer built: false`: reinstall the published package, or in a source checkout run the TypeScript analyzer build from [Development](development.md).
-- Provider command not found: install the configured Codex CLI or Claude Code CLI, or override the executable path in `.apex-ray/config.local.yml`.
+- Provider command not found: for a CLI provider, install the configured Codex CLI or Claude Code CLI, or override its executable path in `.apex-ray/config.local.yml`.
+- API credential or endpoint rejected: check the selected environment-variable names and, in CI, the trusted `APEX_RAY_API_ALLOWED_ENV_VARS` and `APEX_RAY_API_ALLOWED_HOSTS` policy.
 - Hook cannot find `apex-ray`: install Apex Ray on the user `PATH` used by git hooks, or update the hook environment.

@@ -21,6 +21,7 @@ from apex_ray.llm.findings import (
 from apex_ray.llm.findings import (
     verification_for_finding as _verification_for_finding,
 )
+from apex_ray.llm.prompts import ReviewPromptCache, render_review_prompt
 from apex_ray.llm.providers import (
     LLMProvider,
     provider_from_config,
@@ -43,9 +44,6 @@ from apex_ray.llm.usage import (
 )
 from apex_ray.llm.usage import (
     llm_run_usage_fields as _llm_run_usage_fields,
-)
-from apex_ray.llm.usage import (
-    review_input_chars as _review_input_chars,
 )
 from apex_ray.llm.usage import (
     verification_batch_input_chars as _verification_batch_input_chars,
@@ -142,6 +140,7 @@ def review_context_packs(
     progress: ProgressSink | None = None,
     reviewer: ReviewerConfig | None = None,
     circuit_breaker: LLMRouteCircuitBreaker | None = None,
+    rendered_prompts: ReviewPromptCache | None = None,
 ) -> tuple[list[Finding], list[LLMRun]]:
     if not packs:
         return [], []
@@ -161,6 +160,12 @@ def review_context_packs(
         *,
         first_route_permitted: bool,
     ) -> tuple[list[Finding], list[LLMRun]]:
+        rendered_prompt = render_review_prompt(
+            pack,
+            review_depth=review_depth,
+            cache=rendered_prompts,
+        )
+        rendered_input_chars = len(rendered_prompt.text)
         attempts = [review_config_for_pack(base_config, pack)]
         pack_findings: list[Finding] = []
         runs: list[LLMRun] = []
@@ -170,7 +175,15 @@ def review_context_packs(
         while attempts:
             pack_config, profile, route_reason = attempts.pop(0)
             start = time.monotonic()
-            cache_key = review_cache_key(pack, pack_config) if cache else None
+            cache_key = (
+                review_cache_key(
+                    pack,
+                    pack_config,
+                    prompt_payload=rendered_prompt.prompt_payload,
+                )
+                if cache
+                else None
+            )
             cache_hit = False
             provider_called = False
             usage = None
@@ -212,7 +225,12 @@ def review_context_packs(
                         return [], runs
                     provider_called = True
                     llm_provider = provider or provider_from_config(pack_config)
-                    result = review_context_pack_with_provider(llm_provider, pack, repo_root)
+                    result = review_context_pack_with_provider(
+                        llm_provider,
+                        pack,
+                        repo_root,
+                        prompt=rendered_prompt.text,
+                    )
                     cached_findings = result.findings
                     usage = result.usage
                     if cache and cache_key:
@@ -242,7 +260,7 @@ def review_context_packs(
                         status,
                         max_consecutive_failures=config.max_consecutive_provider_failures,
                     )
-                input_chars = _review_input_chars(pack, review_depth=review_depth) if provider_called else 0
+                input_chars = rendered_input_chars if provider_called else 0
                 runs.append(
                     LLMRun(
                         kind="review_shallow" if review_depth == "shallow" else "review",
@@ -282,7 +300,7 @@ def review_context_packs(
                     "ok",
                     max_consecutive_failures=config.max_consecutive_provider_failures,
                 )
-            input_chars = _review_input_chars(pack, review_depth=review_depth) if provider_called else 0
+            input_chars = rendered_input_chars if provider_called else 0
             runs.append(
                 LLMRun(
                     kind="review_shallow" if review_depth == "shallow" else "review",
@@ -308,7 +326,7 @@ def review_context_packs(
                     cache_key=cache_key,
                     estimated_saved_input_tokens=(
                         _estimate_provider_input_tokens(
-                            _review_input_chars(pack, review_depth=review_depth),
+                            rendered_input_chars,
                             provider=pack_config.provider,
                         )
                         if cache_hit

@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import re
 import subprocess
+import sys
 import tomllib
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -383,6 +385,88 @@ def test_plan_environment_uses_the_isolated_repository_checkout(
     outputs = github_output.read_text(encoding="utf-8")
     assert f"repository-path={repository.resolve()}\n" in outputs
     assert f"markdown-path={repository / '.apex-ray' / 'ci' / 'review.md'}\n" in outputs
+
+
+@pytest.mark.parametrize(
+    "config_text",
+    [
+        pytest.param("false\n", id="false"),
+        pytest.param("0\n", id="zero"),
+        pytest.param("[]\n", id="empty-list"),
+        pytest.param('""\n', id="empty-string"),
+        pytest.param("null\n", id="explicit-null"),
+        pytest.param("~\n", id="explicit-null-short-form"),
+    ],
+)
+def test_restricted_config_rejects_falsy_non_mapping_documents(config_text: str) -> None:
+    helper = _load_helper()
+
+    with pytest.raises(ValueError, match="trusted base Apex Ray config must be a mapping"):
+        helper._load_config_document(config_text)
+
+
+@pytest.mark.parametrize(
+    ("config_text", "expected"),
+    [
+        pytest.param(None, {"review": {}}, id="missing"),
+        pytest.param("", {}, id="empty"),
+        pytest.param("# comment only\n", {}, id="comment-only"),
+    ],
+)
+def test_restricted_config_defaults_only_missing_or_empty_documents(
+    config_text: str | None,
+    expected: dict[str, object],
+) -> None:
+    helper = _load_helper()
+
+    assert helper._load_config_document(config_text) == expected
+
+
+def test_prepare_escapes_top_level_configuration_errors(tmp_path: Path) -> None:
+    workspace = tmp_path / "repository"
+    runner_temp = tmp_path / "runner"
+    workspace.mkdir()
+    runner_temp.mkdir()
+    _init_repository(workspace)
+    event_path = tmp_path / "event.json"
+    event_path.write_text("{}\n", encoding="utf-8")
+    injected_base = "missing-ref\n::error::injected"
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "APEX_RAY_REPOSITORY_PATH": str(workspace),
+            "RUNNER_TEMP": str(runner_temp),
+            "GITHUB_EVENT_PATH": str(event_path),
+            "GITHUB_REPOSITORY": "owner/repository",
+            "GITHUB_ACTOR": "trusted-maintainer",
+            "INPUT_CONFIG_PATH": ".apex-ray/config.yml",
+            "INPUT_REVIEWERS": "",
+            "INPUT_LLM": "false",
+            "INPUT_FAIL_ON_QUALITY_GATE": "true",
+            "INPUT_BASE": injected_base,
+            "INPUT_TRUST_PR_CONFIG": "false",
+            "INPUT_MARKDOWN_OUTPUT": ".apex-ray/ci/review.md",
+            "INPUT_JSON_OUTPUT": ".apex-ray/ci/review.json",
+            "INPUT_SARIF_OUTPUT": ".apex-ray/ci/review.sarif",
+            "INPUT_ARTIFACT_NAME": "apex-ray-review",
+            "INPUT_SARIF_CATEGORY": "apex-ray-review",
+        }
+    )
+
+    result = subprocess.run(
+        [sys.executable, str(HELPER_PATH), "plan"],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+
+    assert result.returncode == 2
+    assert (
+        "::error title=Apex Ray Action configuration::"
+        "Unable to resolve review base ref: missing-ref%0A::error::injected\n"
+    ) == result.stderr
+    assert "\n::error::injected" not in result.stderr
 
 
 @pytest.mark.parametrize(

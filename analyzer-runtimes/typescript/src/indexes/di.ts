@@ -14,13 +14,24 @@ import {
   type IndexCollectionControl,
 } from "./collection.js";
 
+interface DirectConstArrayLiteral {
+  array: ts.ArrayLiteralExpression;
+  unsafeIdentifierStarts: number[];
+}
+
 export function collectDiProviderIndex(
   repo: string,
   source: ts.SourceFile,
   control?: IndexCollectionControl,
 ): DiProviderIndexEntry[] {
   const providers: DiProviderIndexEntry[] = [];
-  const providerArrays = collectDiProviderArrays(repo, source, control);
+  const staticArrays = collectDirectConstArrayLiterals(source, control);
+  const providerArrays = collectDiProviderArrays(
+    repo,
+    source,
+    staticArrays,
+    control,
+  );
   for (const entries of providerArrays.values()) {
     providers.push(...entries);
   }
@@ -36,20 +47,152 @@ export function collectDiProviderIndex(
           source,
           node,
           providerArrays,
+          staticArrays,
           control,
         ),
       );
       providers.push(
-        ...diProviderEntriesForObjectLiteral(repo, source, node, control),
+        ...diProviderEntriesForObjectLiteral(
+          repo,
+          source,
+          node,
+          staticArrays,
+          control,
+        ),
       );
     }
     ts.forEachChild(node, visit);
   }
 }
 
+function collectDirectConstArrayLiterals(
+  source: ts.SourceFile,
+  control?: IndexCollectionControl,
+): Map<string, DirectConstArrayLiteral> {
+  const arrays = new Map<string, DirectConstArrayLiteral>();
+  for (const statement of source.statements) {
+    if (collectionShouldStop(control)) {
+      arrays.clear();
+      return arrays;
+    }
+    if (!ts.isVariableStatement(statement)) continue;
+    if (
+      (statement.declarationList.flags & ts.NodeFlags.Const) ===
+      0
+    ) {
+      continue;
+    }
+    for (const declaration of statement.declarationList.declarations) {
+      if (!ts.isIdentifier(declaration.name)) continue;
+      const array = arrayLiteralExpressionForInitializer(
+        declaration.initializer,
+      );
+      if (array) {
+        arrays.set(declaration.name.text, {
+          array,
+          unsafeIdentifierStarts: [],
+        });
+      }
+    }
+  }
+
+  if (arrays.size > 0 && !collectUnsafeIdentifierStarts(source)) {
+    arrays.clear();
+  }
+  return arrays;
+
+  function collectUnsafeIdentifierStarts(node: ts.Node): boolean {
+    if (collectionShouldStop(control)) return false;
+    if (
+      ts.isIdentifier(node) &&
+      !isReadOnlySpreadIdentifier(node)
+    ) {
+      arrays
+        .get(node.text)
+        ?.unsafeIdentifierStarts.push(node.getStart(source));
+    }
+    let complete = true;
+    ts.forEachChild(node, (child) => {
+      if (complete) complete = collectUnsafeIdentifierStarts(child);
+    });
+    return complete;
+  }
+
+  function isReadOnlySpreadIdentifier(
+    identifier: ts.Identifier,
+  ): boolean {
+    let expression: ts.Expression = identifier;
+    while (true) {
+      const parent = expression.parent;
+      if (
+        (ts.isParenthesizedExpression(parent) ||
+          ts.isAsExpression(parent) ||
+          ts.isSatisfiesExpression(parent) ||
+          ts.isNonNullExpression(parent) ||
+          ts.isTypeAssertionExpression(parent)) &&
+        parent.expression === expression
+      ) {
+        expression = parent;
+        continue;
+      }
+      return (
+        ts.isSpreadElement(parent) &&
+        parent.expression === expression
+      );
+    }
+  }
+}
+
+function directConstArrayForSpread(
+  source: ts.SourceFile,
+  expression: ts.Expression,
+  staticArrays: ReadonlyMap<string, DirectConstArrayLiteral>,
+): ts.ArrayLiteralExpression | undefined {
+  const directArray = arrayLiteralExpressionForInitializer(expression);
+  if (directArray) return directArray;
+
+  const identifier = identifierFromExpression(expression);
+  if (!identifier) return undefined;
+  const staticArray = staticArrays.get(identifier.text);
+  const identifierStart = identifier.getStart(source);
+  if (
+    !staticArray ||
+    staticArray.array.end > identifierStart ||
+    staticArray.unsafeIdentifierStarts.some(
+      (start) =>
+        start > staticArray.array.end &&
+        start < identifierStart,
+    )
+  ) {
+    return undefined;
+  }
+
+  for (
+    let ancestor: ts.Node | undefined = identifier.parent;
+    ancestor && ancestor !== source;
+    ancestor = ancestor.parent
+  ) {
+    if (
+      ts.isFunctionLike(ancestor) ||
+      ts.isBlock(ancestor) ||
+      ts.isModuleBlock(ancestor) ||
+      ts.isCaseBlock(ancestor) ||
+      ts.isCatchClause(ancestor) ||
+      ts.isForStatement(ancestor) ||
+      ts.isForInStatement(ancestor) ||
+      ts.isForOfStatement(ancestor) ||
+      ts.isWithStatement(ancestor)
+    ) {
+      return undefined;
+    }
+  }
+  return staticArray.array;
+}
+
 function collectDiProviderArrays(
   repo: string,
   source: ts.SourceFile,
+  staticArrays: ReadonlyMap<string, DirectConstArrayLiteral>,
   control?: IndexCollectionControl,
 ): Map<string, DiProviderIndexEntry[]> {
   const providerArrays = new Map<string, DiProviderIndexEntry[]>();
@@ -83,6 +226,7 @@ function collectDiProviderArrays(
             repo,
             source,
             unwrapped,
+            staticArrays,
             control,
           ).map((entry) => ({
               ...entry,
@@ -103,6 +247,7 @@ function diProviderEntriesForModuleObject(
   source: ts.SourceFile,
   object: ts.ObjectLiteralExpression,
   providerArrays: Map<string, DiProviderIndexEntry[]>,
+  staticArrays: ReadonlyMap<string, DirectConstArrayLiteral>,
   control?: IndexCollectionControl,
 ): DiProviderIndexEntry[] {
   const referenceNode = moduleDecoratorForObjectLiteral(object);
@@ -162,6 +307,7 @@ function diProviderEntriesForModuleObject(
           repo,
           source,
           unwrapped,
+          staticArrays,
           control,
         )) {
           entries.push({
@@ -187,6 +333,7 @@ function diProviderEntriesForObjectLiteral(
   repo: string,
   source: ts.SourceFile,
   object: ts.ObjectLiteralExpression,
+  staticArrays: ReadonlyMap<string, DirectConstArrayLiteral>,
   control?: IndexCollectionControl,
 ): DiProviderIndexEntry[] {
   const provideProperty = propertyAssignmentNamed(object, "provide");
@@ -214,9 +361,35 @@ function diProviderEntriesForObjectLiteral(
     if (injectArray && ts.isArrayLiteralExpression(injectArray)) {
       for (const element of injectArray.elements) {
         if (collectionShouldStop(control)) break;
-        const implementation = ts.isSpreadElement(element)
-          ? identifierFromExpression(element.expression)
-          : identifierFromExpression(element);
+        if (ts.isSpreadElement(element)) {
+          const staticArray = directConstArrayForSpread(
+            source,
+            element.expression,
+            staticArrays,
+          );
+          if (!staticArray) continue;
+
+          let stopped = false;
+          for (const staticElement of staticArray.elements) {
+            if (collectionShouldStop(control)) {
+              stopped = true;
+              break;
+            }
+            if (ts.isSpreadElement(staticElement)) continue;
+            const implementation =
+              identifierFromExpression(staticElement);
+            if (
+              implementation &&
+              !appendImplementation(implementation)
+            ) {
+              stopped = true;
+              break;
+            }
+          }
+          if (stopped) break;
+          continue;
+        }
+        const implementation = identifierFromExpression(element);
         if (
           implementation &&
           !appendImplementation(implementation)

@@ -141,7 +141,12 @@ def resolve_cache_dir(repo_root: Path, config: LLMConfig) -> Path:
     return repo_root / configured
 
 
-def review_cache_key(pack: ContextPack, config: LLMConfig) -> str:
+def review_cache_key(
+    pack: ContextPack,
+    config: LLMConfig,
+    *,
+    prompt_payload: dict[str, object] | None = None,
+) -> str:
     depth = config.review_depth
     return _cache_key(
         {
@@ -150,7 +155,9 @@ def review_cache_key(pack: ContextPack, config: LLMConfig) -> str:
             "prompt_version": review_prompt_version(config),
             "review_depth": depth,
             "provider": _provider_cache_identity(config),
-            "pack": pack_prompt_payload(pack, "review", depth=depth),
+            "pack": (
+                prompt_payload if prompt_payload is not None else pack_prompt_payload(pack, "review", depth=depth)
+            ),
         }
     )
 

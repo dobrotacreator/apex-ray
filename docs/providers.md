@@ -183,11 +183,14 @@ and integration tests.
 
 ## Provider Setup Checklist
 
-1. Install and authenticate the local provider CLI.
-2. Run the provider once outside Apex Ray to verify credentials.
+1. Choose a provider boundary: install and authenticate a local CLI, or create
+   an API key and expose it through the configured environment variable.
+2. Verify the CLI or API credential outside Apex Ray with a minimal request.
 3. Run `apex-ray doctor` from the target repository.
-4. Add shared provider policy or local overrides.
-5. Run a small `--llm` review and inspect the Markdown and JSON reports.
+4. Add shared provider policy or local overrides. In CI, keep credentials in
+   protected secrets and define the trusted endpoint/environment allowlists.
+5. Run a small `--llm` review and inspect the Markdown, JSON, and optional
+   SARIF reports.
 
 Local override example:
 

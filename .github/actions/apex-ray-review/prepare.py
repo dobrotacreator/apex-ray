@@ -361,9 +361,12 @@ def _load_config_document(raw_config: str | None) -> dict[str, Any]:
         return {"review": {}}
     yaml_module = _yaml()
     try:
-        loaded = yaml_module.safe_load(raw_config) or {}
+        loaded = yaml_module.safe_load(raw_config)
     except yaml_module.YAMLError as exc:
         raise ValueError(f"The trusted base Apex Ray config is invalid YAML: {exc}") from exc
+    if loaded is None:
+        if yaml_module.compose(raw_config) is None:
+            loaded = {}
     if not isinstance(loaded, dict):
         raise ValueError("The trusted base Apex Ray config must be a mapping.")
     review = loaded.get("review", {})
@@ -809,5 +812,12 @@ if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except (KeyError, OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
-        print(f"::error title=Apex Ray Action configuration::{exc}", file=sys.stderr)
+        title = _workflow_command_escape(
+            "Apex Ray Action configuration",
+            property_value=True,
+        )
+        print(
+            f"::error title={title}::{_workflow_command_escape(str(exc))}",
+            file=sys.stderr,
+        )
         raise SystemExit(2) from exc

@@ -4,9 +4,9 @@
 
 # Apex Ray
 
-Local CLI-first AI code review for git diffs with analyzer-backed context.
+CLI-first AI code review for git diffs with analyzer-backed context, locally or in CI.
 
-Apex Ray reads a git diff, builds compact context packs around changed code, runs optional LLM review through a local CLI provider, verifies findings, and writes Markdown, JSON, and HTML reports. It is designed for teams that want review intelligence locally, without depending on a hosted PR-review product.
+Apex Ray reads a git diff, builds compact context packs around changed code, runs optional focused LLM review through a local CLI or direct API provider, verifies findings, and writes Markdown, JSON, HTML, and SARIF reports. It can run on a developer machine or in GitHub Actions without depending on a hosted PR-review product.
 
 !!! warning "Pre-1.0"
     Apex Ray is pre-1.0. Report schemas and configuration can change while the project is prepared for production use.
@@ -18,7 +18,8 @@ Apex Ray reads a git diff, builds compact context packs around changed code, run
 | Install Apex Ray and run a first review | [Quick Start](quickstart.md) |
 | Choose review targets, understand reports, and continue partial coverage | [Review Workflow](review-workflow.md) |
 | Configure shared policy, gates, reports, and coverage | [Configuration](configuration.md) |
-| Set up Codex CLI or Claude Code CLI provider routing | [LLM Providers](providers.md) |
+| Set up subscription-backed CLIs, direct APIs, or custom compatible endpoints | [LLM Providers](providers.md) |
+| Review pull requests in GitHub Actions | [GitHub Actions](github-actions.md) |
 | Tune TypeScript quality, latency, memory, and token cost | [Tuning](tuning.md) |
 | Add project-specific review rules and team memory | [Rules And Memory](memory.md) |
 | Understand internals and contribution workflow | [Architecture](architecture.md) and [Development](development.md) |
@@ -28,9 +29,10 @@ Apex Ray reads a git diff, builds compact context packs around changed code, run
 - Builds context packs from changed files, symbols, callers, callees, contracts, metadata, and related tests.
 - Runs a language-neutral diff -> context pack -> optional LLM review workflow.
 - Uses enhanced analyzers for TypeScript/JavaScript, Python, and Go today, with Rust planned next.
-- Supports project-specific rules and repo-committed review memory.
-- Runs without LLM calls, or with Codex CLI / Claude Code CLI when configured.
-- Routes cheap and strong models through profiles.
+- Supports path-aware project risk policy, project-specific rules, and repo-committed review memory.
+- Runs without LLM calls, with Codex CLI / Claude Code CLI, or through direct OpenAI, Anthropic, DeepSeek, Qwen, Kimi, Z.ai, and custom compatible APIs.
+- Runs multiple focused reviewers with independent scope, profile, depth, verification, and budget controls.
+- Routes cheap and strong models through profiles and can run reviewer matrices in GitHub Actions.
 - Tracks LLM coverage, skipped packs, partial severity, provider failures, cache usage, and continuation commands.
 - Replays historical GitHub PR review comments for local evals.
 - Writes local telemetry so teams can tune cost, latency, and coverage over time.
@@ -80,14 +82,15 @@ See [Quick Start](quickstart.md) for the full first-run sequence.
 - **Rules** are stable project constraints injected only when they match a context pack.
 - **Memory** is curated team learning, false-positive calibration, and domain vocabulary.
 - **Coverage** records which packs were reviewed deeply, reviewed shallowly, skipped, or left as residual work.
-- **Reports** are local artifacts. Markdown and HTML are for humans; JSON is for automation and continuation.
+- **Reports** are local or CI artifacts. Markdown and HTML are for humans, JSON is for automation and continuation, and SARIF integrates findings with code-scanning systems.
 
 ## Documentation Map
 
 - [Quick Start](quickstart.md): install, initialize a repo, run first no-LLM and LLM reviews.
 - [Review Workflow](review-workflow.md): daily commands, targets, reports, continuation, cache behavior, and troubleshooting.
 - [Configuration](configuration.md): shared config, local overrides, coverage, reports, and pre-push gate policy.
-- [LLM Providers](providers.md): Codex CLI, Claude Code CLI, profiles, routing, effort, usage, and privacy boundary.
+- [LLM Providers](providers.md): local CLIs, direct and custom APIs, profiles, routing, effort, usage, and privacy boundaries.
+- [GitHub Actions](github-actions.md): secure pull-request configuration, API secrets, focused reviewer matrices, artifacts, SARIF, and quality gates.
 - [Rules And Memory](memory.md): project-specific review rules and curated repo memory.
 - [Telemetry](telemetry.md): local JSONL metrics for cost, latency, routing, and coverage tuning.
 - [Tuning](tuning.md): TypeScript-oriented presets and an evidence-driven loop for risk, reviewer, route, and budget calibration.

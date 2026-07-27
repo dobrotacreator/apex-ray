@@ -127,11 +127,18 @@ class CodexCLIProvider:
         return self.review_context_pack_with_usage(pack, repo_root).findings
 
     def review_context_pack_with_usage(self, pack: ContextPack, repo_root: Path) -> LLMReviewResult:
-        codex_path = resolve_codex_path(self.config.codex_path, repo_root)
         prompt = (
             build_shallow_review_prompt(pack) if self.config.review_depth == "shallow" else build_review_prompt(pack)
         )
+        return self.review_rendered_prompt_with_usage(pack, repo_root, prompt)
 
+    def review_rendered_prompt_with_usage(
+        self,
+        pack: ContextPack,
+        repo_root: Path,
+        prompt: str,
+    ) -> LLMReviewResult:
+        codex_path = resolve_codex_path(self.config.codex_path, repo_root)
         with tempfile.TemporaryDirectory(prefix="apex-ray-codex-") as tmp:
             tmp_path = Path(tmp)
             schema_path = tmp_path / "finding_schema.json"
@@ -272,11 +279,18 @@ class ClaudeCodeCLIProvider:
         return self.review_context_pack_with_usage(pack, repo_root).findings
 
     def review_context_pack_with_usage(self, pack: ContextPack, repo_root: Path) -> LLMReviewResult:
-        claude_path = resolve_claude_path(self.config.claude_path, repo_root)
         prompt = (
             build_shallow_review_prompt(pack) if self.config.review_depth == "shallow" else build_review_prompt(pack)
         )
+        return self.review_rendered_prompt_with_usage(pack, repo_root, prompt)
 
+    def review_rendered_prompt_with_usage(
+        self,
+        pack: ContextPack,
+        repo_root: Path,
+        prompt: str,
+    ) -> LLMReviewResult:
+        claude_path = resolve_claude_path(self.config.claude_path, repo_root)
         with tempfile.TemporaryDirectory(prefix="apex-ray-claude-") as tmp:
             tmp_path = Path(tmp)
             command = build_claude_command(
@@ -416,7 +430,16 @@ def review_context_pack_with_provider(
     provider: LLMProvider,
     pack: ContextPack,
     repo_root: Path,
+    *,
+    prompt: str | None = None,
 ) -> LLMReviewResult:
+    rendered_reviewer = getattr(provider, "review_rendered_prompt_with_usage", None)
+    if prompt is not None and callable(rendered_reviewer):
+        reviewer_with_prompt = cast(
+            Callable[[ContextPack, Path, str], LLMReviewResult],
+            rendered_reviewer,
+        )
+        return reviewer_with_prompt(pack, repo_root, prompt)
     batch_reviewer = getattr(provider, "review_context_pack_with_usage", None)
     if callable(batch_reviewer):
         reviewer = cast(Callable[[ContextPack, Path], LLMReviewResult], batch_reviewer)

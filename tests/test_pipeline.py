@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Literal
 
 import pytest
 
@@ -551,6 +552,93 @@ def test_plan_llm_context_selection_enforces_max_packs_across_deep_and_shallow()
     assert len(selection.shallow_selected_context_pack_ids) == 1
     assert len(selection.unselected_context_pack_ids) == 1
     assert set(selection.selected_context_pack_ids).isdisjoint(selection.unselected_context_pack_ids)
+
+
+def test_plan_llm_context_selection_retains_only_selected_rendered_prompts() -> None:
+    packs = [
+        ContextPack(
+            id=f"src/{index}.ts#file",
+            file=f"src/{index}.ts",
+            file_kind=FileKind.SOURCE,
+        )
+        for index in range(20)
+    ]
+    changed_files = [
+        ChangedFile(
+            old_path=pack.file,
+            new_path=pack.file,
+            file_kind=FileKind.SOURCE,
+        )
+        for pack in packs
+    ]
+    rendered_prompts = {}
+
+    selection = plan_llm_context_selection(
+        packs,
+        changed_files,
+        max_packs=2,
+        max_deep_packs=1,
+        max_input_tokens=None,
+        max_pack_chars=100_000,
+        rendered_prompts=rendered_prompts,
+    )
+
+    assert len(rendered_prompts) == 2
+    assert {(key[0], key[1]) for key in rendered_prompts} == {
+        (selection.deep_selected_context_pack_ids[0], "deep"),
+        (selection.shallow_selected_context_pack_ids[0], "shallow"),
+    }
+
+
+def test_plan_llm_context_selection_hashes_only_retained_prompt_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from apex_ray.pipeline import selection as selection_module
+
+    packs = [
+        ContextPack(
+            id=f"src/{index}.ts#file",
+            file=f"src/{index}.ts",
+            file_kind=FileKind.SOURCE,
+        )
+        for index in range(20)
+    ]
+    changed_files = [
+        ChangedFile(
+            old_path=pack.file,
+            new_path=pack.file,
+            file_kind=FileKind.SOURCE,
+        )
+        for pack in packs
+    ]
+    rendered_prompts = {}
+    cache_key_calls: list[tuple[str, str]] = []
+    original_cache_key = selection_module.review_prompt_cache_key
+
+    def counting_cache_key(
+        pack: ContextPack,
+        review_depth: Literal["deep", "shallow"],
+    ):
+        cache_key_calls.append((pack.id, review_depth))
+        return original_cache_key(pack, review_depth)
+
+    monkeypatch.setattr(
+        selection_module,
+        "review_prompt_cache_key",
+        counting_cache_key,
+    )
+
+    plan_llm_context_selection(
+        packs,
+        changed_files,
+        max_packs=2,
+        max_deep_packs=1,
+        max_input_tokens=None,
+        max_pack_chars=100_000,
+        rendered_prompts=rendered_prompts,
+    )
+
+    assert len(cache_key_calls) == 2
 
 
 def test_plan_llm_context_selection_exhaustive_mode_keeps_pack_caps_without_token_cap() -> None:
@@ -3388,6 +3476,85 @@ def test_run_review_pipeline_bounds_project_discovery_with_analyzer_timeout(
     assert seen_timeout == 17
 
 
+def test_run_review_pipeline_preserves_legacy_stage_names_for_default_reviewer(
+    tmp_path: Path,
+) -> None:
+    diff_text = """diff --git a/package.json b/package.json
+--- a/package.json
++++ b/package.json
+@@ -1 +1 @@
+-{"name":"old"}
++{"name":"new"}
+"""
+    config = ReviewConfig()
+    config.llm.enabled = True
+    config.llm.provider = LLMProviderName.FAKE
+    config.llm.verify = False
+
+    report = run_review_pipeline(
+        tmp_path,
+        diff_text,
+        TargetMode.PATCH,
+        config,
+        provider=FakeLLMProvider([]),
+    )
+
+    assert report.llm_selection is not None
+    assert set(report.reviewer_selections) == {"general"}
+    reviewer_stage_names = [stage.stage for stage in report.reviewer_selections["general"].stages]
+    assert reviewer_stage_names
+    assert [stage.stage for stage in report.llm_selection.stages] == reviewer_stage_names
+
+
+def test_run_review_pipeline_renders_each_review_prompt_once_per_depth(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from apex_ray.llm import prompts as prompt_module
+
+    diff_text = """diff --git a/package.json b/package.json
+--- a/package.json
++++ b/package.json
+@@ -1 +1 @@
+-{"name":"old"}
++{"name":"new"}
+"""
+    config = ReviewConfig()
+    config.llm.enabled = True
+    config.llm.provider = LLMProviderName.FAKE
+    config.llm.coverage_mode = "fast"
+    config.llm.verify = False
+    prompt_payload_calls: list[tuple[str, str, str]] = []
+    original_pack_prompt_payload = prompt_module.pack_prompt_payload
+
+    def counting_pack_prompt_payload(
+        pack: ContextPack,
+        audience: str,
+        depth: str = "deep",
+    ) -> dict[str, object]:
+        prompt_payload_calls.append((pack.id, audience, depth))
+        return original_pack_prompt_payload(pack, audience, depth)
+
+    monkeypatch.setattr(
+        prompt_module,
+        "pack_prompt_payload",
+        counting_pack_prompt_payload,
+    )
+
+    report = run_review_pipeline(
+        tmp_path,
+        diff_text,
+        TargetMode.PATCH,
+        config,
+        provider=FakeLLMProvider([]),
+    )
+
+    assert len(report.context_packs) == 1
+    assert prompt_payload_calls == [
+        (report.context_packs[0].id, "review", "deep"),
+    ]
+
+
 def test_run_review_pipeline_runs_scoped_reviewers_and_merges_provenance(tmp_path: Path) -> None:
     diff_text = """diff --git a/package.json b/package.json
 --- a/package.json
@@ -3439,6 +3606,7 @@ def test_run_review_pipeline_runs_scoped_reviewers_and_merges_provenance(tmp_pat
         report.llm_selection.selected_context_pack_ids
         == report.reviewer_selections["security"].selected_context_pack_ids
     )
+    assert {stage.stage.partition(":")[0] for stage in report.llm_selection.stages} == {"finance", "security"}
     assert set(report.stage_durations_ms) == {
         "diff",
         "discovery",

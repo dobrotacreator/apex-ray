@@ -12,7 +12,7 @@ import { repoIndexCachePath } from "../dist/indexes/repo-cache.js";
 import { loadRepoFileInventory } from "../dist/workspace/inventory.js";
 import { writeFile } from "./helpers.js";
 
-test("repo index builder captures module, identifier, receiver, and cache metadata", () => {
+test("repo index cold build and warm cache produce equivalent semantic output", () => {
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), "apex-ray-ts-index-"));
   const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "apex-ray-ts-index-cache-"));
   try {
@@ -58,6 +58,7 @@ test("repo index builder captures module, identifier, receiver, and cache metada
     assert.equal(first.cacheStats?.written, true);
     assert.equal(second.cacheStats?.hits, 2);
     assert.equal(second.cacheStats?.misses, 0);
+    assert.deepEqual(second.files, first.files);
   } finally {
     fs.rmSync(repo, { recursive: true, force: true });
     fs.rmSync(cacheDir, { recursive: true, force: true });

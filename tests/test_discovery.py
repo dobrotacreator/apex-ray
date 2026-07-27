@@ -306,6 +306,28 @@ def test_project_discovery_shares_one_timeout_across_git_and_inventory(
     ]
 
 
+def test_project_discovery_without_deadline_disables_git_root_timeout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen_timeouts: list[float | None] = []
+
+    def fake_repo_root(cwd: Path, *, timeout: float | None = None) -> Path:
+        assert cwd == tmp_path
+        seen_timeouts.append(timeout)
+        return tmp_path
+
+    monkeypatch.setattr("apex_ray.discovery.git.repo_root", fake_repo_root)
+    monkeypatch.setattr(
+        "apex_ray.discovery.git.is_git_repo",
+        lambda _cwd, *, timeout=None: False,
+    )
+
+    discover_project_with_files(tmp_path, timeout_seconds=None)
+
+    assert seen_timeouts == [None]
+
+
 def test_project_discovery_translates_git_root_timeout(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

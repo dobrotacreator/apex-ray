@@ -152,7 +152,7 @@ Like the other Python packages, `apex_ray.llm` is a thin public export surface. 
 
 ### Reports And Coverage
 
-Reports are written as Markdown, JSON, and optionally HTML. They include:
+Reports are written as Markdown, JSON, SARIF, and optionally HTML. They include:
 
 - findings with severity, confidence, evidence, suggested fix, and suggested test;
 - project risk scores/guidance and reviewer provenance;
@@ -164,7 +164,7 @@ Reports are written as Markdown, JSON, and optionally HTML. They include:
 - continuation commands for residual packs;
 - cache, token estimate, and duration metrics.
 
-The JSON report is the durable machine-readable artifact. Markdown and HTML are for local reading.
+JSON and SARIF are the durable machine-readable artifacts. Markdown and HTML are for local reading.
 
 ## Review Flow
 
@@ -193,7 +193,7 @@ sequenceDiagram
     Provider-->>Context: verifier decisions
     Context-->>Report: findings, coverage, and run metadata
   end
-  Report-->>User: Markdown/JSON/HTML and optional telemetry
+  Report-->>User: Markdown/JSON/HTML/SARIF and optional telemetry
 ```
 
 The important review decision is context selection. Apex Ray ranks packs by risk, file kind, changed lines, truncation, rules, memory, and coverage goals. Large PRs can produce partial coverage; reports expose what was reviewed, what was skipped, and how to continue with residual packs.

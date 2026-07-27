@@ -39,6 +39,18 @@ def test_example_config_loads_through_public_config_api(
     assert config.reviewers
 
 
+def test_typescript_security_example_inherits_portable_model_defaults(
+    tmp_path: Path,
+) -> None:
+    config_path = REPO_ROOT / "examples" / "configs" / "typescript-security.yml"
+
+    config, _loaded_path = load_config(tmp_path, config_path)
+
+    assert config.llm.model is None
+    assert config.llm.profiles
+    assert all(profile.model is None for profile in config.llm.profiles.values())
+
+
 def test_repository_self_review_config_loads_without_local_overrides() -> None:
     config_path = REPO_ROOT / ".apex-ray" / "config.yml"
 
