@@ -1267,7 +1267,8 @@ def test_documented_workflows_are_valid_yaml_and_avoid_pull_request_target() -> 
     blocks = re.findall(r"```yaml\n(.*?)```", docs, flags=re.DOTALL)
 
     assert blocks
-    assert all(yaml.safe_load(block) is not None for block in blocks)
+    parsed_blocks = [yaml.safe_load(block) for block in blocks]
+    assert all(block is not None for block in parsed_blocks)
     assert all("pull_request_target" not in block for block in blocks)
     assert "Do not switch this workflow to `pull_request_target`" in docs
     assert "security-events: write" in docs
@@ -1278,3 +1279,16 @@ def test_documented_workflows_are_valid_yaml_and_avoid_pull_request_target() -> 
     assert all("uses: ./.github/actions/apex-ray-review" not in block for block in blocks)
     assert "Do not replace the pinned remote `uses:` line" in docs
     assert ".apex-ray-review-<run-id>-<attempt>/repository" in docs
+
+    recommended_job = parsed_blocks[0]["jobs"]["review"]
+    assert recommended_job["environment"] == "apex-ray-review"
+    assert "OPENAI_API_KEY" not in recommended_job.get("env", {})
+    review_step = recommended_job["steps"][0]
+    assert review_step["env"]["OPENAI_API_KEY"] == "${{ secrets.OPENAI_API_KEY }}"
+    assert "environment secret, not a repository secret" in docs
+    assert "required reviewers" in docs
+    assert "Prevent self-review" in docs
+    assert re.search(
+        r"deselect\s+`Allow administrators to bypass configured protection rules`",
+        docs,
+    )

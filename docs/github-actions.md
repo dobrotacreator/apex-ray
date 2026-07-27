@@ -38,6 +38,19 @@ receive API credentials. A local action is loaded from the caller's checkout;
 for `pull_request`, that can be the pull request merge commit, so the action
 implementation itself is not an immutable trust boundary.
 
+Before copying this workflow, create a protected GitHub Environment named
+`apex-ray-review`, enable required reviewers for it, and store
+`OPENAI_API_KEY` there as an environment secret, not a repository secret.
+Select independent gatekeepers who inspect workflow changes, enable
+**Prevent self-review**, and deselect
+`Allow administrators to bypass configured protection rules`. A
+same-repository pull request can change its caller workflow, so approving the
+environment is the explicit trust decision for the exact workflow revision
+that will receive the credential. Review that revision before approving the
+deployment. If these protection rules are unavailable, keep LLM access
+disabled in `pull_request` workflows or use a separate trusted workflow; do
+not fall back to a repository-level API secret.
+
 ```yaml
 name: Apex Ray
 
@@ -57,16 +70,17 @@ jobs:
   review:
     if: github.event.pull_request.draft == false
     runs-on: ubuntu-latest
+    environment: apex-ray-review
     timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
         reviewer: [correctness, security, ux]
-    env:
-      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
     steps:
       - name: Review as ${{ matrix.reviewer }}
         uses: dobrotacreator/apex-ray/.github/actions/apex-ray-review@<full-release-commit-sha>
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         with:
           reviewers: ${{ matrix.reviewer }}
           llm: auto
@@ -158,8 +172,8 @@ for reviewers whose coverage is a merge requirement.
 
 Do not put API keys, secret values, or secret names in action inputs. Configure
 the provider in `.apex-ray/config.yml`, name its environment variables there,
-and pass values through the job `env` mapping from GitHub Secrets. Preset
-providers use these default key names:
+and pass values only to the pinned Apex Ray step through its `env` mapping from
+GitHub Environment Secrets. Preset providers use these default key names:
 
 | Provider | Config value | Default secret environment variable |
 | --- | --- | --- |
@@ -197,9 +211,11 @@ jobs:
       APEX_RAY_API_ALLOWED_HOSTS: ${{ vars.APEX_RAY_API_ALLOWED_HOSTS }}
       APEX_RAY_API_ALLOWED_ENV_VARS: >-
         APEX_RAY_LLM_BASE_URL,APEX_RAY_LLM_API_KEY
-      APEX_RAY_LLM_API_KEY: ${{ secrets.APEX_RAY_LLM_API_KEY }}
     steps:
-      - uses: dobrotacreator/apex-ray/.github/actions/apex-ray-review@<full-release-commit-sha>
+      - name: Review
+        uses: dobrotacreator/apex-ray/.github/actions/apex-ray-review@<full-release-commit-sha>
+        env:
+          APEX_RAY_LLM_API_KEY: ${{ secrets.APEX_RAY_LLM_API_KEY }}
 ```
 
 The host allowlist is a comma- or whitespace-separated list of hostnames,
@@ -233,9 +249,10 @@ consumes validated report artifacts if a later operation needs write access.
 The endpoint and environment-selector allowlists defend against untrusted Apex
 Ray configuration; they cannot defend credentials if an attacker is also
 allowed to rewrite the caller workflow. Treat workflow authors as trusted,
-keep API credentials in a protected GitHub environment with required
-reviewers, and require ownership review for `.github/workflows/` changes before
-granting same-repository pull-request jobs access to those credentials.
+never expose repository-level API secrets to `pull_request` jobs, keep API
+credentials in a protected GitHub environment with required reviewers, and
+require ownership review for `.github/workflows/` changes before granting
+same-repository pull-request jobs access to those credentials.
 
 For every pull request, the default `trust-pr-config: false` loads
 `.apex-ray/config.yml` from the base commit and writes a restricted temporary
