@@ -748,6 +748,57 @@ def test_findings_suppress_unblocks_matching_pre_push_finding(tmp_path: Path, mo
     assert fingerprint in gate.stdout
 
 
+def test_findings_suppress_scopes_incremental_report_to_configured_base(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    finding = Finding(
+        title="Missing tenant predicate",
+        severity=FindingSeverity.HIGH,
+        confidence=FindingConfidence.HIGH,
+        file="src/orders.ts",
+        line=84,
+        failure_mode="The changed query can return another tenant's order.",
+        evidence="The diff removes tenantId from the lookup predicate.",
+        suggested_fix="Restore the tenantId predicate.",
+        suggested_test="Add a cross-tenant lookup regression test.",
+        context_pack_id="src/orders.ts#getOrder:1",
+    )
+    report = build_report(
+        ProjectProfile(root=str(tmp_path), is_git_repo=True),
+        ReviewConfig(base="release"),
+        DiffSummary(
+            target_mode=TargetMode.PATCH,
+            base="0123456789abcdef..HEAD",
+            stats=DiffStats(files_changed=1),
+        ),
+        context_packs=[ContextPack(id=finding.context_pack_id, file=finding.file)],
+        findings=[finding],
+    )
+    report_path = tmp_path / ".apex-ray" / "reports" / "pre-push.json"
+    report_path.parent.mkdir(parents=True)
+    report_path.write_text(report.model_dump_json(indent=2), encoding="utf-8")
+
+    result = runner.invoke(
+        app,
+        [
+            "findings",
+            "suppress",
+            finding_fingerprint(finding),
+            "--from-report",
+            str(report_path),
+            "--reason",
+            "Confirmed false positive.",
+        ],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    state = json.loads((tmp_path / ".apex-ray" / "triage" / "suppressions.json").read_text(encoding="utf-8"))
+    assert state["suppressions"][0]["target_base_ref"] == "release"
+
+
 def test_gate_pre_push_reports_stale_suppression_details(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
     config = tmp_path / ".apex-ray" / "config.yml"
