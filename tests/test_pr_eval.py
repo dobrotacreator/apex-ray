@@ -1,3 +1,4 @@
+import json
 import subprocess
 import sys
 import time
@@ -8,7 +9,13 @@ import pytest
 import yaml
 
 from apex_ray import pr_eval
-from apex_ray.models import Finding, FindingConfidence, FindingSeverity
+from apex_ray.models import (
+    DiffSummary,
+    Finding,
+    FindingConfidence,
+    FindingSeverity,
+    ProjectProfile,
+)
 from apex_ray.pr_eval import (
     GreptileComment,
     GreptileFinding,
@@ -29,6 +36,7 @@ from apex_ray.pr_eval import (
     write_pr_eval_label_templates,
 )
 from apex_ray.pr_eval import runner as pr_eval_runner
+from apex_ray.report import build_report
 
 
 def test_greptile_findings_keep_first_pass_inline_comments_and_ignore_edited_summary() -> None:
@@ -689,6 +697,88 @@ def test_run_pr_eval_cases_resolves_relative_cache_dir_against_source_repo(
     )
 
     assert seen_cache_dir == repo / ".apex-ray/cache/llm"
+
+
+@pytest.mark.parametrize(
+    ("configured_cache_dir", "cache_dir_override", "expected_cache_dir"),
+    [
+        ("${local_data}/cache/llm", None, "${local_data}/cache/llm"),
+        (None, None, None),
+        (None, Path(".apex-ray/cache/llm"), ".apex-ray/cache/llm"),
+    ],
+    ids=["configured-local-data", "internal-default", "relative-override"],
+)
+def test_run_pr_eval_cases_preserves_portable_local_data_paths(
+    tmp_path: Path,
+    monkeypatch,
+    configured_cache_dir: str | None,
+    cache_dir_override: Path | None,
+    expected_cache_dir: str | None,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(["init"], repo)
+    _git(["config", "user.email", "apex@example.test"], repo)
+    _git(["config", "user.name", "Apex Test"], repo)
+    config = repo / ".apex-ray" / "config.yml"
+    config.parent.mkdir(parents=True)
+    cache_dir_line = f"    cache_dir: {configured_cache_dir}\n" if configured_cache_dir is not None else ""
+    config.write_text(
+        f"""
+review:
+  local_data:
+    root: .apex-ray/private
+  llm:
+{cache_dir_line}    enabled: false
+  reports:
+    archive_dir: ${{local_data}}/reports/runs
+  triage:
+    state_path: ${{local_data}}/triage/suppressions.json
+    events_path: ${{local_data}}/triage/events.jsonl
+""",
+        encoding="utf-8",
+    )
+    source = repo / "src" / "cart.ts"
+    source.parent.mkdir()
+    source.write_text("export const total = 2;\n", encoding="utf-8")
+    _git(["add", ".apex-ray/config.yml", "src/cart.ts"], repo)
+    _git(["commit", "-m", "fixture"], repo)
+    head_sha = _git(["rev-parse", "HEAD"], repo).stdout.strip()
+
+    cases = tmp_path / "cases"
+    case_dir = _write_eval_case(cases, 8)
+    manifest_path = case_dir / "manifest.yml"
+    manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    manifest["base_sha"] = head_sha
+    manifest["head_sha"] = head_sha
+    manifest["replay_head_sha"] = head_sha
+    manifest_path.write_text(yaml.safe_dump(manifest, sort_keys=False), encoding="utf-8")
+
+    def fake_run_review_pipeline(root, _diff_text, target_mode, runtime_config, **_kwargs):
+        assert Path(runtime_config.llm.cache_dir).is_absolute()
+        return build_report(
+            ProjectProfile(root=str(root), is_git_repo=True),
+            runtime_config,
+            DiffSummary(target_mode=target_mode),
+        )
+
+    monkeypatch.setattr(pr_eval_runner, "run_review_pipeline", fake_run_review_pipeline)
+    output = tmp_path / "run"
+
+    report = pr_eval.run_pr_eval_cases(
+        source_repo=repo,
+        cases_dir=cases,
+        output_dir=output,
+        cache_dir=cache_dir_override,
+    )
+
+    assert report.failed == 0
+    report_config = json.loads((output / "pr-8" / "apex-report.json").read_text(encoding="utf-8"))["config"]
+    assert report_config["llm"]["cache_dir"] == expected_cache_dir
+    assert report_config["reports"]["archive_dir"] == "${local_data}/reports/runs"
+    assert report_config["triage"]["state_path"] == "${local_data}/triage/suppressions.json"
+    assert report_config["triage"]["events_path"] == "${local_data}/triage/events.jsonl"
+    assert str(tmp_path) not in json.dumps(report_config)
 
 
 def test_quarantined_pr_eval_label_skips_pipeline(tmp_path: Path, monkeypatch) -> None:

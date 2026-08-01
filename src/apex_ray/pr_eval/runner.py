@@ -696,6 +696,7 @@ def _run_one_pr_eval_case(
                 config, loaded_config_path = load_config(worktree, config_path if config_path.exists() else None)
             except ConfigError as exc:
                 raise PrEvalError(f"PR #{case.number}: invalid Apex Ray config: {exc}") from exc
+            configured_cache_dir = config.llm.cache_dir
             parsed_coverage_mode = None
             if llm_coverage_mode is not None:
                 try:
@@ -720,6 +721,14 @@ def _run_one_pr_eval_case(
                     analyzer_timeout_seconds=analyzer_timeout_seconds,
                 ),
             )
+            report_config = config.model_copy(deep=True)
+            if cache_dir is None:
+                report_config.llm.cache_dir = configured_cache_dir
+            elif cache_dir.is_absolute():
+                try:
+                    report_config.llm.cache_dir = str(cache_dir.relative_to(repo_root))
+                except ValueError:
+                    report_config.llm.cache_dir = str(cache_dir)
             try:
                 config = resolve_runtime_config_paths(worktree, config)
             except LocalDataPathError as exc:
@@ -741,6 +750,7 @@ def _run_one_pr_eval_case(
                 config,
                 config_path=loaded_config_path,
             )
+            report.config = report_config
         finally:
             with _git_worktree_lock(repo_root):
                 git.run_git(["worktree", "remove", "--force", str(worktree)], cwd=repo_root, check=False)

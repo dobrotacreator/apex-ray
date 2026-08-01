@@ -2233,6 +2233,106 @@ def test_review_patch_reports_explicit_config_path(tmp_path: Path, monkeypatch) 
     assert f"- Config: `{config}`" in output.read_text(encoding="utf-8")
 
 
+def test_review_json_preserves_portable_local_data_paths(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    patch = tmp_path / "sample.diff"
+    patch.write_text((FIXTURE_DIR / "sample.diff").read_text(encoding="utf-8"), encoding="utf-8")
+    config = tmp_path / "portable-config.yml"
+    config.write_text(
+        """
+review:
+  local_data:
+    root: .apex-ray/private
+  llm:
+    enabled: false
+    cache_dir: ${local_data}/cache/llm
+  reports:
+    archive: false
+    archive_dir: ${local_data}/reports/runs
+  triage:
+    enabled: false
+    state_path: ${local_data}/triage/suppressions.json
+    events_path: ${local_data}/triage/events.jsonl
+""",
+        encoding="utf-8",
+    )
+    json_output = tmp_path / "review.json"
+
+    result = runner.invoke(
+        app,
+        [
+            "review",
+            "--diff",
+            str(patch),
+            "--config",
+            str(config),
+            "--output",
+            str(tmp_path / "review.md"),
+            "--json",
+            str(json_output),
+        ],
+        catch_exceptions=False,
+    )
+
+    report_config = json.loads(json_output.read_text(encoding="utf-8"))["config"]
+    assert result.exit_code == 0
+    assert report_config["llm"]["cache_dir"] == "${local_data}/cache/llm"
+    assert report_config["reports"]["archive_dir"] == "${local_data}/reports/runs"
+    assert report_config["triage"]["state_path"] == "${local_data}/triage/suppressions.json"
+    assert report_config["triage"]["events_path"] == "${local_data}/triage/events.jsonl"
+    assert str(tmp_path) not in json.dumps(report_config)
+
+
+def test_gate_pre_push_json_preserves_portable_local_data_paths(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    config = tmp_path / ".apex-ray" / "config.yml"
+    config.parent.mkdir(parents=True)
+    config.write_text(
+        """
+review:
+  local_data:
+    root: .apex-ray/private
+  llm:
+    enabled: false
+    cache_dir: ${local_data}/cache/llm
+  reports:
+    archive: false
+    archive_dir: ${local_data}/reports/runs
+  triage:
+    enabled: false
+    state_path: ${local_data}/triage/suppressions.json
+    events_path: ${local_data}/triage/events.jsonl
+""",
+        encoding="utf-8",
+    )
+
+    def fake_run_review_pipeline(*args, **_kwargs):
+        runtime_config = args[3]
+        assert Path(runtime_config.llm.cache_dir).is_absolute()
+        return build_report(
+            ProjectProfile(root=str(tmp_path), is_git_repo=True),
+            runtime_config,
+            DiffSummary(target_mode=TargetMode.BASE, base="main", stats=DiffStats(files_changed=1)),
+        )
+
+    monkeypatch.setattr("apex_ray.cli.gate.discover_repo_root", lambda _cwd: tmp_path)
+    monkeypatch.setattr("apex_ray.cli.gate.git.is_git_repo", lambda _root: True)
+    monkeypatch.setattr("apex_ray.cli.gate.git.diff_base", lambda _root, _base: "")
+    monkeypatch.setattr("apex_ray.cli.gate.run_review_pipeline", fake_run_review_pipeline)
+    monkeypatch.setattr("apex_ray.cli.gate.continue_review_from_report", lambda report, **_kwargs: (report, []))
+
+    result = runner.invoke(app, ["gate", "pre-push"], catch_exceptions=False)
+
+    assert result.exit_code == 0, result.output
+    report_path = tmp_path / ".apex-ray" / "reports" / "pre-push.json"
+    report_config = json.loads(report_path.read_text(encoding="utf-8"))["config"]
+    assert report_config["llm"]["cache_dir"] == "${local_data}/cache/llm"
+    assert report_config["reports"]["archive_dir"] == "${local_data}/reports/runs"
+    assert report_config["triage"]["state_path"] == "${local_data}/triage/suppressions.json"
+    assert report_config["triage"]["events_path"] == "${local_data}/triage/events.jsonl"
+    assert str(tmp_path) not in json.dumps(report_config)
+
+
 def test_review_passes_repeatable_reviewer_selection_to_pipeline(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
     patch = tmp_path / "sample.diff"

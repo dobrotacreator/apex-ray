@@ -107,6 +107,7 @@ def pre_push(
         review_config, config_path = load_config(root, config)
     except (ConfigError, DiscoveryError) as exc:
         raise typer.BadParameter(str(exc)) from exc
+    report_config = review_config.model_copy(deep=True)
     try:
         review_config = resolve_runtime_config_paths(root, review_config)
     except LocalDataPathError as exc:
@@ -153,7 +154,7 @@ def pre_push(
             merge_base_sha = git.merge_base(root, target_base, "HEAD")
         except git.GitError as exc:
             raise typer.BadParameter(str(exc)) from exc
-        config_hash = config_fingerprint(review_config, gate_config, reviewer_ids=reviewer)
+        config_hash = config_fingerprint(report_config, gate_config, reviewer_ids=reviewer)
         retry_state = load_pre_push_state(state_path)
         previous_head_exists = bool(retry_state and git.object_exists(root, retry_state.head_sha))
         eligibility = check_incremental_eligibility(
@@ -244,6 +245,7 @@ def pre_push(
     except (DiscoveryError, LLMProviderError) as exc:
         raise typer.BadParameter(str(exc)) from exc
     duration_ms = round((time.monotonic() - started_monotonic) * 1000)
+    report.config = report_config
 
     progress.event("writing reports", force=True)
     _set_continue_commands(report, json_output)

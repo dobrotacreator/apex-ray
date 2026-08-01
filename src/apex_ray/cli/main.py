@@ -472,8 +472,12 @@ def review(
             effective_reviewers(effective_config.reviewers, reviewer)
     except ReviewerConfigError as exc:
         raise typer.BadParameter(str(exc)) from exc
+    report_config = effective_config.model_copy(deep=True)
     try:
         effective_config = resolve_runtime_config_paths(root, effective_config)
+        if prior_report is not None:
+            prior_report = prior_report.model_copy(deep=True)
+            prior_report.config = resolve_runtime_config_paths(root, prior_report.config)
     except LocalDataPathError as exc:
         raise typer.BadParameter(str(exc)) from exc
     telemetry_enabled = (
@@ -538,6 +542,7 @@ def review(
     except (DiscoveryError, LLMProviderError) as exc:
         raise typer.BadParameter(str(exc)) from exc
     duration_ms = round((time.monotonic() - started_monotonic) * 1000)
+    report.config = report_config
 
     _set_continue_commands(report, json_output)
 
