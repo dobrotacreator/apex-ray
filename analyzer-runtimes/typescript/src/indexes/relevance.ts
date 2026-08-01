@@ -41,6 +41,10 @@ const CONFIG_ROOT_FILE_NAMES = new Set([
   "main",
   "server",
 ]);
+const TYPESCRIPT_CONFIG_FILE_NAMES = new Set([
+  "jsconfig.json",
+  "tsconfig.json",
+]);
 
 interface RelevancePathAlias {
   pattern: string;
@@ -201,7 +205,15 @@ function collectConfigContext(
     onExpansionLimit();
   };
   let stopAliasCollection = false;
-  for (const configPath of inventory.configJsonAbsPaths) {
+  const orderedConfigPaths = [...inventory.configJsonAbsPaths].sort(
+    (left, right) => {
+      const priorityDifference =
+        configMetadataPriority(left) - configMetadataPriority(right);
+      if (priorityDifference !== 0) return priorityDifference;
+      return left < right ? -1 : left > right ? 1 : 0;
+    },
+  );
+  for (const configPath of orderedConfigPaths) {
     if (
       shouldStop() ||
       retainedFiles >= ANALYZER_METADATA_FILE_LIMIT ||
@@ -326,6 +338,14 @@ function collectConfigContext(
     }
   }
   return { rootKeys: roots, aliases };
+}
+
+function configMetadataPriority(filePath: string): number {
+  return TYPESCRIPT_CONFIG_FILE_NAMES.has(
+    path.basename(filePath).toLowerCase(),
+  )
+    ? 0
+    : 1;
 }
 
 function preProcessModuleSpecifiers(text: string): string[] {

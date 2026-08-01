@@ -118,6 +118,13 @@ def test_reviewer_double_star_exclusion_matches_zero_or_more_directories() -> No
     )
 
 
+def test_reviewer_exact_path_with_brackets_matches_literal_route_path() -> None:
+    path = "src/pages/[id].ts"
+    reviewer = ReviewerConfig(id="route-review", paths=[path])
+
+    assert reviewer_matches_pack(reviewer, ContextPack(id="route", file=path)) is True
+
+
 def test_llm_config_for_reviewer_applies_profile_verify_and_budget_overrides() -> None:
     config = LLMConfig(
         profiles={

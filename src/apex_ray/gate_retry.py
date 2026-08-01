@@ -1,6 +1,7 @@
 import fnmatch
 import hashlib
 import json
+import os
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -15,6 +16,8 @@ from apex_ray.models import (
     ContextPack,
     Finding,
     FindingConfidence,
+    LLMAPIConfig,
+    LLMProviderName,
     PrePushGateConfig,
     ReviewConfig,
     ReviewReport,
@@ -22,6 +25,18 @@ from apex_ray.models import (
 from apex_ray.reviewers import effective_reviewers
 
 STATE_SCHEMA_VERSION = "pre-push-state/v2"
+
+_API_PROVIDER_NAMES = frozenset(
+    {
+        LLMProviderName.OPENAI_API,
+        LLMProviderName.ANTHROPIC_API,
+        LLMProviderName.DEEPSEEK_API,
+        LLMProviderName.QWEN_API,
+        LLMProviderName.KIMI_API,
+        LLMProviderName.ZAI_API,
+        LLMProviderName.OPENAI_COMPATIBLE,
+    }
+)
 
 
 class CarriedFinding(ApexModel):
@@ -109,6 +124,7 @@ def config_fingerprint(
             ),
         },
         "gate_policy": gate_config.model_dump(mode="json"),
+        "api_runtime_environment": _api_runtime_environment_identity(config),
         "prompt_versions": {
             "review": REVIEW_PROMPT_VERSION,
             "review_shallow": REVIEW_SHALLOW_PROMPT_VERSION,
@@ -117,6 +133,38 @@ def config_fingerprint(
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _api_runtime_environment_identity(config: ReviewConfig) -> dict[str, object]:
+    if not config.llm.enabled:
+        return {}
+    identities: dict[str, object] = {}
+    if config.llm.provider in _API_PROVIDER_NAMES:
+        identities["default"] = _api_environment_identity(config.llm.api)
+    for profile_id, profile in sorted(config.llm.profiles.items()):
+        provider = profile.provider or config.llm.provider
+        if provider not in _API_PROVIDER_NAMES:
+            continue
+        identities[f"profile:{profile_id}"] = _api_environment_identity(profile.api or config.llm.api)
+    return identities
+
+
+def _api_environment_identity(api: LLMAPIConfig) -> dict[str, object]:
+    identity: dict[str, object] = {
+        "allowed_hosts_sha256": _environment_value_digest(api.allowed_hosts_env),
+    }
+    if api.base_url_env:
+        identity["base_url_sha256"] = _environment_value_digest(api.base_url_env)
+    if api.headers_from_env:
+        identity["headers_sha256"] = {
+            header: _environment_value_digest(env_name) for header, env_name in sorted(api.headers_from_env.items())
+        }
+    return identity
+
+
+def _environment_value_digest(name: str) -> str | None:
+    value = os.environ.get(name, "")
+    return hashlib.sha256(value.encode("utf-8")).hexdigest() if value else None
 
 
 def check_incremental_eligibility(

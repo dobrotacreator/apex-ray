@@ -175,6 +175,8 @@ def api_key_environment_name(config: LLMConfig) -> str | None:
 def validate_api_model_compatibility(config: LLMConfig) -> None:
     """Reject model options that cannot honor their configured semantics."""
     model = (config.model or "").strip().lower()
+    if config.provider == LLMProviderName.ANTHROPIC_API and config.effort == LLMReasoningEffort.NONE:
+        raise LLMProviderError("Anthropic API cannot honor effort: none; use effort: low for its most efficient mode.")
     if config.provider != LLMProviderName.KIMI_API:
         return
     if model.startswith("kimi-k3"):
@@ -377,7 +379,6 @@ class APILLMProvider:
             effort = self._anthropic_effort()
             if effort is not None:
                 output_config["effort"] = effort
-                payload["thinking"] = {"type": "adaptive"}
             if self.structured_output == LLMStructuredOutput.JSON_SCHEMA:
                 output_config["format"] = {"type": "json_schema", "schema": schema}
             elif self.structured_output == LLMStructuredOutput.JSON_OBJECT:
@@ -787,11 +788,16 @@ class APILLMProvider:
                 return {"thinking": {"type": "disabled"}}
             result: dict[str, object] = {"thinking": {"type": "enabled"}}
             if self.model.lower().startswith("glm-5.2"):
-                result["reasoning_effort"] = (
-                    "max" if effort in {LLMReasoningEffort.XHIGH, LLMReasoningEffort.MAX} else "high"
-                )
+                if effort == LLMReasoningEffort.MINIMAL:
+                    result["reasoning_effort"] = "minimal"
+                else:
+                    result["reasoning_effort"] = (
+                        "max" if effort in {LLMReasoningEffort.XHIGH, LLMReasoningEffort.MAX} else "high"
+                    )
             return result
         if effort == LLMReasoningEffort.NONE:
+            if self.config.provider == LLMProviderName.OPENAI_API:
+                return {"reasoning_effort": "none"}
             return {}
         return {"reasoning_effort": str(effort)}
 
@@ -846,8 +852,8 @@ def _extract_openai_responses_text(data: Mapping[str, object]) -> str:
 
 def _extract_anthropic_text(data: Mapping[str, object]) -> str:
     stop_reason = data.get("stop_reason")
-    if stop_reason == "max_tokens":
-        raise LLMProviderError("API response was truncated at max_tokens.", category="truncated")
+    if stop_reason in {"max_tokens", "model_context_window_exceeded"}:
+        raise LLMProviderError("API response was truncated before completion.", category="truncated")
     if stop_reason == "refusal":
         raise LLMProviderError("API provider refused the request.", category="refusal")
 

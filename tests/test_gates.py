@@ -34,6 +34,9 @@ from apex_ray.models import (
     FindingConfidence,
     FindingSeverity,
     FindingVerification,
+    LLMAPIConfig,
+    LLMProfile,
+    LLMProviderName,
     LLMRun,
     ProjectProfile,
     ReviewConfig,
@@ -102,6 +105,80 @@ def test_incremental_retry_fingerprint_includes_effective_reviewer_config() -> N
     )
 
     assert original_hash != changed_hash
+
+
+def test_incremental_retry_fingerprint_includes_api_endpoint_environment_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = ReviewConfig()
+    config.llm.enabled = True
+    config.llm.provider = LLMProviderName.OPENAI_COMPATIBLE
+    config.llm.api = LLMAPIConfig(base_url_env="CUSTOM_REVIEW_URL")
+    monkeypatch.setenv("CUSTOM_REVIEW_URL", "https://first.example/v1")
+    first_hash = config_fingerprint(config, config.gates.pre_push)
+
+    monkeypatch.setenv("CUSTOM_REVIEW_URL", "https://second.example/v1")
+    second_hash = config_fingerprint(config, config.gates.pre_push)
+
+    assert first_hash != second_hash
+
+
+def test_incremental_retry_fingerprint_includes_api_header_environment_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = ReviewConfig()
+    config.llm.enabled = True
+    config.llm.provider = LLMProviderName.OPENAI_COMPATIBLE
+    config.llm.api = LLMAPIConfig(
+        base_url="https://review.example/v1",
+        headers_from_env={"X-Tenant": "CUSTOM_REVIEW_TENANT"},
+    )
+    monkeypatch.setenv("CUSTOM_REVIEW_TENANT", "tenant-a")
+    first_hash = config_fingerprint(config, config.gates.pre_push)
+
+    monkeypatch.setenv("CUSTOM_REVIEW_TENANT", "tenant-b")
+    second_hash = config_fingerprint(config, config.gates.pre_push)
+
+    assert first_hash != second_hash
+
+
+def test_incremental_retry_fingerprint_includes_api_profile_environment_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = ReviewConfig()
+    config.llm.enabled = True
+    config.llm.profiles = {
+        "api-review": LLMProfile(
+            provider=LLMProviderName.OPENAI_COMPATIBLE,
+            api=LLMAPIConfig(base_url_env="PROFILE_REVIEW_URL"),
+        )
+    }
+    monkeypatch.setenv("PROFILE_REVIEW_URL", "https://first.example/v1")
+    first_hash = config_fingerprint(config, config.gates.pre_push)
+
+    monkeypatch.setenv("PROFILE_REVIEW_URL", "https://second.example/v1")
+    second_hash = config_fingerprint(config, config.gates.pre_push)
+
+    assert first_hash != second_hash
+
+
+def test_incremental_retry_fingerprint_does_not_include_api_key_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = ReviewConfig()
+    config.llm.enabled = True
+    config.llm.provider = LLMProviderName.OPENAI_COMPATIBLE
+    config.llm.api = LLMAPIConfig(
+        base_url="https://review.example/v1",
+        api_key_env="CUSTOM_REVIEW_API_KEY",
+    )
+    monkeypatch.setenv("CUSTOM_REVIEW_API_KEY", "first-secret")
+    first_hash = config_fingerprint(config, config.gates.pre_push)
+
+    monkeypatch.setenv("CUSTOM_REVIEW_API_KEY", "second-secret")
+    second_hash = config_fingerprint(config, config.gates.pre_push)
+
+    assert first_hash == second_hash
 
 
 def test_incremental_decision_deduplicates_current_and_carried_finding() -> None:

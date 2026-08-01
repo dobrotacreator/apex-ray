@@ -71,7 +71,9 @@ review:
 
 Anthropic API effort levels are passed through as
 `low`/`medium`/`high`/`xhigh`/`max`; Apex Ray maps its portable `minimal`
-level to Anthropic's `low`.
+level to Anthropic's `low`. Anthropic has no no-reasoning effort level, so the
+native preset rejects an explicit `effort: none` instead of silently using the
+provider's default `high` effort.
 
 The built-in API providers pin their documented service hosts, use native
 structured output where the provider supports it, normalize usage metadata,
@@ -111,8 +113,9 @@ preset still enforces that the resolved host belongs to Alibaba Cloud.
 `effort` is translated conservatively to each Chat Completions dialect:
 DeepSeek uses its documented `high`/`max` levels, Qwen uses the thinking
 toggle, Kimi K3 maps to `low`/`high`/`max`, Kimi K2.6 uses its thinking
-toggle, and GLM 5.2 maps to its supported `high`/`max` reasoning levels while
-older GLM models receive only the supported toggle.
+toggle, and GLM 5.2 passes `minimal` through, disables thinking for `none`, and
+maps the other portable levels to its supported `high`/`max` reasoning levels.
+Older GLM models receive only the supported toggle.
 Kimi K3 and Kimi K2.7 Code always reason, so Apex Ray rejects an explicit
 `effort: none` instead of silently incurring reasoning work or sending an
 invalid payload; use `low` for K3 or select a model with switchable thinking

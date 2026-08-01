@@ -4238,9 +4238,28 @@ def test_typescript_analyzer_returns_partial_result_when_a_shard_times_out(
             "language": "typescript",
             "projectRoot": str(tmp_path),
             "tsconfigPath": None,
-            "files": [{"path": path, "symbols": [], "imports": [], "exports": []} for path in shard_files],
+            "files": (
+                []
+                if shard_files == ["src/file-0.ts"]
+                else [{"path": path, "symbols": [], "imports": [], "exports": []} for path in shard_files]
+            ),
             "warnings": [f"warning for {shard_files[0]}"],
             "indexCache": None,
+            "partial": shard_files == ["src/file-0.ts"],
+            "failedFiles": ["src/file-0.ts"] if shard_files == ["src/file-0.ts"] else [],
+            "shardFailures": (
+                [
+                    {
+                        "index": 1,
+                        "total": 1,
+                        "files": ["src/file-0.ts"],
+                        "reason": "internal analyzer budget exhausted",
+                        "status": "timeout",
+                    }
+                ]
+                if shard_files == ["src/file-0.ts"]
+                else []
+            ),
         }
         return subprocess.CompletedProcess(args, 0, stdout=json.dumps(payload), stderr="")
 
@@ -4254,16 +4273,15 @@ def test_typescript_analyzer_returns_partial_result_when_a_shard_times_out(
 
     assert result is not None
     assert seen_shards == [["src/file-0.ts"], ["src/file-1.ts"], ["src/file-2.ts"]]
-    assert [file.path for file in result.files] == ["src/file-0.ts", "src/file-2.ts"]
+    assert [file.path for file in result.files] == ["src/file-2.ts"]
     assert "warning for src/file-0.ts" in result.warnings
     assert "warning for src/file-2.ts" in result.warnings
     assert any("partial TypeScript analyzer result" in warning for warning in result.warnings)
     assert any("src/file-1.ts" in warning and "timed out after" in warning for warning in result.warnings)
     assert result.partial is True
-    assert result.failed_files == ["src/file-1.ts"]
-    assert len(result.shard_failures) == 1
-    assert result.shard_failures[0].status == "timeout"
-    assert result.shard_failures[0].files == ["src/file-1.ts"]
+    assert result.failed_files == ["src/file-0.ts", "src/file-1.ts"]
+    assert [failure.status for failure in result.shard_failures] == ["timeout", "timeout"]
+    assert [failure.files for failure in result.shard_failures] == [["src/file-0.ts"], ["src/file-1.ts"]]
 
 
 def test_typescript_analyzer_respects_total_timeout_across_shards(

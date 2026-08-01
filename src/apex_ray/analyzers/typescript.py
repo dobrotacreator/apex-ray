@@ -652,8 +652,20 @@ def _run_typescript_analyzer_shards(
         )
         result.warnings.extend(_format_shard_failure(failure) for failure in failures)
         result.partial = True
-        result.failed_files = [path for failure in failures for path in failure.files]
-        result.shard_failures = failures
+        outer_failed_files = [path for failure in failures for path in failure.files]
+        result.failed_files = list(dict.fromkeys([*result.failed_files, *outer_failed_files]))
+        combined_shard_failures = list(result.shard_failures)
+        retained_failure_keys = {
+            (failure.index, failure.total, tuple(failure.files), failure.reason, failure.status)
+            for failure in combined_shard_failures
+        }
+        for failure in failures:
+            failure_key = (failure.index, failure.total, tuple(failure.files), failure.reason, failure.status)
+            if failure_key in retained_failure_keys:
+                continue
+            retained_failure_keys.add(failure_key)
+            combined_shard_failures.append(failure)
+        result.shard_failures = combined_shard_failures
     return result
 
 

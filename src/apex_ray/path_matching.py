@@ -3,11 +3,13 @@ import fnmatch
 
 def path_matches_any(path: str, patterns: list[str]) -> bool:
     normalized = _normalize_path(path)
-    return any(
-        fnmatch.fnmatchcase(normalized, variant)
-        for pattern in patterns
-        for variant in _glob_variants(_normalize_path(pattern))
-    )
+    for pattern in patterns:
+        normalized_pattern = _normalize_path(pattern)
+        if normalized == normalized_pattern:
+            return True
+        if any(fnmatch.fnmatchcase(normalized, variant) for variant in _glob_variants(normalized_pattern)):
+            return True
+    return False
 
 
 def _normalize_path(value: str) -> str:

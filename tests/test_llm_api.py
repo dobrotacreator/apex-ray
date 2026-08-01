@@ -1078,8 +1078,50 @@ def test_anthropic_messages_request_is_native_and_strict() -> None:
                 "schema": finding_response_schema(),
             },
         },
-        "thinking": {"type": "adaptive"},
     }
+
+
+def test_anthropic_effort_does_not_force_adaptive_thinking() -> None:
+    transport = StubTransport(
+        JSONHTTPResponse(
+            status_code=200,
+            headers={},
+            data={
+                "stop_reason": "end_turn",
+                "content": [{"type": "text", "text": '{"findings":[]}'}],
+            },
+        )
+    )
+    config = LLMConfig(
+        provider=LLMProviderName.ANTHROPIC_API,
+        model="claude-opus-4-5-20251101",
+        effort=LLMReasoningEffort.MEDIUM,
+    )
+
+    provider(config, transport, {"ANTHROPIC_API_KEY": "secret"}).review_context_pack(make_pack(), Path("."))
+
+    assert transport.calls[0].payload["output_config"] == {
+        "effort": "medium",
+        "format": {
+            "type": "json_schema",
+            "schema": finding_response_schema(),
+        },
+    }
+    assert "thinking" not in transport.calls[0].payload
+
+
+def test_anthropic_rejects_explicit_none_effort_before_request() -> None:
+    transport = StubTransport(success_response())
+    config = LLMConfig(
+        provider=LLMProviderName.ANTHROPIC_API,
+        model="claude-sonnet-5",
+        effort=LLMReasoningEffort.NONE,
+    )
+
+    with pytest.raises(LLMProviderError, match="cannot honor effort: none"):
+        provider(config, transport, {"ANTHROPIC_API_KEY": "secret"})
+
+    assert transport.calls == []
 
 
 def test_anthropic_api_preserves_documented_xhigh_effort() -> None:
@@ -1304,6 +1346,13 @@ def test_qwen_preset_allows_official_workspace_dedicated_endpoint() -> None:
             LLMProviderName.ZAI_API,
             "ZAI_API_KEY",
             "glm-5.2",
+            LLMReasoningEffort.MINIMAL,
+            {"thinking": {"type": "enabled"}, "reasoning_effort": "minimal"},
+        ),
+        (
+            LLMProviderName.ZAI_API,
+            "ZAI_API_KEY",
+            "glm-5.2",
             LLMReasoningEffort.MEDIUM,
             {"thinking": {"type": "enabled"}, "reasoning_effort": "high"},
         ),
@@ -1339,6 +1388,39 @@ def test_openai_chat_presets_use_model_compatible_reasoning_controls(
     assert {
         key: payload[key] for key in ("thinking", "reasoning_effort", "enable_thinking") if key in payload
     } == reasoning_fields
+
+
+def test_native_openai_chat_preserves_none_without_changing_generic_compatibility() -> None:
+    native_transport = StubTransport(success_response())
+    native_config = LLMConfig(
+        provider=LLMProviderName.OPENAI_API,
+        model="gpt-5.6-sol",
+        effort=LLMReasoningEffort.NONE,
+        api=LLMAPIConfig(protocol=LLMAPIProtocol.OPENAI_CHAT),
+    )
+
+    provider(native_config, native_transport, {"OPENAI_API_KEY": "secret"}).review_context_pack(make_pack(), Path("."))
+
+    assert native_transport.calls[0].payload["reasoning_effort"] == "none"
+
+    compatible_transport = StubTransport(success_response())
+    compatible_config = LLMConfig(
+        provider=LLMProviderName.OPENAI_COMPATIBLE,
+        model="custom-model",
+        effort=LLMReasoningEffort.NONE,
+        api=LLMAPIConfig(
+            protocol=LLMAPIProtocol.OPENAI_CHAT,
+            structured_output=LLMStructuredOutput.JSON_OBJECT,
+            base_url="https://llm.example.com/v1",
+            api_key_env="CUSTOM_API_KEY",
+        ),
+    )
+
+    provider(compatible_config, compatible_transport, {"CUSTOM_API_KEY": "secret"}).review_context_pack(
+        make_pack(), Path(".")
+    )
+
+    assert "reasoning_effort" not in compatible_transport.calls[0].payload
 
 
 @pytest.mark.parametrize(
@@ -2518,6 +2600,30 @@ def test_refusal_and_truncation_are_explicit_terminal_errors() -> None:
         provider(kimi, truncation, {"MOONSHOT_API_KEY": "secret"}).review_context_pack(make_pack(), Path("."))
     assert truncated.value.category == "truncated"
     assert classify_llm_provider_error(truncated.value) == "failed_truncated"
+
+
+def test_anthropic_context_window_exceeded_is_terminal_truncation() -> None:
+    transport = StubTransport(
+        JSONHTTPResponse(
+            status_code=200,
+            headers={},
+            data={
+                "stop_reason": "model_context_window_exceeded",
+                "content": [{"type": "text", "text": '{"findings":[]}'}],
+            },
+        )
+    )
+    config = LLMConfig(
+        provider=LLMProviderName.ANTHROPIC_API,
+        model="claude-sonnet-5",
+    )
+
+    with pytest.raises(LLMProviderError) as caught:
+        provider(config, transport, {"ANTHROPIC_API_KEY": "secret"}).review_context_pack(make_pack(), Path("."))
+
+    assert caught.value.category == "truncated"
+    assert classify_llm_provider_error(caught.value) == "failed_truncated"
+    assert len(transport.calls) == 1
 
 
 @pytest.mark.parametrize(

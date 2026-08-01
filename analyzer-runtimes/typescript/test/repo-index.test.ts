@@ -1663,6 +1663,11 @@ test("repo indexing prioritizes bounded path-alias and package importers", () =>
         },
       }),
     );
+    const unrelatedMetadata = JSON.stringify({
+      padding: "x".repeat(4 * 1024 * 1024 - 14),
+    });
+    assert.equal(Buffer.byteLength(unrelatedMetadata, "utf8"), 4 * 1024 * 1024);
+    writeFile(repo, "a-data.json", unrelatedMetadata);
     writeFile(
       repo,
       "package.json",
@@ -1682,7 +1687,7 @@ test("repo indexing prioritizes bounded path-alias and package importers", () =>
           aliasImporterPath,
           packageImporterPath,
         ],
-        config_files: ["tsconfig.json"],
+        config_files: ["a-data.json", "tsconfig.json"],
         package_files: ["package.json"],
       }),
       "utf8",
