@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.11](https://github.com/dobrotacreator/apex-ray/compare/v0.1.10...v0.1.11) (2026-08-01)
+
+
+### Features
+
+* **review:** add API providers, risk policy, focused reviewers, and CI ([#77](https://github.com/dobrotacreator/apex-ray/issues/77)) ([10857a9](https://github.com/dobrotacreator/apex-ray/commit/10857a9962816aaec9d0b920fe4cbe2a7b1c5b6e))
+
 ## [0.1.10](https://github.com/dobrotacreator/apex-ray/compare/v0.1.9...v0.1.10) (2026-06-25)
 
 
