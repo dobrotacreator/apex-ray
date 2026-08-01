@@ -48,19 +48,24 @@ def default_config_text(base: str = DEFAULT_BASE_BRANCH) -> str:
     enabled: true
     provider: codex_cli
     effort: medium
+    jobs: 2
     coverage_mode: balanced
-    max_packs: 64
-    max_deep_packs: 48
-    max_input_tokens: 300000
+    max_packs: 48
+    max_deep_packs: 16
+    max_input_tokens: 180000
+    max_consecutive_provider_failures: 3
     verify: true
     cache_dir: ${{local_data}}/cache/llm
   telemetry:
     enabled: true
     path: ${{local_data}}/telemetry/review-runs.jsonl
+    path_mode: anonymized
   reports:
     archive: true
     archive_dir: ${{local_data}}/reports/runs
     retention: 20
+    compression: auto
+    compression_min_bytes: 65536
   triage:
     enabled: true
     state_path: ${{local_data}}/triage/suppressions.json
@@ -78,6 +83,7 @@ def default_config_text(base: str = DEFAULT_BASE_BRANCH) -> str:
       max_stdout_findings: 10
       stdout_format: agent
       auto_followup_p0: true
+      auto_followup_p0_max_pack_reviews: 16
       progress: auto
       progress_interval_seconds: 5
 """
@@ -439,6 +445,8 @@ def load_config(root: Path, explicit_path: Path | None = None) -> tuple[ReviewCo
     except ValidationError as exc:
         raise ConfigError(f"Invalid config in {validation_path}: {exc}") from exc
     _validate_llm_routing_profiles(config, validation_path)
+    _validate_risk_rules(config, validation_path)
+    _validate_reviewers(config, validation_path)
     try:
         config.rule_definitions = load_rule_definitions(root, config.rule_paths)
     except RuleError as exc:
@@ -478,9 +486,11 @@ def _read_review_config(config_path: Path) -> dict[str, Any]:
             "rule_paths",
             "local_data",
             "memory",
+            "risk",
             "analyzer",
             "context",
             "llm",
+            "reviewers",
             "telemetry",
             "reports",
             "triage",
@@ -511,9 +521,11 @@ def _normalize_review_config(review: dict[str, Any]) -> dict[str, Any]:
         "rule_paths": review.get("rule_paths", [".apex-ray/rules"]),
         "local_data": review.get("local_data", {}),
         "memory": review.get("memory", {}),
+        "risk": review.get("risk", {}),
         "analyzer": review.get("analyzer", {}),
         "context": review.get("context", {}),
         "llm": review.get("llm", {}),
+        "reviewers": review.get("reviewers", []),
         "telemetry": review.get("telemetry", {}),
         "reports": review.get("reports", {}),
         "triage": review.get("triage", {}),
@@ -542,6 +554,30 @@ def _validate_llm_routing_profiles(config: ReviewConfig, config_path: Path) -> N
             raise ConfigError(
                 f"Invalid config in {config_path}: review.llm.routing.{field} references unknown profile '{value}'"
             )
+
+
+def _validate_risk_rules(config: ReviewConfig, config_path: Path) -> None:
+    seen: set[str] = set()
+    for rule in config.risk.rules:
+        if rule.id in seen:
+            raise ConfigError(f"Invalid config in {config_path}: duplicate risk rule id '{rule.id}'")
+        seen.add(rule.id)
+
+
+def _validate_reviewers(config: ReviewConfig, config_path: Path) -> None:
+    profiles = set(config.llm.profiles)
+    seen: set[str] = set()
+    for reviewer in config.reviewers:
+        if reviewer.id in seen:
+            raise ConfigError(f"Invalid config in {config_path}: duplicate reviewer id '{reviewer.id}'")
+        seen.add(reviewer.id)
+        for field in ("profile", "verify_profile"):
+            profile = getattr(reviewer, field)
+            if profile and profile not in profiles:
+                raise ConfigError(
+                    f"Invalid config in {config_path}: review.reviewers[{reviewer.id}].{field} "
+                    f"references unknown profile '{profile}'"
+                )
 
 
 def _write_if_missing_or_overwrite(path: Path, text: str, *, overwrite: bool) -> bool:

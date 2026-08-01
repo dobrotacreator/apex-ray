@@ -16,7 +16,7 @@ import { implementedMemberSymbols } from "../symbols/implemented-members.js";
 import { addReference } from "./merge.js";
 import { isPropertyAccessMemberName, isReferenceToTarget } from "./target-match.js";
 import { isDeclarationNameIdentifier, referenceForNode, referenceKind } from "./utils.js";
-import type { CollectedSymbol, Reference } from "../types.js";
+import type { CollectedSymbol, Reference, SourceFilePredicate } from "../types.js";
 import { isInsideRepo, isRepoRelativePath, normalizeRelPath, sourceFileName } from "../utils.js";
 
 type ReferenceSearchText = string | readonly string[] | null;
@@ -35,6 +35,7 @@ export function collectReferences(
   repo: string,
   limit: number,
   shouldStop: () => boolean = () => false,
+  sourceAllowed: SourceFilePredicate = () => true,
 ): Reference[] {
   const refs: Reference[] = [];
   const seen = new Set<string>();
@@ -47,6 +48,7 @@ export function collectReferences(
     stopIfNeeded(shouldStop);
     if (source.isDeclarationFile) continue;
     if (!isInsideRepo(repo, source.fileName)) continue;
+    if (!sourceAllowed(source)) continue;
     if (!sourceMayContainReference(source, searchText)) continue;
     visit(source);
     if (refs.length >= limit) break;
@@ -95,6 +97,7 @@ export function collectImplementedMemberUsageReferences(
   repo: string,
   limit: number,
   shouldStop: () => boolean = () => false,
+  sourceAllowed: SourceFilePredicate = () => true,
 ): Reference[] {
   if (!ts.isMethodDeclaration(target.node)) return [];
   const methodName = propertyNameText(target.node.name);
@@ -114,6 +117,7 @@ export function collectImplementedMemberUsageReferences(
     stopIfNeeded(shouldStop);
     if (source.isDeclarationFile) continue;
     if (!isInsideRepo(repo, source.fileName)) continue;
+    if (!sourceAllowed(source)) continue;
     if (!sourceMayContainReference(source, methodName)) continue;
     visit(source);
     if (refs.length >= limit) break;
@@ -151,6 +155,7 @@ export function collectReferenceConsumerImpact(
   repo: string,
   limit: number,
   shouldStop: () => boolean = () => false,
+  sourceAllowed: SourceFilePredicate = () => true,
 ): { references: Reference[]; callees: Reference[] } {
   const references: Reference[] = [];
   const callees: Reference[] = [];
@@ -164,7 +169,11 @@ export function collectReferenceConsumerImpact(
 
   for (const source of program.getSourceFiles()) {
     stopIfNeeded(shouldStop);
-    if (source.isDeclarationFile || !isInsideRepo(repo, source.fileName)) continue;
+    if (
+      source.isDeclarationFile ||
+      !isInsideRepo(repo, source.fileName) ||
+      !sourceAllowed(source)
+    ) continue;
     if (!sourceMayContainReference(source, searchText)) continue;
     collectConsumerSymbols(source);
   }
@@ -212,7 +221,11 @@ export function collectReferenceConsumerImpact(
     const consumerSearchText = consumerSymbol === null ? consumerName : null;
     for (const source of program.getSourceFiles()) {
       stopIfNeeded(shouldStop);
-      if (source.isDeclarationFile || !isInsideRepo(repo, source.fileName)) continue;
+      if (
+        source.isDeclarationFile ||
+        !isInsideRepo(repo, source.fileName) ||
+        !sourceAllowed(source)
+      ) continue;
       if (!sourceMayContainReference(source, consumerSearchText)) continue;
       visit(source);
       if (references.length >= limit && callees.length >= limit) return;
@@ -238,7 +251,16 @@ export function collectReferenceConsumerImpact(
               (consumerSymbol === null || callerSymbol !== consumerSymbol) &&
               (consumerName === null || callerName !== consumerName)
             ) {
-              collectCalleesFromNode(checker, callerDeclaration, repo, limit, callees, seenCallees, shouldStop);
+              collectCalleesFromNode(
+                checker,
+                callerDeclaration,
+                repo,
+                limit,
+                callees,
+                seenCallees,
+                shouldStop,
+                sourceAllowed,
+              );
             }
           }
         }
@@ -285,10 +307,21 @@ export function collectCallees(
   repo: string,
   limit: number,
   shouldStop: () => boolean = () => false,
+  sourceAllowed: SourceFilePredicate = () => true,
 ): Reference[] {
   const refs: Reference[] = [];
   const seen = new Set<string>();
-  collectCalleesFromNode(checker, target.node, repo, limit, refs, seen, shouldStop, target.node);
+  collectCalleesFromNode(
+    checker,
+    target.node,
+    repo,
+    limit,
+    refs,
+    seen,
+    shouldStop,
+    sourceAllowed,
+    target.node,
+  );
   return refs;
 }
 
@@ -300,6 +333,7 @@ function collectCalleesFromNode(
   refs: Reference[],
   seen: Set<string>,
   shouldStop: () => boolean,
+  sourceAllowed: SourceFilePredicate,
   excludedNode?: ts.Node,
 ): void {
   const targetSource = node.getSourceFile();
@@ -316,7 +350,11 @@ function collectCalleesFromNode(
           if (refs.length >= limit) break;
           if (excludedNode && isDeclarationInsideTarget(declaration, excludedNode, targetSource)) continue;
           const source = declaration.getSourceFile();
-          if (source.isDeclarationFile || !isInsideRepo(repo, source.fileName)) continue;
+          if (
+            source.isDeclarationFile ||
+            !isInsideRepo(repo, source.fileName) ||
+            !sourceAllowed(source)
+          ) continue;
           const file = normalizeRelPath(path.relative(repo, source.fileName));
           if (!isRepoRelativePath(file)) continue;
           addReference(refs, seen, referenceForNode(repo, source, declaration, "callee"), limit);

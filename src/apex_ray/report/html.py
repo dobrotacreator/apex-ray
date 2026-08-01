@@ -1,6 +1,11 @@
 from html import escape
 
-from apex_ray.findings import finding_fingerprint
+from apex_ray.findings import (
+    active_verifications,
+    finding_fingerprint,
+    historical_verifications,
+    unresolved_verifications,
+)
 from apex_ray.models import Finding, ReviewReport
 from apex_ray.report.coverage import _unreviewed_pack_reason
 from apex_ray.report.formatting import summarize_notes
@@ -13,6 +18,7 @@ def render_html(report: ReviewReport) -> str:
     coverage = report.llm_coverage
     memory = report.memory_summary
     findings_html = "\n".join(_finding_html(finding) for finding in report.findings) or "<p>No findings.</p>"
+    verifications_html = _verifications_html(report)
     memory_html = _html_list(
         [
             f"<code>{escape(card_id)}</code> - {escape(reason)}"
@@ -37,9 +43,11 @@ def render_html(report: ReviewReport) -> str:
         ],
         empty="No continuation tasks.",
     )
+    reviewers_html = _reviewers_html(report)
     routes_html = _html_list(
         [
             (
+                f"Reviewer <code>{escape(route.reviewer_id)}</code>; "
                 f"{escape(route.kind)}/{escape(route.provider)} "
                 f"<code>{escape(route.profile or route.model or 'default')}</code> "
                 f"({escape(route.status)}): {route.runs} runs, "
@@ -90,6 +98,8 @@ def render_html(report: ReviewReport) -> str:
     .metric {{ border: 1px solid #d1d5db; border-radius: 8px; padding: 12px; background: #fff; }}
     .metric strong {{ display: block; font-size: 24px; color: #111827; }}
     .finding {{ border-left: 4px solid #b91c1c; padding: 10px 12px; background: #fff7ed; margin: 12px 0; }}
+    .reviewer {{ border-left: 4px solid #2563eb; padding: 10px 12px; background: #eff6ff; margin: 12px 0; }}
+    .reviewer h3 {{ margin-top: 0; }}
     table {{ border-collapse: collapse; width: 100%; margin: 12px 0; }}
     th, td {{ border: 1px solid #d1d5db; padding: 8px; text-align: left; vertical-align: top; }}
     th {{ background: #f9fafb; }}
@@ -116,6 +126,9 @@ def render_html(report: ReviewReport) -> str:
   <h2>Findings</h2>
   {findings_html}
 
+  <h2>Verifier Decisions</h2>
+  {verifications_html}
+
   <h2>LLM Coverage</h2>
   <ul>
     <li>Enabled: <code>{str(coverage.enabled).lower()}</code></li>
@@ -131,6 +144,8 @@ def render_html(report: ReviewReport) -> str:
     <li>Residual P0/P1 packs: <code>{len(coverage.residual_risk_p0_context_pack_ids)}</code> / <code>{len(coverage.residual_risk_p1_context_pack_ids)}</code></li>
     <li>Cluster/file/symbol packs: <code>{coverage.cluster_context_packs}</code> / <code>{coverage.file_context_packs}</code> / <code>{coverage.symbol_context_packs}</code></li>
   </ul>
+  <h2>Focused Reviewers</h2>
+  {reviewers_html}
   <details open><summary>Model Routes</summary>{routes_html}</details>
   <details><summary>Slice Coverage</summary>{slices_html}</details>
   <details open><summary>Continue Partial Coverage</summary>{coverage_todos_html}</details>
@@ -161,18 +176,116 @@ def render_html(report: ReviewReport) -> str:
 
 def _finding_html(finding: Finding) -> str:
     location = f"{finding.file}:{finding.line}" if finding.line else finding.file
+    reviewers = ""
+    if finding.reviewer_ids:
+        reviewers = (
+            "<p><strong>Reviewers:</strong> "
+            + ", ".join(f"<code>{escape(reviewer_id)}</code>" for reviewer_id in finding.reviewer_ids)
+            + "</p>"
+        )
     return (
         '<article class="finding">'
         f"<h3>{escape(finding.title)}</h3>"
         f"<p><strong>{escape(str(finding.severity)).title()}</strong> "
         f"at <code>{escape(location)}</code>, confidence <code>{escape(str(finding.confidence))}</code></p>"
         f"<p><strong>ID:</strong> <code>{escape(finding_fingerprint(finding))}</code></p>"
+        f"{reviewers}"
         f"<p><strong>Failure mode:</strong> {escape(finding.failure_mode)}</p>"
         f"<p><strong>Evidence:</strong> {escape(finding.evidence)}</p>"
         f"<p><strong>Suggested fix:</strong> {escape(finding.suggested_fix)}</p>"
         f"<p><strong>Suggested test:</strong> {escape(finding.suggested_test)}</p>"
         f"<p><strong>Context pack:</strong> <code>{escape(finding.context_pack_id or 'n/a')}</code></p>"
         "</article>"
+    )
+
+
+def _reviewers_html(report: ReviewReport) -> str:
+    if not report.llm_coverage.reviewers:
+        return "<p>No focused reviewer passes recorded.</p>"
+
+    configured = {reviewer.id: reviewer for reviewer in report.config.reviewers}
+    cards: list[str] = []
+    for summary in report.llm_coverage.reviewers:
+        reviewer = configured.get(summary.reviewer_id)
+        name = reviewer.name if reviewer is not None and reviewer.name else summary.reviewer_id
+        focus = reviewer.focus if reviewer is not None else ""
+        requirement = "required" if summary.required else "optional"
+        findings_count = sum(
+            summary.reviewer_id in (finding.reviewer_ids or ["general"]) for finding in report.findings
+        )
+        estimated_cost = f"${summary.estimated_cost_usd:.6f}" if summary.estimated_cost_usd is not None else "n/a"
+        focus_html = f"<p><strong>Focus:</strong> {escape(focus)}</p>" if focus else ""
+        reasons_html = _html_list(
+            [escape(reason) for reason in summary.reasons],
+            empty="No reviewer coverage warnings.",
+        )
+        cards.append(
+            '<article class="reviewer">'
+            f"<h3><code>{escape(summary.reviewer_id)}</code> - {escape(name)}</h3>"
+            f"{focus_html}"
+            "<ul>"
+            f"<li>Status: <code>{escape(summary.status)}</code>; "
+            f"<code>{requirement}</code></li>"
+            f"<li>Selection: {summary.selected_context_packs} selected / "
+            f"{summary.reviewed_context_packs} reviewed / "
+            f"{summary.matching_context_packs} matching</li>"
+            f"<li>Failed runs: {summary.failed_review_runs} review / "
+            f"{summary.failed_verify_runs} verification; findings: {findings_count}</li>"
+            f"<li>Verification: <code>{'enabled' if summary.verify_enabled else 'disabled'}</code></li>"
+            f"<li>Usage: ~{summary.estimated_input_tokens} estimated input tokens; "
+            f"{summary.actual_total_tokens} actual tokens; {estimated_cost} estimated cost</li>"
+            "</ul>"
+            f"<details><summary>Coverage reasons</summary>{reasons_html}</details>"
+            "</article>"
+        )
+    return "\n".join(cards)
+
+
+def _verifications_html(report: ReviewReport) -> str:
+    if not report.verifications:
+        return "<p>No verifier decisions.</p>"
+
+    current_ids = {id(verification) for verification in active_verifications(report.verifications)}
+    unresolved_ids = {id(verification) for verification in unresolved_verifications(report.verifications)}
+    counts: dict[str, list[int]] = {}
+    superseded_count = len(historical_verifications(report.verifications))
+    rows: list[str] = []
+    for verification in report.verifications:
+        reviewer_id = verification.reviewer_id
+        is_current = id(verification) in current_ids
+        if is_current:
+            reviewer_counts = counts.setdefault(reviewer_id, [0, 0])
+            reviewer_counts[0 if verification.approved else 1] += 1
+        is_unresolved = id(verification) in unresolved_ids
+        state = "current" if is_current else "unresolved" if is_unresolved else "superseded"
+        decision = "pending" if is_unresolved else "approved" if verification.approved else "rejected"
+        rows.append(
+            "<tr>"
+            f"<td><code>{escape(reviewer_id)}</code></td>"
+            f"<td><code>{state}</code></td>"
+            f"<td><code>{decision}</code></td>"
+            f"<td>{escape(verification.finding.title)} "
+            f"(<code>{escape(finding_fingerprint(verification.finding))}</code>)</td>"
+            f"<td><code>{escape(str(verification.confidence))}</code></td>"
+            f"<td>{escape(verification.reason)}</td>"
+            "</tr>"
+        )
+    summary = _html_list(
+        [
+            f"Reviewer <code>{escape(reviewer_id)}</code>: {approved} approved / {rejected} rejected"
+            for reviewer_id, (approved, rejected) in sorted(counts.items())
+        ]
+        + ([f"Unresolved verification decisions: {len(unresolved_ids)}"] if unresolved_ids else [])
+        + ([f"Superseded historical decisions: {superseded_count}"] if superseded_count else []),
+        empty="No verifier decisions.",
+    )
+    return (
+        f"{summary}"
+        "<table>"
+        "<thead><tr><th>Reviewer</th><th>State</th><th>Decision</th><th>Finding</th>"
+        "<th>Confidence</th><th>Reason</th></tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody>"
+        "</table>"
     )
 
 

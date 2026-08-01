@@ -6,6 +6,7 @@ from apex_ray.memory import (
     MemoryError,
     load_memory_cards,
     memory_cards_for_audience,
+    memory_suggestions_from_report,
     pack_prompt_payload,
     select_memory_for_pack,
 )
@@ -13,9 +14,18 @@ from apex_ray.models import (
     AnalyzerReference,
     AnalyzerSymbol,
     ContextPack,
+    DiffSummary,
+    Finding,
+    FindingConfidence,
+    FindingSeverity,
+    FindingVerification,
     MemoryCard,
     MemoryConfig,
+    ProjectProfile,
+    ReviewConfig,
+    TargetMode,
 )
+from apex_ray.report import build_report
 
 
 def make_pack() -> ContextPack:
@@ -195,3 +205,47 @@ def test_memory_prompt_payload_uses_compact_symbol_metadata() -> None:
             "kind": "call",
         }
     ]
+
+
+def test_memory_suggestions_match_an_approved_semantic_finding_variant() -> None:
+    canonical = Finding(
+        title="Authorization guard can be bypassed before settlement",
+        severity=FindingSeverity.HIGH,
+        confidence=FindingConfidence.HIGH,
+        file="src/settlement.ts",
+        line=42,
+        failure_mode=(
+            "An untrusted caller can bypass the account authorization guard and submit "
+            "a settlement without the required ownership check."
+        ),
+        evidence=("The changed early return executes before the account ownership authorization guard."),
+        suggested_fix="Move the early return after the ownership authorization guard.",
+        suggested_test="Add a denied-account settlement regression test.",
+        context_pack_id="src/settlement.ts#settle:42",
+    )
+    approved_variant = canonical.model_copy(
+        update={
+            "title": "Settlement authorization can be bypassed",
+            "line": 43,
+            "confidence": FindingConfidence.MEDIUM,
+        }
+    )
+    report = build_report(
+        ProjectProfile(root="/repo", is_git_repo=True),
+        ReviewConfig(),
+        DiffSummary(target_mode=TargetMode.PATCH),
+        findings=[canonical],
+        verifications=[
+            FindingVerification(
+                finding=approved_variant,
+                reviewer_id="security",
+                approved=True,
+                confidence=FindingConfidence.HIGH,
+                reason="The authorization failure is confirmed.",
+            )
+        ],
+    )
+
+    suggestions = memory_suggestions_from_report(report)
+
+    assert canonical.title in suggestions

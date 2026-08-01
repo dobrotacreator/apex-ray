@@ -29,7 +29,7 @@ import {
   returnTypeForNode,
   variableTypeNodesForTarget,
 } from "./targets.js";
-import type { CollectedSymbol, Reference } from "../types.js";
+import type { CollectedSymbol, Reference, SourceFilePredicate } from "../types.js";
 import { isInsideRepo, isRepoRelativePath, normalizeRelPath } from "../utils.js";
 
 export { collectFrameworkMetadata } from "./metadata.js";
@@ -40,15 +40,34 @@ export function collectSchemaContracts(
   target: CollectedSymbol,
   repo: string,
   limit: number,
+  sourceAllowed: SourceFilePredicate = () => true,
 ): Reference[] {
   const refs: Reference[] = [];
   const seen = new Set<string>();
   const contractSymbolsSeen = new Set<ts.Symbol>();
-  collectDeclaredTypeContracts(refs, seen, contractSymbolsSeen, checker, target, repo, limit);
-  collectClassHeritageContracts(refs, seen, checker, target, repo, limit);
-  collectDecoratorArgumentContracts(refs, seen, checker, target, repo, limit);
-  collectDecoratorMetadataKeyConsumerContracts(refs, seen, program, checker, target, repo, limit);
-  collectImplementedMemberContracts(refs, seen, checker, target, repo, limit);
+  collectDeclaredTypeContracts(
+    refs,
+    seen,
+    contractSymbolsSeen,
+    checker,
+    target,
+    repo,
+    limit,
+    sourceAllowed,
+  );
+  collectClassHeritageContracts(refs, seen, checker, target, repo, limit, sourceAllowed);
+  collectDecoratorArgumentContracts(refs, seen, checker, target, repo, limit, sourceAllowed);
+  collectDecoratorMetadataKeyConsumerContracts(
+    refs,
+    seen,
+    program,
+    checker,
+    target,
+    repo,
+    limit,
+    sourceAllowed,
+  );
+  collectImplementedMemberContracts(refs, seen, checker, target, repo, limit, sourceAllowed);
   visit(target.node);
   return refs;
 
@@ -57,14 +76,36 @@ export function collectSchemaContracts(
     if (ts.isCallExpression(node)) {
       const schemaNode = schemaReceiverNameNode(node.expression);
       const schemaSymbol = schemaNode ? canonicalSymbol(checker, checker.getSymbolAtLocation(schemaNode)) : null;
-      addContractSymbolWithDependencies(refs, seen, contractSymbolsSeen, checker, schemaSymbol, target.node, repo, limit, 0);
+      addContractSymbolWithDependencies(
+        refs,
+        seen,
+        contractSymbolsSeen,
+        checker,
+        schemaSymbol,
+        target.node,
+        repo,
+        limit,
+        0,
+        sourceAllowed,
+      );
       for (const argument of node.arguments) {
         if (refs.length >= limit) break;
         const schemaArgumentNode = schemaArgumentNameNode(argument);
         const schemaArgumentSymbol = schemaArgumentNode
           ? canonicalSymbol(checker, checker.getSymbolAtLocation(schemaArgumentNode))
           : null;
-        addContractSymbolWithDependencies(refs, seen, contractSymbolsSeen, checker, schemaArgumentSymbol, target.node, repo, limit, 0);
+        addContractSymbolWithDependencies(
+          refs,
+          seen,
+          contractSymbolsSeen,
+          checker,
+          schemaArgumentSymbol,
+          target.node,
+          repo,
+          limit,
+          0,
+          sourceAllowed,
+        );
       }
     }
     ts.forEachChild(node, visit);
@@ -78,6 +119,7 @@ function collectClassHeritageContracts(
   target: CollectedSymbol,
   repo: string,
   limit: number,
+  sourceAllowed: SourceFilePredicate,
 ): void {
   if (!ts.isClassDeclaration(target.node)) return;
   const seenSymbols = new Set<ts.Symbol>();
@@ -98,7 +140,15 @@ function collectClassHeritageContracts(
         const contractSymbol = symbolForHeritageType(checker, heritageType);
         if (!contractSymbol || seenSymbols.has(contractSymbol)) continue;
         seenSymbols.add(contractSymbol);
-        addContractDeclarationReferences(refs, seen, contractSymbol, target.node, repo, limit);
+        addContractDeclarationReferences(
+          refs,
+          seen,
+          contractSymbol,
+          target.node,
+          repo,
+          limit,
+          sourceAllowed,
+        );
 
         for (const contractDeclaration of contractSymbol.declarations ?? []) {
           if (refs.length >= limit) return;
@@ -124,6 +174,7 @@ function collectDecoratorArgumentContracts(
   target: CollectedSymbol,
   repo: string,
   limit: number,
+  sourceAllowed: SourceFilePredicate,
 ): void {
   for (const node of metadataNodesForTarget(target)) {
     if (refs.length >= limit) return;
@@ -131,7 +182,15 @@ function collectDecoratorArgumentContracts(
       if (refs.length >= limit) return;
       const decoratorName = decoratorNameNode(decorator);
       const decoratorSymbol = decoratorName ? canonicalSymbol(checker, checker.getSymbolAtLocation(decoratorName)) : null;
-      addContractDeclarationReferences(refs, seen, decoratorSymbol, target.node, repo, limit);
+      addContractDeclarationReferences(
+        refs,
+        seen,
+        decoratorSymbol,
+        target.node,
+        repo,
+        limit,
+        sourceAllowed,
+      );
       for (const argument of decoratorArgumentExpressions(decorator)) {
         visitArgument(argument);
       }
@@ -142,7 +201,15 @@ function collectDecoratorArgumentContracts(
     if (refs.length >= limit) return;
     if (ts.isIdentifier(node)) {
       const symbol = canonicalSymbol(checker, checker.getSymbolAtLocation(node));
-      addContractDeclarationReferences(refs, seen, symbol, target.node, repo, limit);
+      addContractDeclarationReferences(
+        refs,
+        seen,
+        symbol,
+        target.node,
+        repo,
+        limit,
+        sourceAllowed,
+      );
     }
     ts.forEachChild(node, visitArgument);
   }
@@ -156,6 +223,7 @@ function collectDeclaredTypeContracts(
   target: CollectedSymbol,
   repo: string,
   limit: number,
+  sourceAllowed: SourceFilePredicate,
 ): void {
   for (const parameter of parametersForNode(target.node)) {
     if (!parameter.type) continue;
@@ -178,12 +246,34 @@ function collectDeclaredTypeContracts(
     if (ts.isTypeReferenceNode(node)) {
       const symbolNode = entityNameLeaf(node.typeName);
       const typeSymbol = canonicalSymbol(checker, checker.getSymbolAtLocation(symbolNode));
-      addContractSymbolWithDependencies(refs, seen, contractSymbolsSeen, checker, typeSymbol, target.node, repo, limit, 0);
+      addContractSymbolWithDependencies(
+        refs,
+        seen,
+        contractSymbolsSeen,
+        checker,
+        typeSymbol,
+        target.node,
+        repo,
+        limit,
+        0,
+        sourceAllowed,
+      );
     }
     if (ts.isTypeQueryNode(node)) {
       const symbolNode = entityNameLeaf(node.exprName);
       const valueSymbol = canonicalSymbol(checker, checker.getSymbolAtLocation(symbolNode));
-      addContractSymbolWithDependencies(refs, seen, contractSymbolsSeen, checker, valueSymbol, target.node, repo, limit, 0);
+      addContractSymbolWithDependencies(
+        refs,
+        seen,
+        contractSymbolsSeen,
+        checker,
+        valueSymbol,
+        target.node,
+        repo,
+        limit,
+        0,
+        sourceAllowed,
+      );
     }
     ts.forEachChild(node, visitType);
   }
@@ -196,6 +286,7 @@ function collectImplementedMemberContracts(
   target: CollectedSymbol,
   repo: string,
   limit: number,
+  sourceAllowed: SourceFilePredicate,
 ): void {
   if (!ts.isMethodDeclaration(target.node)) return;
   const methodName = propertyNameText(target.node.name);
@@ -207,7 +298,11 @@ function collectImplementedMemberContracts(
       if (refs.length >= limit) return;
       if (isDeclarationInsideTarget(declaration, target.node, target.node.getSourceFile())) continue;
       const source = declaration.getSourceFile();
-      if (source.isDeclarationFile || !isInsideRepo(repo, source.fileName)) continue;
+      if (
+        source.isDeclarationFile ||
+        !isInsideRepo(repo, source.fileName) ||
+        !sourceAllowed(source)
+      ) continue;
       const file = normalizeRelPath(path.relative(repo, source.fileName));
       if (!isRepoRelativePath(file)) continue;
       addReference(refs, seen, referenceForNode(repo, source, declaration, "contract"), limit);

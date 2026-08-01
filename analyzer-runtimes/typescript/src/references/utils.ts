@@ -2,26 +2,118 @@ import path from "node:path";
 
 import ts from "typescript";
 
-import type { Reference, ReferenceKind } from "../types.js";
-import { normalizeRelPath } from "../utils.js";
+import type {
+  IdentifierIndexEntry,
+  IndexedReference,
+  Reference,
+  ReferenceKind,
+  RepoFileIndexEntry,
+  RepoIndex,
+} from "../types.js";
+import {
+  canonicalPathKey,
+  normalizeRelPath,
+  readStableFile,
+  sameStableFileIdentity,
+} from "../utils.js";
+
+const indexedSourceLines = new WeakMap<RepoIndex, Map<string, string[] | null>>();
 
 export function referenceForIdentifier(repo: string, source: ts.SourceFile, node: ts.Identifier): Reference {
   return referenceForNode(repo, source, node, referenceKind(node));
 }
 
 export function referenceForNode(repo: string, source: ts.SourceFile, node: ts.Node, kind: ReferenceKind): Reference {
+  const reference = indexedReferenceForNode(repo, source, node, kind);
+  return materializedReference(reference, sourceLineText(source, reference.line - 1) ?? node.getText(source));
+}
+
+export function indexedReferenceForIdentifier(
+  repo: string,
+  source: ts.SourceFile,
+  node: ts.Identifier,
+): IndexedReference {
+  return indexedReferenceForNode(repo, source, node, referenceKind(node));
+}
+
+export function indexedReferenceForNode(
+  repo: string,
+  source: ts.SourceFile,
+  node: ts.Node,
+  kind: ReferenceKind,
+): IndexedReference {
   const position = source.getLineAndCharacterOfPosition(node.getStart(source));
   const endPosition = source.getLineAndCharacterOfPosition(node.getEnd());
-  const reference: Reference = {
+  const reference: IndexedReference = {
     file: normalizeRelPath(path.relative(repo, source.fileName)),
     line: position.line + 1,
-    text: source.text.split(/\r?\n/)[position.line]?.trim() ?? node.getText(source),
     kind,
   };
   if (endPosition.line > position.line) {
     reference.endLine = endPosition.line + 1;
   }
   return reference;
+}
+
+export function materializeIdentifierReference(
+  repoIndex: RepoIndex,
+  entry: RepoFileIndexEntry,
+  identifier: IdentifierIndexEntry,
+): Reference {
+  let linesByFile = indexedSourceLines.get(repoIndex);
+  if (!linesByFile) {
+    linesByFile = new Map();
+    indexedSourceLines.set(repoIndex, linesByFile);
+  }
+  let lines = linesByFile.get(entry.absPath);
+  if (lines === undefined) {
+    const expectedIdentity = repoIndex.fileIdentities?.get(
+      canonicalPathKey(entry.absPath),
+    );
+    const snapshot = expectedIdentity
+      ? readStableFile(
+          entry.absPath,
+          () => true,
+          (identity) => sameStableFileIdentity(expectedIdentity, identity),
+        )
+      : null;
+    lines =
+      snapshot?.text !== null &&
+      snapshot?.text !== undefined &&
+      expectedIdentity &&
+      sameStableFileIdentity(expectedIdentity, snapshot.identity)
+        ? snapshot.text.split(/\r?\n/)
+        : null;
+    linesByFile.set(entry.absPath, lines);
+  }
+  return materializedReference(
+    identifier.reference,
+    lines?.[identifier.reference.line - 1]?.trim() ?? identifier.name,
+  );
+}
+
+function materializedReference(reference: IndexedReference, text: string): Reference {
+  const materialized: Reference = {
+    file: reference.file,
+    line: reference.line,
+    text,
+    kind: reference.kind,
+  };
+  if (reference.endLine !== undefined) {
+    materialized.endLine = reference.endLine;
+  }
+  return materialized;
+}
+
+function sourceLineText(source: ts.SourceFile, zeroBasedLine: number): string | null {
+  const lineStarts = source.getLineStarts();
+  const start = lineStarts[zeroBasedLine];
+  if (start === undefined) return null;
+  let end = lineStarts[zeroBasedLine + 1] ?? source.text.length;
+  while (end > start && (source.text[end - 1] === "\n" || source.text[end - 1] === "\r")) {
+    end -= 1;
+  }
+  return source.text.slice(start, end).trim();
 }
 
 export function referenceKind(node: ts.Identifier): ReferenceKind {

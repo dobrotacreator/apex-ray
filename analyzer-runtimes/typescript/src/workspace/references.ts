@@ -5,6 +5,7 @@ import ts from "typescript";
 import { identifierFromExpression, propertyAssignmentNamed } from "../ast-utils.js";
 import { findIndexedPackageForFile } from "../module-resolution.js";
 import { addReference } from "../references/merge.js";
+import { materializeIdentifierReference } from "../references/utils.js";
 import {
   inferredMemberIdentifiers,
   isMemberReferenceForTarget,
@@ -34,7 +35,14 @@ export function collectWorkspaceImportReferences(repo: string, repoIndex: RepoIn
     if (refs.length >= limit) break;
     if (entry.absPath === targetFile) continue;
 
-    const importedBindings = importedBindingsForTarget(entry, repo, target, targetPackage, exportedNames);
+    const importedBindings = importedBindingsForTarget(
+      entry,
+      repo,
+      target,
+      targetPackage,
+      exportedNames,
+      repoIndex.markModuleResolutionPartial,
+    );
     if (importedBindings.localNames.size === 0 && importedBindings.namespaceLocalNames.size === 0) continue;
 
     for (const importReference of [
@@ -47,7 +55,7 @@ export function collectWorkspaceImportReferences(repo: string, repoIndex: RepoIn
     for (const identifier of entry.identifiers) {
       if (refs.length >= limit) break;
       if (isIdentifierMatchedByImportedBindings(identifier, importedBindings)) {
-        addReference(refs, seen, identifier.reference, limit);
+        addReference(refs, seen, materializeIdentifierReference(repoIndex, entry, identifier), limit);
       }
     }
   }
@@ -83,14 +91,21 @@ export function collectWorkspaceMemberReferences(repo: string, repoIndex: RepoIn
 
     const importedBindings =
       targetPackage && exportedNames
-        ? importedBindingsForTarget(entry, repo, containerTarget, targetPackage, exportedNames)
+        ? importedBindingsForTarget(
+            entry,
+            repo,
+            containerTarget,
+            targetPackage,
+            exportedNames,
+            repoIndex.markModuleResolutionPartial,
+          )
         : emptyImportedBindings();
     if (importedBindings.localNames.size === 0 && importedBindings.namespaceLocalNames.size === 0) continue;
 
     for (const identifier of entry.identifiers) {
       if (refs.length >= limit) break;
       if (isMemberReferenceForTarget(identifier, target.analysis.name, entry, importedBindings)) {
-        addReference(refs, seen, identifier.reference, limit);
+        addReference(refs, seen, materializeIdentifierReference(repoIndex, entry, identifier), limit);
       }
     }
   }
@@ -101,14 +116,21 @@ export function collectWorkspaceMemberReferences(repo: string, repoIndex: RepoIn
 
     const importedBindings =
       targetPackage && exportedNames
-        ? importedBindingsForTarget(entry, repo, containerTarget, targetPackage, exportedNames)
+        ? importedBindingsForTarget(
+            entry,
+            repo,
+            containerTarget,
+            targetPackage,
+            exportedNames,
+            repoIndex.markModuleResolutionPartial,
+          )
         : emptyImportedBindings();
     if (importedBindings.localNames.size === 0 && importedBindings.namespaceLocalNames.size === 0) continue;
 
     for (const identifier of entry.identifiers) {
       if (refs.length >= limit) break;
       if (isIdentifierMatchedByImportedBindings(identifier, importedBindings)) {
-        addReference(refs, seen, identifier.reference, limit);
+        addReference(refs, seen, materializeIdentifierReference(repoIndex, entry, identifier), limit);
       }
     }
 
@@ -143,14 +165,20 @@ export function filterInvalidWorkspaceMemberReferences(
     if (!entry) return true;
     const importedBindings =
       targetPackage && exportedNames
-        ? importedBindingsForTarget(entry, repo, containerTarget, targetPackage, exportedNames)
+        ? importedBindingsForTarget(
+            entry,
+            repo,
+            containerTarget,
+            targetPackage,
+            exportedNames,
+            repoIndex.markModuleResolutionPartial,
+          )
         : emptyImportedBindings();
     const indexedIdentifiers = entry.identifiers.filter(
       (identifier) =>
         identifier.name === target.analysis.name &&
         identifier.namespaceQualifier !== null &&
-        identifier.reference.line === reference.line &&
-        identifier.reference.text === reference.text,
+        identifier.reference.line === reference.line,
     );
     const identifiers =
       indexedIdentifiers.length > 0
@@ -182,7 +210,14 @@ export function collectWorkspaceDiReferences(repo: string, repoIndex: RepoIndex,
     if (refs.length >= limit) break;
     if (entry.absPath === targetFile) continue;
 
-    const importedBindings = importedBindingsForTarget(entry, repo, diTarget, targetPackage, exportedNames);
+    const importedBindings = importedBindingsForTarget(
+      entry,
+      repo,
+      diTarget,
+      targetPackage,
+      exportedNames,
+      repoIndex.markModuleResolutionPartial,
+    );
     if (importedBindings.localNames.size === 0 && importedBindings.namespaceLocalNames.size === 0) continue;
 
     for (const provider of entry.diProviders) {

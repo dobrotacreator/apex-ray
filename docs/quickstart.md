@@ -1,6 +1,6 @@
 # Quick Start
 
-This guide gets Apex Ray installed, initialized in a target repository, and running a first local review.
+This guide gets Apex Ray installed, initialized in a target repository, and running a first review.
 
 ## Install
 
@@ -29,7 +29,8 @@ Apex Ray can review git diffs through a language-neutral pipeline. Enhanced anal
 - git
 - Node.js 24+ and npm only when reviewing TypeScript or JavaScript with the bundled analyzer
 - Go only when reviewing Go with the bundled analyzer
-- Codex CLI or Claude Code CLI only when using `--llm`
+- Codex CLI or Claude Code CLI only when the selected LLM provider is a local CLI
+- an API key environment variable only when the selected LLM provider is a direct or custom API
 - GitHub CLI only for historical PR replay commands
 
 Run `apex-ray doctor` from the repository you want to review. It checks git discovery, detected languages, the built-in Python analyzer, Go, Node.js, and the bundled TypeScript analyzer.
@@ -79,10 +80,11 @@ apex-ray review \
   --llm \
   --output .apex-ray/reports/review.md \
   --json .apex-ray/reports/review.json \
-  --html .apex-ray/reports/review.html
+  --html .apex-ray/reports/review.html \
+  --sarif .apex-ray/reports/review.sarif
 ```
 
-The Markdown report is easiest to read locally, the JSON report is the durable machine-readable artifact, and the optional HTML report is useful when sharing a local run with teammates.
+The Markdown report is easiest to read locally, JSON is the durable machine-readable artifact, HTML is useful when sharing a run with teammates, and SARIF integrates with code-scanning systems.
 
 If your shared config enables an LLM provider but a machine should stay offline or avoid provider cost, put this in `.apex-ray/config.local.yml`:
 
@@ -133,6 +135,7 @@ apex-ray review \
 ## Next Steps
 
 - Configure shared review policy in [Configuration](configuration.md).
-- Configure Codex CLI or Claude Code CLI in [LLM Providers](providers.md).
+- Configure a local CLI, direct API, or custom compatible endpoint in [LLM Providers](providers.md).
+- Run focused reviewer matrices on pull requests with [GitHub Actions](github-actions.md).
 - Learn how to read reports and choose review targets in [Review Workflow](review-workflow.md).
 - Add project-specific rules and memory in [Rules And Memory](memory.md).

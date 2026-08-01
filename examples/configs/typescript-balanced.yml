@@ -1,0 +1,142 @@
+# Balanced local review for a typical TypeScript/JavaScript service.
+# Copy this file to .apex-ray/config.yml, then adjust path-based risk rules.
+review:
+  base: main
+  languages: [typescript, javascript]
+  ignore:
+    - "**/*.lock"
+    - "**/generated/**"
+    - "**/dist/**"
+    - "**/build/**"
+    - "**/coverage/**"
+    - "**/node_modules/**"
+  local_data:
+    root: git_common
+  analyzer:
+    index_cache_enabled: true
+    timeout_seconds: 120
+    changed_file_shard_size: 40
+    adaptive_sharding: true
+    large_change_file_threshold: 20
+    large_change_shard_size: 4
+  memory:
+    enabled: true
+    paths:
+      - .apex-ray/memory
+  risk:
+    built_in_enabled: true
+    rules:
+      - id: authentication-boundary
+        title: Authentication and authorization boundary
+        severity: critical
+        score: 96
+        paths:
+          - "src/auth/**"
+          - "src/security/**"
+          - "src/guards/**"
+        exclude_paths:
+          - "**/*.test.ts"
+          - "**/*.spec.ts"
+        languages: [typescript, javascript]
+        file_kinds: [source]
+        categories: [security, authorization]
+        reviewer_tags: [security]
+        guidance: Verify identity binding, authorization order, tenant isolation, and fail-closed behavior.
+      - id: public-api-contract
+        title: Public API contract
+        severity: high
+        score: 82
+        paths:
+          - "src/api/**"
+          - "src/controllers/**"
+          - "src/routes/**"
+        exclude_paths:
+          - "**/*.test.ts"
+          - "**/*.spec.ts"
+        languages: [typescript, javascript]
+        file_kinds: [source, schema]
+        categories: [api, compatibility]
+        reviewer_tags: [api-contract]
+        guidance: Check validation, response compatibility, error semantics, and authorization before side effects.
+  llm:
+    enabled: true
+    provider: codex_cli
+    profiles:
+      broad:
+        provider: codex_cli
+        model: gpt-5.6-terra
+        effort: low
+      strong:
+        provider: codex_cli
+        model: gpt-5.6-sol
+        effort: medium
+    routing:
+      review_profile: broad
+      verify_profile: strong
+      escalated_review_profile: strong
+      escalated_verify_profile: strong
+      escalate_review_when:
+        risk: [auth, shell, migration]
+        rule_severity: [high, critical]
+        strict_rule: true
+      escalate_verify_when:
+        finding_severity: [high, critical]
+    coverage_mode: balanced
+    max_packs: 48
+    max_deep_packs: 16
+    max_input_tokens: 180000
+    timeout_seconds: 600
+    jobs: 2
+    max_consecutive_provider_failures: 3
+    verify: true
+    cache_dir: ${local_data}/cache/llm
+  reviewers:
+    - id: correctness
+      name: Correctness
+      focus: Diff-caused behavioral regressions, broken contracts, and concrete failure modes.
+      profile: broad
+      verify_profile: strong
+      coverage_mode: balanced
+      review_depth: balanced
+      max_packs: 36
+      max_deep_packs: 12
+      max_input_tokens: 130000
+      verify: true
+      required: true
+    - id: security
+      name: Security
+      focus: Authentication, authorization, injection, secrets, SSRF, and trust boundaries.
+      instructions:
+        - Report a concrete exploit or bypass path and the affected trust boundary.
+        - Avoid generic hardening advice without a diff-caused failure mode.
+      risk: [auth, shell, external_io]
+      risk_tags: [security]
+      profile: strong
+      verify_profile: strong
+      review_depth: deep
+      max_packs: 10
+      max_deep_packs: 10
+      max_input_tokens: 50000
+      verify: true
+  telemetry:
+    enabled: true
+    path: ${local_data}/telemetry/review-runs.jsonl
+    path_mode: anonymized
+  reports:
+    archive: true
+    archive_dir: ${local_data}/reports/runs
+    retention: 20
+    compression: auto
+    compression_min_bytes: 65536
+  gates:
+    pre_push:
+      enabled: true
+      min_finding_severity: high
+      require_verified_findings: true
+      fail_on_quality_gate: true
+      fail_on_partial_severity: critical
+      auto_followup_p0: true
+      auto_followup_p0_max_pack_reviews: 16
+      incremental_retry:
+        enabled: true
+        max_resolution_calls_per_retry: 8

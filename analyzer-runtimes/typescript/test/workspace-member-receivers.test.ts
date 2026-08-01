@@ -163,8 +163,11 @@ function fileEntry(overrides: Partial<RepoFileIndexEntry> = {}): RepoFileIndexEn
     absPath: "/repo/src/cart.ts",
     relPath: "src/cart.ts",
     relLower: "src/cart.ts",
+    dev: 0,
+    ino: 0,
     size: 0,
     mtimeMs: 0,
+    ctimeMs: 0,
     imports: [],
     exports: [],
     identifiers: [],
@@ -197,7 +200,6 @@ function identifier(
     reference: {
       file: "src/cart.ts",
       line,
-      text: `${namespaceQualifier ? `${namespaceQualifier}.` : ""}${name}();`,
       kind,
     },
   };

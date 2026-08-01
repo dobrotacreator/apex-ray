@@ -5,10 +5,17 @@ import typer
 from apex_ray.config import ConfigError, agent_artifact_refresh_warning, ensure_apex_gitignore
 
 
-def ensure_distinct_outputs(output: Path, json_output: Path, html_output: Path | None = None) -> None:
+def ensure_distinct_outputs(
+    output: Path,
+    json_output: Path,
+    html_output: Path | None = None,
+    sarif_output: Path | None = None,
+) -> None:
     outputs = [("Markdown", output), ("JSON", json_output)]
     if html_output is not None:
         outputs.append(("HTML", html_output))
+    if sarif_output is not None:
+        outputs.append(("SARIF", sarif_output))
     seen: dict[Path, str] = {}
     for label, path in outputs:
         resolved = path.resolve()

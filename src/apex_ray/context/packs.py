@@ -189,13 +189,13 @@ def _packs_for_file(
             return packs
 
         if len(symbols) > FILE_CLUSTER_MAX_SYMBOLS:
-            for chunk_index, chunk in enumerate(_symbol_chunks(symbols, LARGE_FILE_CLUSTER_CHUNK_SIZE)):
+            for chunk in _symbol_chunks(symbols, LARGE_FILE_CLUSTER_CHUNK_SIZE):
                 primary = _primary_symbol(chunk)
                 pack_changed_lines = _changed_lines_for_symbols(changed_file, chunk)
                 risk_signals = _risk_signals_for_symbols(
                     changed_file,
                     chunk,
-                    include_file_level=chunk_index == 0,
+                    include_file_level=True,
                 )
                 references = _references_for_symbols(chunk)
                 callees = _callees_for_symbols(chunk)
@@ -243,7 +243,7 @@ def _packs_for_file(
             risk_signals = _risk_signals_for_symbols(
                 changed_file,
                 [symbol],
-                include_file_level=index == 1,
+                include_file_level=True,
             )
             references = symbol.references
             callees = symbol.callees

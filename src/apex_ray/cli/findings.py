@@ -9,6 +9,7 @@ from apex_ray.cli.common import ensure_apex_ignore_for_outputs
 from apex_ray.config import ConfigError, load_config
 from apex_ray.findings import finding_fingerprint
 from apex_ray.local_data import LocalDataPathError, resolve_runtime_config_paths
+from apex_ray.models import TargetMode
 from apex_ray.report import ReviewReportLoadError, load_review_report
 from apex_ray.triage import (
     SuppressionVerdict,
@@ -82,7 +83,7 @@ def suppress_finding(
         config=config.triage,
         verdict=cast(SuppressionVerdict, verdict),
         expires_at=expires_at,
-        target_base_ref=report.diff.base,
+        target_base_ref=(report.diff.base if report.diff.target_mode == TargetMode.BASE else report.config.base),
         report_path=from_report,
     )
     state = add_or_replace_suppression(state, suppression)

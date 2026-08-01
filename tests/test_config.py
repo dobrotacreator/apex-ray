@@ -23,6 +23,8 @@ def test_load_config_defaults_when_missing(tmp_path: Path) -> None:
     assert path is None
     assert config.base == "main"
     assert "**/generated/**" in config.ignore
+    assert config.telemetry.path_mode == "full"
+    assert config.reports.compression == "none"
 
 
 def test_init_config_creates_default_file(tmp_path: Path) -> None:
@@ -48,15 +50,18 @@ def test_init_config_creates_default_file(tmp_path: Path) -> None:
     assert config.llm.profiles == {}
     assert config.llm.enabled is True
     assert config.llm.effort == "medium"
-    assert config.llm.max_packs == 64
-    assert config.llm.max_deep_packs == 48
-    assert config.llm.max_input_tokens == 300_000
+    assert config.llm.jobs == 2
+    assert config.llm.max_packs == 48
+    assert config.llm.max_deep_packs == 16
+    assert config.llm.max_input_tokens == 180_000
     assert config.llm.cache_dir == "${local_data}/cache/llm"
     assert config.telemetry.enabled is True
     assert config.telemetry.path == "${local_data}/telemetry/review-runs.jsonl"
+    assert config.telemetry.path_mode == "anonymized"
     assert config.reports.archive is True
     assert config.reports.archive_dir == "${local_data}/reports/runs"
     assert config.reports.retention == 20
+    assert config.reports.compression == "auto"
     assert config.triage.enabled is True
     assert config.triage.state_path == "${local_data}/triage/suppressions.json"
     assert config.triage.events_path == "${local_data}/triage/events.jsonl"
@@ -65,8 +70,10 @@ def test_init_config_creates_default_file(tmp_path: Path) -> None:
     assert config.triage.events_retention_days == 90
     assert config.gates.pre_push.progress == "auto"
     assert config.gates.pre_push.progress_interval_seconds == 5.0
+    assert config.gates.pre_push.auto_followup_p0_max_pack_reviews == 16
     assert config.gates.pre_push.incremental_retry.enabled is False
     assert config.gates.pre_push.incremental_retry.state_path == ".apex-ray/reports/pre-push-state.json"
+    assert config.gates.pre_push.incremental_retry.max_resolution_calls_per_retry == 8
 
 
 def test_load_config_parses_analyzer_shard_size(tmp_path: Path) -> None:
@@ -80,6 +87,222 @@ def test_load_config_parses_analyzer_shard_size(tmp_path: Path) -> None:
     config, _ = load_config(tmp_path)
 
     assert config.analyzer.changed_file_shard_size == 7
+
+
+def test_load_config_parses_explainable_risk_policy(tmp_path: Path) -> None:
+    path = tmp_path / ".apex-ray" / "config.yml"
+    path.parent.mkdir()
+    path.write_text(
+        "review:\n"
+        "  risk:\n"
+        "    built_in_enabled: false\n"
+        "    rules:\n"
+        "      - id: settlement-boundary\n"
+        "        title: Settlement boundary\n"
+        "        severity: critical\n"
+        "        score: 97\n"
+        "        paths: [src/settlement/**]\n"
+        "        exclude_paths: [src/settlement/**/*.test.ts]\n"
+        "        languages: [typescript]\n"
+        "        file_kinds: [source]\n"
+        "        statuses: [modified, deleted]\n"
+        "        text: [rounding, currency]\n"
+        "        risk: [external_io]\n"
+        "        categories: [financial]\n"
+        "        reviewer_tags: [finance, security]\n"
+        "        guidance: Check atomicity and value preservation.\n",
+        encoding="utf-8",
+    )
+
+    config, _ = load_config(tmp_path)
+
+    assert config.risk.built_in_enabled is False
+    assert len(config.risk.rules) == 1
+    rule = config.risk.rules[0]
+    assert rule.id == "settlement-boundary"
+    assert rule.severity == "critical"
+    assert rule.score == 97
+    assert rule.paths == ["src/settlement/**"]
+    assert rule.exclude_paths == ["src/settlement/**/*.test.ts"]
+    assert rule.languages == ["typescript"]
+    assert rule.file_kinds == ["source"]
+    assert rule.statuses == ["modified", "deleted"]
+    assert rule.text == ["rounding", "currency"]
+    assert rule.risk == ["external_io"]
+    assert rule.categories == ["financial"]
+    assert rule.reviewer_tags == ["finance", "security"]
+    assert rule.guidance == "Check atomicity and value preservation."
+
+
+def test_minimal_legacy_config_keeps_full_paths_and_uncompressed_reports(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / ".apex-ray" / "config.yml"
+    path.parent.mkdir()
+    path.write_text("review:\n  base: develop\n", encoding="utf-8")
+
+    config, _ = load_config(tmp_path)
+
+    assert config.telemetry.path_mode == "full"
+    assert config.reports.compression == "none"
+
+
+def test_load_config_parses_api_provider_profiles_without_literal_secrets(tmp_path: Path) -> None:
+    path = tmp_path / ".apex-ray" / "config.yml"
+    path.parent.mkdir()
+    path.write_text(
+        "review:\n"
+        "  llm:\n"
+        "    enabled: true\n"
+        "    provider: openai_api\n"
+        "    model: gpt-5.6-sol\n"
+        "    effort: medium\n"
+        "    api:\n"
+        "      api_key_env: OPENAI_API_KEY\n"
+        "      max_output_tokens: 5000\n"
+        "      max_retries: 3\n"
+        "    profiles:\n"
+        "      private-compatible:\n"
+        "        provider: openai_compatible\n"
+        "        model: company-reviewer\n"
+        "        api:\n"
+        "          protocol: openai_chat\n"
+        "          structured_output: json_object\n"
+        "          base_url_env: COMPANY_LLM_BASE_URL\n"
+        "          api_key_env: COMPANY_LLM_API_KEY\n"
+        "          headers_from_env:\n"
+        "            X-Project: COMPANY_LLM_PROJECT\n",
+        encoding="utf-8",
+    )
+
+    config, _ = load_config(tmp_path)
+
+    assert config.llm.provider == "openai_api"
+    assert config.llm.api.api_key_env == "OPENAI_API_KEY"
+    assert config.llm.api.max_output_tokens == 5000
+    assert config.llm.api.max_retries == 3
+    profile = config.llm.profiles["private-compatible"]
+    assert profile.provider == "openai_compatible"
+    assert profile.api is not None
+    assert profile.api.protocol == "openai_chat"
+    assert profile.api.structured_output == "json_object"
+    assert profile.api.base_url_env == "COMPANY_LLM_BASE_URL"
+    assert profile.api.api_key_env == "COMPANY_LLM_API_KEY"
+    assert profile.api.headers_from_env == {"X-Project": "COMPANY_LLM_PROJECT"}
+    serialized = config.model_dump_json()
+    assert "COMPANY_LLM_API_KEY" in serialized
+    assert "literal-secret" not in serialized
+
+
+def test_load_config_parses_focused_reviewers_and_validates_profiles(tmp_path: Path) -> None:
+    path = tmp_path / ".apex-ray" / "config.yml"
+    path.parent.mkdir()
+    path.write_text(
+        "review:\n"
+        "  llm:\n"
+        "    profiles:\n"
+        "      broad:\n"
+        "        model: broad-model\n"
+        "      strong:\n"
+        "        model: strong-model\n"
+        "  reviewers:\n"
+        "    - id: security\n"
+        "      name: Security reviewer\n"
+        "      focus: Authentication, authorization, and injection boundaries.\n"
+        "      instructions:\n"
+        "        - Prefer exploitable failure modes over style findings.\n"
+        "      paths: [src/**]\n"
+        "      exclude_paths: [src/**/*.test.ts]\n"
+        "      file_kinds: [source, config]\n"
+        "      risk: [auth, shell]\n"
+        "      risk_tags: [security]\n"
+        "      profile: broad\n"
+        "      verify_profile: strong\n"
+        "      coverage_mode: exhaustive\n"
+        "      max_packs: 20\n"
+        "      max_deep_packs: 12\n"
+        "      max_input_tokens: 90000\n"
+        "      required: true\n",
+        encoding="utf-8",
+    )
+
+    config, _ = load_config(tmp_path)
+
+    assert len(config.reviewers) == 1
+    reviewer = config.reviewers[0]
+    assert reviewer.id == "security"
+    assert reviewer.name == "Security reviewer"
+    assert reviewer.focus.startswith("Authentication")
+    assert reviewer.instructions == ["Prefer exploitable failure modes over style findings."]
+    assert reviewer.paths == ["src/**"]
+    assert reviewer.exclude_paths == ["src/**/*.test.ts"]
+    assert reviewer.file_kinds == ["source", "config"]
+    assert reviewer.risk == ["auth", "shell"]
+    assert reviewer.risk_tags == ["security"]
+    assert reviewer.profile == "broad"
+    assert reviewer.verify_profile == "strong"
+    assert reviewer.coverage_mode == "exhaustive"
+    assert reviewer.max_packs == 20
+    assert reviewer.max_deep_packs == 12
+    assert reviewer.max_input_tokens == 90_000
+    assert reviewer.required is True
+
+
+def test_load_config_rejects_duplicate_reviewer_ids(tmp_path: Path) -> None:
+    path = tmp_path / ".apex-ray" / "config.yml"
+    path.parent.mkdir()
+    path.write_text(
+        "review:\n  reviewers:\n    - id: security\n      focus: First.\n    - id: security\n      focus: Second.\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match="duplicate reviewer id 'security'"):
+        load_config(tmp_path)
+
+
+def test_load_config_rejects_unknown_reviewer_profile(tmp_path: Path) -> None:
+    path = tmp_path / ".apex-ray" / "config.yml"
+    path.parent.mkdir()
+    path.write_text(
+        "review:\n  reviewers:\n    - id: security\n      profile: missing\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        ConfigError,
+        match=r"reviewers\[security\]\.profile.*unknown profile 'missing'",
+    ):
+        load_config(tmp_path)
+
+
+def test_load_config_rejects_insecure_remote_api_base_url(tmp_path: Path) -> None:
+    path = tmp_path / ".apex-ray" / "config.yml"
+    path.parent.mkdir()
+    path.write_text(
+        "review:\n  llm:\n    provider: openai_compatible\n    api:\n      base_url: http://models.example.test/v1\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match="HTTPS"):
+        load_config(tmp_path)
+
+
+def test_load_config_rejects_duplicate_risk_rule_ids(tmp_path: Path) -> None:
+    path = tmp_path / ".apex-ray" / "config.yml"
+    path.parent.mkdir()
+    path.write_text(
+        "review:\n"
+        "  risk:\n"
+        "    rules:\n"
+        "      - id: boundary\n"
+        "        paths: [src/one/**]\n"
+        "      - id: boundary\n"
+        "        paths: [src/two/**]\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match="duplicate risk rule id 'boundary'"):
+        load_config(tmp_path)
 
 
 def test_load_config_parses_review_telemetry(tmp_path: Path) -> None:
@@ -158,7 +381,8 @@ def test_load_config_parses_pre_push_incremental_retry(tmp_path: Path) -> None:
         "    pre_push:\n"
         "      incremental_retry:\n"
         "        enabled: true\n"
-        "        state_path: .apex-ray/reports/custom-pre-push-state.json\n",
+        "        state_path: .apex-ray/reports/custom-pre-push-state.json\n"
+        "        max_resolution_calls_per_retry: 3\n",
         encoding="utf-8",
     )
 
@@ -166,6 +390,34 @@ def test_load_config_parses_pre_push_incremental_retry(tmp_path: Path) -> None:
 
     assert config.gates.pre_push.incremental_retry.enabled is True
     assert config.gates.pre_push.incremental_retry.state_path == ".apex-ray/reports/custom-pre-push-state.json"
+    assert config.gates.pre_push.incremental_retry.max_resolution_calls_per_retry == 3
+
+
+def test_load_config_parses_pre_push_auto_followup_pack_review_cap(tmp_path: Path) -> None:
+    path = tmp_path / ".apex-ray" / "config.yml"
+    path.parent.mkdir()
+    path.write_text(
+        "review:\n  gates:\n    pre_push:\n      auto_followup_p0: true\n      auto_followup_p0_max_pack_reviews: 3\n",
+        encoding="utf-8",
+    )
+
+    config, _ = load_config(tmp_path)
+
+    assert config.gates.pre_push.auto_followup_p0_max_pack_reviews == 3
+
+
+def test_load_config_rejects_zero_pre_push_auto_followup_pack_review_cap(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / ".apex-ray" / "config.yml"
+    path.parent.mkdir()
+    path.write_text(
+        "review:\n  gates:\n    pre_push:\n      auto_followup_p0_max_pack_reviews: 0\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match="auto_followup_p0_max_pack_reviews"):
+        load_config(tmp_path)
 
 
 def test_load_config_merges_local_override_after_shared_config(tmp_path: Path) -> None:

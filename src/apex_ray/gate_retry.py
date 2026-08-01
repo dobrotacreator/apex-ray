@@ -1,6 +1,7 @@
 import fnmatch
 import hashlib
 import json
+import os
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -15,12 +16,27 @@ from apex_ray.models import (
     ContextPack,
     Finding,
     FindingConfidence,
+    LLMAPIConfig,
+    LLMProviderName,
     PrePushGateConfig,
     ReviewConfig,
     ReviewReport,
 )
+from apex_ray.reviewers import effective_reviewers
 
-STATE_SCHEMA_VERSION = "pre-push-state/v1"
+STATE_SCHEMA_VERSION = "pre-push-state/v2"
+
+_API_PROVIDER_NAMES = frozenset(
+    {
+        LLMProviderName.OPENAI_API,
+        LLMProviderName.ANTHROPIC_API,
+        LLMProviderName.DEEPSEEK_API,
+        LLMProviderName.QWEN_API,
+        LLMProviderName.KIMI_API,
+        LLMProviderName.ZAI_API,
+        LLMProviderName.OPENAI_COMPATIBLE,
+    }
+)
 
 
 class CarriedFinding(ApexModel):
@@ -56,6 +72,7 @@ class PrePushGateState(ApexModel):
     coverage_debt: CoverageDebt = Field(default_factory=CoverageDebt)
     reviewed_context_pack_ids: list[str] = Field(default_factory=list)
     context_pack_fingerprints: dict[str, str] = Field(default_factory=dict)
+    report_fingerprint: str = ""
 
 
 @dataclass(frozen=True)
@@ -83,11 +100,31 @@ def write_pre_push_state(path: Path, state: PrePushGateState) -> None:
     path.write_text(state.model_dump_json(indent=2), encoding="utf-8")
 
 
-def config_fingerprint(config: ReviewConfig, gate_config: PrePushGateConfig) -> str:
+def config_fingerprint(
+    config: ReviewConfig,
+    gate_config: PrePushGateConfig,
+    *,
+    reviewer_ids: list[str] | None = None,
+) -> str:
+    review_config = config.model_dump(mode="json")
+    reviewers = effective_reviewers(config.reviewers, reviewer_ids)
+    # Reviewer execution is a set operation: requested/configured ordering only
+    # controls traversal order and must not invalidate otherwise reusable state.
+    # Replace the raw configured list so disabled or unselected reviewers do not
+    # accidentally participate in the effective retry identity.
+    review_config["reviewers"] = []
     payload = {
         "version": __version__,
-        "review_config": config.model_dump(mode="json"),
+        "review_config": review_config,
+        "reviewer_scope": {
+            "ids": sorted(reviewer.id for reviewer in reviewers),
+            "reviewers": sorted(
+                (reviewer.model_dump(mode="json") for reviewer in reviewers),
+                key=lambda item: item["id"],
+            ),
+        },
         "gate_policy": gate_config.model_dump(mode="json"),
+        "api_runtime_environment": _api_runtime_environment_identity(config),
         "prompt_versions": {
             "review": REVIEW_PROMPT_VERSION,
             "review_shallow": REVIEW_SHALLOW_PROMPT_VERSION,
@@ -96,6 +133,38 @@ def config_fingerprint(config: ReviewConfig, gate_config: PrePushGateConfig) -> 
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _api_runtime_environment_identity(config: ReviewConfig) -> dict[str, object]:
+    if not config.llm.enabled:
+        return {}
+    identities: dict[str, object] = {}
+    if config.llm.provider in _API_PROVIDER_NAMES:
+        identities["default"] = _api_environment_identity(config.llm.api)
+    for profile_id, profile in sorted(config.llm.profiles.items()):
+        provider = profile.provider or config.llm.provider
+        if provider not in _API_PROVIDER_NAMES:
+            continue
+        identities[f"profile:{profile_id}"] = _api_environment_identity(profile.api or config.llm.api)
+    return identities
+
+
+def _api_environment_identity(api: LLMAPIConfig) -> dict[str, object]:
+    identity: dict[str, object] = {
+        "allowed_hosts_sha256": _environment_value_digest(api.allowed_hosts_env),
+    }
+    if api.base_url_env:
+        identity["base_url_sha256"] = _environment_value_digest(api.base_url_env)
+    if api.headers_from_env:
+        identity["headers_sha256"] = {
+            header: _environment_value_digest(env_name) for header, env_name in sorted(api.headers_from_env.items())
+        }
+    return identity
+
+
+def _environment_value_digest(name: str) -> str | None:
+    value = os.environ.get(name, "")
+    return hashlib.sha256(value.encode("utf-8")).hexdigest() if value else None
 
 
 def check_incremental_eligibility(
@@ -118,7 +187,10 @@ def check_incremental_eligibility(
     if state.merge_base_sha != merge_base_sha:
         return IncrementalEligibility(False, "merge-base changed")
     if state.config_fingerprint != config_hash:
-        return IncrementalEligibility(False, "review config, rules, memory, prompt, model, or gate policy changed")
+        return IncrementalEligibility(
+            False,
+            "review config, reviewer scope, rules, memory, prompt, model, or gate policy changed",
+        )
     if not previous_head_exists:
         return IncrementalEligibility(False, "previous gate HEAD is not available locally")
     return IncrementalEligibility(True)
@@ -152,6 +224,7 @@ def build_pre_push_state(
         context_pack_fingerprints={
             pack.id: context_pack_fingerprint(pack.model_dump(mode="json")) for pack in report.context_packs
         },
+        report_fingerprint=review_report_fingerprint(report),
     )
 
 
@@ -291,6 +364,10 @@ def stale_carried_finding_reason(carried: CarriedFinding, repo_root: Path) -> st
 def context_pack_fingerprint(payload: object) -> str:
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def review_report_fingerprint(report: ReviewReport) -> str:
+    return context_pack_fingerprint(report.model_dump(mode="json"))
 
 
 def _carried_evidence_anchors_by_file(carried: CarriedFinding) -> dict[str, list[str]]:

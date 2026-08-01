@@ -29,11 +29,18 @@ from apex_ray.config import (
 from apex_ray.config import (
     refresh_agent_artifacts as refresh_project_agent_artifacts,
 )
-from apex_ray.discovery import discover_project
+from apex_ray.discovery import DiscoveryError, discover_project, discover_repo_root
 from apex_ray.invocation import ReviewOverrides, apply_review_overrides
 from apex_ray.llm import LLMProviderError
 from apex_ray.local_data import LOCAL_DATA_TOKEN, LocalDataPathError, resolve_config_path, resolve_runtime_config_paths
-from apex_ray.models import LLMCoverageMode, LLMProviderName, ReviewReport, TargetMode
+from apex_ray.models import (
+    DEFAULT_AUTO_FOLLOWUP_P0_MAX_PACK_REVIEWS,
+    LLMCoverageMode,
+    LLMProviderName,
+    ReviewConfig,
+    ReviewReport,
+    TargetMode,
+)
 from apex_ray.pipeline import continue_review_from_report, run_review_pipeline
 from apex_ray.report import (
     ReportArtifact,
@@ -42,8 +49,10 @@ from apex_ray.report import (
     load_review_report,
     render_html,
     render_markdown,
+    render_sarif,
 )
 from apex_ray.report.coverage import continue_command_for_pack
+from apex_ray.reviewers import ReviewerConfigError, effective_reviewers
 from apex_ray.telemetry import (
     TelemetryError,
     append_review_telemetry,
@@ -179,13 +188,20 @@ def doctor(
     config: Annotated[Path | None, typer.Option("--config", help="Path to config file.")] = None,
 ) -> None:
     """Check local Apex Ray prerequisites and project discovery."""
-    root = git.repo_root(Path.cwd()) or Path.cwd()
     try:
+        root = discover_repo_root(Path.cwd())
         review_config, config_path = load_config(root, config)
-    except ConfigError as exc:
+    except (ConfigError, DiscoveryError) as exc:
         raise typer.BadParameter(str(exc)) from exc
 
-    project = discover_project(root, ignored_patterns=review_config.ignore)
+    try:
+        project = discover_project(
+            root,
+            ignored_patterns=review_config.ignore,
+            timeout_seconds=review_config.analyzer.timeout_seconds,
+        )
+    except DiscoveryError as exc:
+        raise typer.BadParameter(str(exc)) from exc
     typer.echo("Apex Ray doctor")
     typer.echo(f"- Version: {__version__}")
     typer.echo("- Python runtime: 3.14 required")
@@ -291,6 +307,14 @@ def review(
         bool,
         typer.Option("--auto-followup", help="After the first pass, automatically review unreviewed P0 packs."),
     ] = False,
+    auto_followup_max_pack_reviews: Annotated[
+        int,
+        typer.Option(
+            "--auto-followup-max-pack-reviews",
+            min=1,
+            help="Maximum reviewer-pack assignments in the automatic P0 follow-up.",
+        ),
+    ] = DEFAULT_AUTO_FOLLOWUP_P0_MAX_PACK_REVIEWS,
     output: Annotated[Path, typer.Option("--output", help="Markdown report path.")] = Path(
         ".apex-ray/reports/review.md"
     ),
@@ -298,7 +322,15 @@ def review(
         ".apex-ray/reports/review.json"
     ),
     html_output: Annotated[Path | None, typer.Option("--html", help="Optional HTML report path.")] = None,
+    sarif_output: Annotated[
+        Path | None,
+        typer.Option("--sarif", help="Optional SARIF 2.1.0 report path."),
+    ] = None,
     config: Annotated[Path | None, typer.Option("--config", help="Path to config file.")] = None,
+    reviewer: Annotated[
+        list[str] | None,
+        typer.Option("--reviewer", help="Run only this configured reviewer. May be repeated."),
+    ] = None,
     llm: Annotated[bool, typer.Option("--llm", help="Run LLM review over generated context packs.")] = False,
     no_llm: Annotated[bool, typer.Option("--no-llm", help="Disable configured LLM review.")] = False,
     llm_provider: Annotated[str | None, typer.Option("--llm-provider", help="Override LLM provider.")] = None,
@@ -349,10 +381,14 @@ def review(
     ] = None,
 ) -> None:
     """Inspect a diff and write markdown/JSON reports."""
-    root = git.repo_root(Path.cwd()) or Path.cwd()
     try:
-        review_config, config_path = load_config(root, config)
-    except ConfigError as exc:
+        root = discover_repo_root(Path.cwd())
+        if continue_from is None:
+            review_config, config_path = load_config(root, config)
+        else:
+            review_config = ReviewConfig()
+            config_path = None
+    except (ConfigError, DiscoveryError) as exc:
         raise typer.BadParameter(str(exc)) from exc
 
     explicit_modes = sum(
@@ -385,13 +421,20 @@ def review(
         except ReviewReportLoadError as exc:
             raise typer.BadParameter(str(exc)) from exc
         root = Path(prior_report.project.root)
-        review_config = prior_report.config
+        if config is None:
+            review_config = prior_report.config
+        else:
+            try:
+                review_config, config_path = load_config(root, config)
+            except ConfigError as exc:
+                raise typer.BadParameter(str(exc)) from exc
     warn_outdated_agent_artifacts(root)
 
     output = resolve_output_path(root, output)
     json_output = resolve_output_path(root, json_output)
     html_output = resolve_output_path(root, html_output) if html_output is not None else None
-    ensure_distinct_outputs(output, json_output, html_output)
+    sarif_output = resolve_output_path(root, sarif_output) if sarif_output is not None else None
+    ensure_distinct_outputs(output, json_output, html_output, sarif_output)
 
     parsed_provider = None
     if llm_provider:
@@ -425,7 +468,16 @@ def review(
         ),
     )
     try:
+        if reviewer:
+            effective_reviewers(effective_config.reviewers, reviewer)
+    except ReviewerConfigError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    report_config = effective_config.model_copy(deep=True)
+    try:
         effective_config = resolve_runtime_config_paths(root, effective_config)
+        if prior_report is not None:
+            prior_report = prior_report.model_copy(deep=True)
+            prior_report.config = resolve_runtime_config_paths(root, prior_report.config)
     except LocalDataPathError as exc:
         raise typer.BadParameter(str(exc)) from exc
     telemetry_enabled = (
@@ -458,6 +510,7 @@ def review(
                 pack_ids=set(only_pack or []) or None,
                 only_unreviewed=only_unreviewed,
                 review_depth=continue_review_depth,  # type: ignore[arg-type]
+                reviewer_ids=reviewer,
             )
             if not selected_packs:
                 typer.echo("No continuation context packs matched the requested filters.")
@@ -471,6 +524,7 @@ def review(
                 effective_config,
                 base=target_base if target_mode == TargetMode.BASE else None,
                 config_path=config_path,
+                reviewer_ids=reviewer,
             )
             if auto_followup and report.llm_coverage.partial_severity == "critical":
                 report, selected_packs = continue_review_from_report(
@@ -479,20 +533,24 @@ def review(
                     config=effective_config,
                     residual_priorities={"p0"},
                     only_unreviewed=True,
+                    max_pack_reviews=auto_followup_max_pack_reviews,
                     review_depth="deep",
+                    reviewer_ids=reviewer,
                 )
                 if selected_packs:
                     typer.echo(f"Auto-followup reviewed {len(selected_packs)} residual P0 context pack(s).")
-    except LLMProviderError as exc:
+    except (DiscoveryError, LLMProviderError) as exc:
         raise typer.BadParameter(str(exc)) from exc
     duration_ms = round((time.monotonic() - started_monotonic) * 1000)
+    report.config = report_config
 
     _set_continue_commands(report, json_output)
 
     markdown_text = render_markdown(report)
     json_text = report.model_dump_json(indent=2)
     html_text = render_html(report) if html_output else None
-    ensure_apex_ignore_for_outputs(root, output, json_output, html_output)
+    sarif_text = render_sarif(report) if sarif_output else None
+    ensure_apex_ignore_for_outputs(root, output, json_output, html_output, sarif_output)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(markdown_text, encoding="utf-8")
     json_output.parent.mkdir(parents=True, exist_ok=True)
@@ -501,6 +559,9 @@ def review(
     if html_output:
         html_output.parent.mkdir(parents=True, exist_ok=True)
         html_output.write_text(html_text or "", encoding="utf-8")
+    if sarif_output:
+        sarif_output.parent.mkdir(parents=True, exist_ok=True)
+        sarif_output.write_text(sarif_text or "", encoding="utf-8")
 
     artifacts = [
         ReportArtifact(output, markdown_text),
@@ -508,6 +569,8 @@ def review(
     ]
     if html_output and html_text is not None:
         artifacts.append(ReportArtifact(html_output, html_text))
+    if sarif_output and sarif_text is not None:
+        artifacts.append(ReportArtifact(sarif_output, sarif_text))
     archive_path = archive_report_artifacts(
         root,
         effective_config.reports,
@@ -533,6 +596,8 @@ def review(
     typer.echo(f"Wrote {json_output}")
     if html_output:
         typer.echo(f"Wrote {html_output}")
+    if sarif_output:
+        typer.echo(f"Wrote {sarif_output}")
     if archive_path:
         typer.echo(f"Archived report: {archive_path}")
     if telemetry_enabled:
@@ -541,7 +606,12 @@ def review(
 
 def _set_continue_commands(report: ReviewReport, json_output: Path) -> None:
     for todo in report.llm_coverage.coverage_todos:
-        todo.suggested_command = continue_command_for_pack(todo.context_pack_id, str(json_output))
+        todo.suggested_command = continue_command_for_pack(
+            todo.context_pack_id,
+            str(json_output),
+            todo.reviewer_id,
+            json_output_path=str(json_output),
+        )
 
 
 def _load_diff(

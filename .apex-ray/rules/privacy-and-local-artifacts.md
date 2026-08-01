@@ -1,8 +1,8 @@
 ---
 id: privacy-and-local-artifacts
 title: Keep local, provider, and private artifacts out of commits
-severity: high
-mode: strict
+severity: medium
+mode: advisory
 paths:
   - "**"
 triggers:

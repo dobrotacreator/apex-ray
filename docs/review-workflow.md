@@ -22,7 +22,8 @@ apex-ray review \
   --llm \
   --output .apex-ray/reports/review.md \
   --json .apex-ray/reports/review.json \
-  --html .apex-ray/reports/review.html
+  --html .apex-ray/reports/review.html \
+  --sarif .apex-ray/reports/review.sarif
 ```
 
 ## Review Modes
@@ -35,7 +36,8 @@ apex-ray review --worktree --no-llm
 
 It still parses the diff, runs available language analyzers, builds context packs, and reports review coverage surfaces.
 
-LLM mode sends selected context packs to the configured local CLI provider:
+LLM mode sends selected context packs to the configured provider, which may be
+a local CLI, a built-in direct API, or a custom compatible endpoint:
 
 ```bash
 apex-ray review --worktree --llm
@@ -50,6 +52,7 @@ Apex Ray writes:
 - Markdown for local reading.
 - JSON for durable automation and continuation.
 - Optional HTML for browser-based inspection.
+- Optional SARIF 2.1.0 for GitHub code scanning and other compatible systems.
 
 Reports include findings, analyzer warnings, selected context packs, skipped packs, LLM routes, cache usage, token estimates, coverage status, and continuation commands.
 
@@ -87,8 +90,17 @@ apex-ray review \
 Continue with automatic P0 follow-up after a first pass:
 
 ```bash
-apex-ray review --base main --llm --auto-followup
+apex-ray review \
+  --base main \
+  --llm \
+  --auto-followup \
+  --auto-followup-max-pack-reviews 16
 ```
+
+The automatic pass is capped by reviewer-pack assignment, so a context pack
+matched by two specialist reviewers consumes two assignments. Explicit
+`--continue-from` commands remain available when you intentionally want to
+process more residual work.
 
 ## Pre-Push Gate
 
@@ -102,13 +114,25 @@ Default gate behavior:
 - blocks on `critical` partial coverage;
 - prints live progress to stderr and a compact blocking summary to stdout.
 
+The default automatic P0 follow-up is limited to 16 primary reviewer-pack
+assignments. Globally unreviewed P0 work and unfinished assignments for
+reviewers marked `required: true` remain critical coverage debt and block the
+gate. Optional-specialist debt remains visible as a warning. Retries, provider
+fallbacks, and finding verification may add requests.
+
 Run it manually before relying on hook behavior:
 
 ```bash
 apex-ray gate pre-push
 ```
 
-If repeated push attempts review the same packs, Apex Ray uses the LLM response cache and analyzer caches where available to reduce repeated work.
+If a bounded pass leaves blocking P0 debt, the next eligible incremental
+attempt resumes the validated pre-push report for another bounded pass. The
+printed continuation commands also write back to that report, so a completed
+manual continuation clears the carried debt. If commits were added in the
+meantime, Apex Ray requires one additional gate run to review that pending
+delta. Response and analyzer caches reduce repeated work throughout this
+process.
 
 ### Local False Positives
 
@@ -156,7 +180,17 @@ apex-ray review --worktree --llm --no-cache
 
 Without `--llm`, Apex Ray stays local and deterministic.
 
-With `--llm`, Apex Ray sends selected diff and context-pack content to the configured local CLI provider. Review that provider's privacy and retention policy before using Apex Ray on private code. Caches, telemetry, and archived reports are local files, but they may contain repository paths, model names, finding counts, provider metadata, and source snippets.
+With `--llm`, Apex Ray sends selected diff and context-pack content to the
+configured provider. A local CLI controls its own network and account boundary;
+a direct API provider sends HTTPS requests to its configured service endpoint.
+Review the applicable CLI, API, gateway, account, privacy, and retention policy
+before using Apex Ray on private code. Caches, telemetry, and archived reports
+are local files, while CI artifacts and SARIF follow the retention and access
+policy of the CI platform. All may contain repository paths, model names,
+finding counts, provider metadata, and source snippets.
+
+For a pull-request workflow with protected API secrets, reviewer matrices,
+artifacts, and SARIF upload, see [GitHub Actions](github-actions.md).
 
 ## Common Troubleshooting
 
@@ -171,5 +205,6 @@ Typical issues:
 - `Config: not found`: run `apex-ray init` in the target repository or pass `--config`.
 - `Python analyzer available: false`: reinstall Apex Ray or run from a healthy source checkout. The Python analyzer is built in and should normally be available whenever the CLI imports successfully.
 - `TypeScript analyzer built: false`: reinstall the published package, or in a source checkout run the TypeScript analyzer build from [Development](development.md).
-- Provider command not found: install the configured Codex CLI or Claude Code CLI, or override the executable path in `.apex-ray/config.local.yml`.
+- Provider command not found: for a CLI provider, install the configured Codex CLI or Claude Code CLI, or override its executable path in `.apex-ray/config.local.yml`.
+- API credential or endpoint rejected: check the selected environment-variable names and, in CI, `APEX_RAY_API_ALLOWED_HOSTS` plus the role-specific `APEX_RAY_API_ALLOWED_BASE_URL_ENV_VARS`, `APEX_RAY_API_ALLOWED_API_KEY_ENV_VARS`, and `APEX_RAY_API_ALLOWED_HEADER_ENV_VARS` policies. For a custom CI orchestrator, set trusted job variable `APEX_RAY_CI=true`.
 - Hook cannot find `apex-ray`: install Apex Ray on the user `PATH` used by git hooks, or update the hook environment.

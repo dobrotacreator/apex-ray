@@ -1,17 +1,28 @@
-import json
+from collections.abc import Callable
 from typing import Literal
 
-from apex_ray.llm import estimate_review_input_tokens
-from apex_ray.memory import pack_prompt_payload
+from apex_ray.llm.prompts import (
+    ReviewPromptCache,
+    ReviewPromptCacheKey,
+    render_review_prompt,
+    review_prompt_cache_key,
+    review_prompt_payload_chars,
+)
+from apex_ray.llm.usage import estimate_provider_input_tokens
 from apex_ray.models import (
     ChangedFile,
     ContextPack,
     FileKind,
     LLMContextSelection,
     LLMCoverageMode,
+    LLMProviderName,
     LLMSelectionStageSummary,
     ReviewReport,
 )
+from apex_ray.report.coverage_breakdown import pack_residual_priority, pack_review_slice
+from apex_ray.risk import risk_signal_score
+
+ProviderSelector = LLMProviderName | str | Callable[[ContextPack], LLMProviderName | str | None] | None
 
 
 def select_continuation_context_packs(
@@ -32,7 +43,10 @@ def select_continuation_context_packs(
         if pack_ids is not None and pack.id not in pack_ids:
             continue
         if residual_priorities is not None:
-            priority = status.priority if status is not None else None
+            priority = pack_residual_priority(
+                pack,
+                status.priority if status is not None else None,
+            )
             if priority not in residual_priorities:
                 continue
         if slices is not None:
@@ -92,32 +106,21 @@ def merge_continuation_selection(
 
 
 def pack_review_slice_for_continuation(pack: ContextPack) -> str:
-    if any(str(signal.severity) == "high" for signal in pack.risk_signals):
-        return "high_risk"
-    if any(str(rule.mode) == "strict" for rule in pack.rule_matches):
-        return "high_risk"
-    if any(str(rule.severity) in {"critical", "high"} for rule in pack.rule_matches):
-        return "high_risk"
-    if pack.file_kind in {FileKind.SCHEMA, FileKind.CONFIG, FileKind.MIGRATION, FileKind.DEPENDENCY}:
-        return "contracts_config"
-    if pack.file_kind == FileKind.SOURCE:
-        return "source"
-    if pack.file_kind == FileKind.TEST:
-        return "tests"
-    if pack.file_kind == FileKind.DOCS:
-        return "docs"
-    return "other"
+    return pack_review_slice(pack)
 
 
 def select_llm_context_packs(
     context_packs: list[ContextPack],
     changed_files: list[ChangedFile],
     max_packs: int | None = None,
+    *,
+    priority_by_pack_id: dict[str, str] | None = None,
 ) -> list[ContextPack]:
     selected_indexes = _select_llm_context_pack_indexes(
         list(enumerate(context_packs)),
         changed_files,
         max_packs,
+        priority_by_pack_id=priority_by_pack_id,
     )
     return [context_packs[index] for index in selected_indexes]
 
@@ -131,16 +134,32 @@ def plan_llm_context_selection(
     max_input_tokens: int | None = None,
     max_pack_chars: int | None = None,
     coverage_mode: LLMCoverageMode | str = LLMCoverageMode.BALANCED,
+    provider: ProviderSelector = None,
+    rendered_prompts: ReviewPromptCache | None = None,
 ) -> LLMContextSelection:
     mode = LLMCoverageMode(coverage_mode)
+    initial_rendered_prompt_keys: set[ReviewPromptCacheKey] = (
+        set(rendered_prompts) if rendered_prompts is not None else set()
+    )
     deep_over_budget_ids = {
         pack.id for pack in context_packs if max_pack_chars is not None and pack.stats.estimated_chars > max_pack_chars
     }
-    shallow_over_budget_ids = {
-        pack.id
-        for pack in context_packs
-        if (max_pack_chars is not None and _review_payload_chars(pack, review_depth="shallow") > max_pack_chars)
-    }
+    shallow_over_budget_ids = (
+        set()
+        if mode == LLMCoverageMode.FAST
+        else {
+            pack.id
+            for pack in context_packs
+            if (
+                max_pack_chars is not None
+                and _review_payload_chars(
+                    pack,
+                    review_depth="shallow",
+                )
+                > max_pack_chars
+            )
+        }
+    )
     effective_over_budget_ids = (
         deep_over_budget_ids if mode == LLMCoverageMode.FAST else deep_over_budget_ids & shallow_over_budget_ids
     )
@@ -152,14 +171,12 @@ def plan_llm_context_selection(
     ]
     stages: list[LLMSelectionStageSummary] = []
     token_budget_remaining = max_input_tokens
-    deep_cap = max_deep_packs if max_deep_packs is not None else max_packs
+    deep_cap = _bounded_deep_cap(max_packs, max_deep_packs)
     deep_candidate_indexes = _select_llm_context_pack_indexes(
         deep_reviewable_indexed,
         changed_files,
         deep_cap,
     )
-    if mode == LLMCoverageMode.EXHAUSTIVE and max_input_tokens is None:
-        deep_candidate_indexes = [index for index, _pack in deep_reviewable_indexed]
 
     deep_selected_indexes, deep_tokens = _select_indexes_with_token_budget(
         deep_candidate_indexes,
@@ -167,6 +184,8 @@ def plan_llm_context_selection(
         changed_files,
         review_depth="deep",
         token_budget=token_budget_remaining,
+        provider=provider,
+        rendered_prompts=rendered_prompts,
     )
     if token_budget_remaining is not None:
         token_budget_remaining = max(0, token_budget_remaining - deep_tokens)
@@ -187,23 +206,33 @@ def plan_llm_context_selection(
 
     shallow_selected_indexes: list[int] = []
     shallow_tokens = 0
+    shallow_candidate_indexes: list[int] = []
+    shallow_budget_candidate_indexes: list[int] = []
     if mode != LLMCoverageMode.FAST:
         deep_selected_index_set = set(deep_selected_indexes)
         shallow_candidate_indexes = [
             index for index, _pack in shallow_reviewable_indexed if index not in deep_selected_index_set
         ]
+        shallow_cap = None if max_packs is None else max(0, max_packs - len(deep_selected_indexes))
+        shallow_budget_candidate_indexes = _select_llm_context_pack_indexes(
+            [(index, context_packs[index]) for index in shallow_candidate_indexes],
+            changed_files,
+            shallow_cap,
+        )
         shallow_selected_indexes, shallow_tokens = _select_indexes_with_token_budget(
-            shallow_candidate_indexes,
+            shallow_budget_candidate_indexes,
             context_packs,
             changed_files,
             review_depth="shallow",
             token_budget=token_budget_remaining,
+            provider=provider,
+            rendered_prompts=rendered_prompts,
         )
         shallow_selected_ids = [context_packs[index].id for index in sorted(shallow_selected_indexes)]
         stages.append(
             LLMSelectionStageSummary(
                 stage="shallow",
-                budget_packs=None,
+                budget_packs=shallow_cap,
                 budget_tokens=token_budget_remaining,
                 selected_estimated_tokens=shallow_tokens,
                 selected_context_pack_ids=shallow_selected_ids,
@@ -228,9 +257,7 @@ def plan_llm_context_selection(
     if mode != LLMCoverageMode.FAST:
         shallow_selected_index_set = set(shallow_selected_indexes)
         token_budget_index_set.update(
-            index
-            for index, _pack in shallow_reviewable_indexed
-            if index not in deep_selected_index_set and index not in shallow_selected_index_set
+            index for index in shallow_budget_candidate_indexes if index not in shallow_selected_index_set
         )
     token_budget_ids = {
         context_packs[index].id for index in token_budget_index_set if context_packs[index].id not in selected_id_set
@@ -245,6 +272,13 @@ def plan_llm_context_selection(
         )
         for pack_id in unselected_ids
     }
+    _retain_selected_rendered_prompts(
+        rendered_prompts,
+        context_packs,
+        deep_selected_index_set,
+        set(shallow_selected_indexes),
+        initial_rendered_prompt_keys,
+    )
     return LLMContextSelection(
         total_context_pack_ids=total_ids,
         selected_context_pack_ids=selected_ids,
@@ -260,27 +294,99 @@ def plan_llm_context_selection(
     )
 
 
+def _bounded_deep_cap(max_packs: int | None, max_deep_packs: int | None) -> int | None:
+    if max_packs is None:
+        return max_deep_packs
+    if max_deep_packs is None:
+        return max_packs
+    return min(max_packs, max_deep_packs)
+
+
 def _review_payload_chars(
     pack: ContextPack,
     *,
     review_depth: Literal["deep", "shallow"],
 ) -> int:
-    payload = pack_prompt_payload(pack, "review", depth=review_depth)
-    payload.pop("stats", None)
-    return len(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+    # Sizing can touch every matching pack before pack-cap narrowing. Keep
+    # those transient payloads out of the render cache so memory stays
+    # bounded by review candidates rather than repository size.
+    return review_prompt_payload_chars(
+        pack,
+        review_depth=review_depth,
+    )
+
+
+def _retain_selected_rendered_prompts(
+    rendered_prompts: ReviewPromptCache | None,
+    context_packs: list[ContextPack],
+    deep_selected_indexes: set[int],
+    shallow_selected_indexes: set[int],
+    initial_keys: set[ReviewPromptCacheKey],
+) -> None:
+    if rendered_prompts is None:
+        return
+    retained_keys = {review_prompt_cache_key(context_packs[index], "deep") for index in deep_selected_indexes}
+    retained_keys.update(review_prompt_cache_key(context_packs[index], "shallow") for index in shallow_selected_indexes)
+    for cache_key in list(rendered_prompts):
+        if cache_key not in initial_keys and cache_key not in retained_keys:
+            rendered_prompts.pop(cache_key, None)
 
 
 def _select_llm_context_pack_indexes(
     indexed_context_packs: list[tuple[int, ContextPack]],
     changed_files: list[ChangedFile],
     max_packs: int | None,
+    *,
+    priority_by_pack_id: dict[str, str] | None = None,
 ) -> list[int]:
     if max_packs is None or len(indexed_context_packs) <= max_packs:
+        return [index for index, _pack in indexed_context_packs]
+    if max_packs <= 0:
+        return []
+
+    selected_indexes: list[int] = []
+    for priority in ("p0", "p1", "p2"):
+        remaining = max_packs - len(selected_indexes)
+        if remaining <= 0:
+            break
+        priority_packs = [
+            item
+            for item in indexed_context_packs
+            if pack_residual_priority(
+                item[1],
+                (priority_by_pack_id or {}).get(item[1].id),
+            )
+            == priority
+        ]
+        selected_indexes.extend(
+            _select_llm_context_pack_indexes_within_priority(
+                priority_packs,
+                changed_files,
+                remaining,
+                preferred_pack_ids={
+                    pack.id for _index, pack in priority_packs if (priority_by_pack_id or {}).get(pack.id) == priority
+                },
+            )
+        )
+    return sorted(selected_indexes)
+
+
+def _select_llm_context_pack_indexes_within_priority(
+    indexed_context_packs: list[tuple[int, ContextPack]],
+    changed_files: list[ChangedFile],
+    max_packs: int,
+    *,
+    preferred_pack_ids: set[str],
+) -> list[int]:
+    if len(indexed_context_packs) <= max_packs:
         return [index for index, _pack in indexed_context_packs]
     kind_by_path = {file.path: file.file_kind for file in changed_files}
     indexed = list(indexed_context_packs)
     indexed.sort(
-        key=lambda item: _llm_pack_priority(item[1], kind_by_path, item[0]),
+        key=lambda item: (
+            item[1].id in preferred_pack_ids,
+            _llm_pack_priority(item[1], kind_by_path, item[0]),
+        ),
         reverse=True,
     )
     groups: dict[str, list[tuple[int, ContextPack]]] = {}
@@ -342,8 +448,7 @@ def _select_llm_context_pack_indexes(
             break
         select(index, pack)
 
-    selected_indexes = sorted(selected_indexes)
-    return selected_indexes
+    return sorted(selected_indexes)
 
 
 def _select_indexes_with_token_budget(
@@ -353,13 +458,25 @@ def _select_indexes_with_token_budget(
     *,
     review_depth: Literal["deep", "shallow"],
     token_budget: int | None,
+    provider: ProviderSelector,
+    rendered_prompts: ReviewPromptCache | None,
 ) -> tuple[list[int], int]:
     if not candidate_indexes:
         return [], 0
     candidate_set = set(candidate_indexes)
     if token_budget is None:
         tokens = sum(
-            estimate_review_input_tokens(context_packs[index], review_depth=review_depth) for index in candidate_indexes
+            estimate_provider_input_tokens(
+                len(
+                    render_review_prompt(
+                        context_packs[index],
+                        review_depth=review_depth,
+                        cache=rendered_prompts,
+                    ).text
+                ),
+                provider=_provider_for_pack(provider, context_packs[index]),
+            )
+            for index in candidate_indexes
         )
         return list(candidate_indexes), tokens
     if token_budget <= 0:
@@ -375,12 +492,28 @@ def _select_indexes_with_token_budget(
     selected: list[int] = []
     used_tokens = 0
     for index, pack in prioritized:
-        pack_tokens = estimate_review_input_tokens(pack, review_depth=review_depth)
+        pack_tokens = estimate_provider_input_tokens(
+            len(
+                render_review_prompt(
+                    pack,
+                    review_depth=review_depth,
+                    cache=rendered_prompts,
+                ).text
+            ),
+            provider=_provider_for_pack(provider, pack),
+        )
         if used_tokens + pack_tokens > token_budget:
             continue
         selected.append(index)
         used_tokens += pack_tokens
     return selected, used_tokens
+
+
+def _provider_for_pack(
+    provider: ProviderSelector,
+    pack: ContextPack,
+) -> LLMProviderName | str | None:
+    return provider(pack) if callable(provider) else provider
 
 
 def _initial_llm_breadth_budget(max_packs: int, file_count: int) -> int:
@@ -390,7 +523,7 @@ def _initial_llm_breadth_budget(max_packs: int, file_count: int) -> int:
 
 
 def _is_high_value_extra_pack(pack: ContextPack) -> bool:
-    if any(str(signal.severity) == "high" for signal in pack.risk_signals):
+    if any(str(signal.severity) in {"critical", "high"} for signal in pack.risk_signals):
         return True
     if any(str(rule.mode) == "strict" for rule in pack.rule_matches):
         return True
@@ -401,13 +534,41 @@ def _llm_pack_priority(
     pack: ContextPack,
     kind_by_path: dict[str, FileKind],
     original_index: int,
-) -> tuple[int, int, int, int, int, int]:
+) -> tuple[int, int, int, int, int, int, int, int]:
     file_kind = kind_by_path.get(pack.file, pack.file_kind)
+    critical_risk = sum(1 for signal in pack.risk_signals if str(signal.severity) == "critical")
     high_risk = sum(1 for signal in pack.risk_signals if str(signal.severity) == "high")
     medium_risk = sum(1 for signal in pack.risk_signals if str(signal.severity) == "medium")
     strict_rules = sum(1 for rule in pack.rule_matches if str(rule.mode) == "strict")
     severe_rules = sum(1 for rule in pack.rule_matches if str(rule.severity) in {"critical", "high"})
-    risk_score = high_risk * 1000 + strict_rules * 800 + severe_rules * 500 + medium_risk * 100
+    configured_score = sum(risk_signal_score(signal) for signal in pack.risk_signals)
+    severity_rank = {
+        "critical": 4,
+        "high": 3,
+        "medium": 2,
+        "low": 1,
+    }
+    risk_severity_band = max(
+        (severity_rank.get(str(item.severity), 0) for item in [*pack.risk_signals, *pack.rule_matches]),
+        default=0,
+    )
+    explicit_cross_kind_priority = (
+        critical_risk * 3000
+        + strict_rules * 2000
+        + sum(
+            1500 + risk_signal_score(signal)
+            for signal in pack.risk_signals
+            if signal.source == "project" and str(signal.severity) in {"critical", "high"}
+        )
+    )
+    risk_score = (
+        critical_risk * 2000
+        + high_risk * 1000
+        + strict_rules * 800
+        + severe_rules * 500
+        + medium_risk * 100
+        + configured_score
+    )
     review_tier = 1 if file_kind == FileKind.TEST else 2
     kind_score = {
         FileKind.SOURCE: 5,
@@ -418,6 +579,8 @@ def _llm_pack_priority(
         FileKind.TEST: 1,
     }.get(file_kind, 2)
     return (
+        risk_severity_band,
+        explicit_cross_kind_priority,
         review_tier,
         risk_score,
         kind_score,

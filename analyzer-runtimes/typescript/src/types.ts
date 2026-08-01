@@ -1,5 +1,7 @@
 import ts from "typescript";
 
+import type { StableFileIdentity } from "./utils.js";
+
 export type SymbolKind =
   | "function"
   | "class"
@@ -11,6 +13,7 @@ export type SymbolKind =
   | "enum-member"
   | "unknown";
 export type ReferenceKind = "call" | "callee" | "contract" | "import" | "metadata" | "read" | "write" | "type" | "unknown";
+export type SourceFilePredicate = (source: ts.SourceFile) => boolean;
 
 export interface AnalyzerSymbol {
   name: string;
@@ -30,6 +33,13 @@ export interface Reference {
   line: number;
   endLine?: number;
   text: string;
+  kind: ReferenceKind;
+}
+
+export interface IndexedReference {
+  file: string;
+  line: number;
+  endLine?: number;
   kind: ReferenceKind;
 }
 
@@ -92,6 +102,7 @@ export interface Args {
   refreshIndexCache: boolean;
   largeChangeSetSize: number | null;
   analysisTimeBudgetMs: number | null;
+  fileManifestPath?: string | null;
 }
 
 export interface DeletedLine {
@@ -111,6 +122,7 @@ export interface PackageInfo {
   exports: unknown;
   main: string | null;
   module: string | null;
+  tsconfig: string | null;
   types: string | null;
   typings: string | null;
 }
@@ -118,15 +130,21 @@ export interface PackageInfo {
 export interface RepoIndex {
   files: RepoFileIndexEntry[];
   packageByFile: Map<string, PackageInfo | null>;
+  fileIdentities?: Map<string, StableFileIdentity>;
   cacheStats: RepoIndexCacheStats | null;
+  partial?: boolean;
+  markModuleResolutionPartial?: () => void;
 }
 
 export interface RepoFileIndexEntry {
   absPath: string;
   relPath: string;
   relLower: string;
+  dev: number;
+  ino: number;
   size: number;
   mtimeMs: number;
+  ctimeMs: number;
   imports: ImportIndexEntry[];
   exports: ExportIndexEntry[];
   identifiers: IdentifierIndexEntry[];
@@ -177,7 +195,7 @@ export interface CommonJsExportEntry {
 export interface IdentifierIndexEntry {
   name: string;
   namespaceQualifier: string | null;
-  reference: Reference;
+  reference: IndexedReference;
 }
 
 export interface ReceiverIndexEntry {
@@ -225,6 +243,8 @@ export interface ExportedNamesForTarget {
 export interface TsConfigPathAliases {
   basePath: string;
   mappings: TsConfigPathMapping[];
+  partial?: boolean;
+  retainedBytes?: number;
 }
 
 export interface TsConfigPathMapping {
@@ -258,13 +278,23 @@ export interface RepoIndexCacheStats {
 
 export interface RepoIndexCacheFile {
   version: number;
+  inventoryFingerprint: string | null;
   files: RepoIndexCacheFileEntry[];
+}
+
+export interface RepoIndexCacheWriteResult {
+  written: boolean;
+  error: string | null;
+  limited?: boolean;
 }
 
 export interface RepoIndexCacheFileEntry {
   relPath: string;
+  dev: number;
+  ino: number;
   size: number;
   mtimeMs: number;
+  ctimeMs: number;
   imports: ImportIndexEntry[];
   exports: ExportIndexEntry[];
   identifiers: IdentifierIndexEntry[];

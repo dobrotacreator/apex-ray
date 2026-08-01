@@ -34,19 +34,24 @@ review:
     enabled: true
     provider: codex_cli
     effort: medium
+    jobs: 2
     coverage_mode: balanced
-    max_packs: 64
-    max_deep_packs: 48
-    max_input_tokens: 300000
+    max_packs: 48
+    max_deep_packs: 16
+    max_input_tokens: 180000
+    max_consecutive_provider_failures: 3
     verify: true
     cache_dir: ${local_data}/cache/llm
   telemetry:
     enabled: true
     path: ${local_data}/telemetry/review-runs.jsonl
+    path_mode: anonymized
   reports:
     archive: true
     archive_dir: ${local_data}/reports/runs
     retention: 20
+    compression: auto
+    compression_min_bytes: 65536
   triage:
     enabled: true
     state_path: ${local_data}/triage/suppressions.json
@@ -64,6 +69,7 @@ review:
       max_stdout_findings: 10
       stdout_format: agent
       auto_followup_p0: true
+      auto_followup_p0_max_pack_reviews: 16
       progress: auto
       progress_interval_seconds: 5
 ```
@@ -164,6 +170,127 @@ Memory cards are Markdown files with YAML frontmatter under `.apex-ray/memory/`.
 
 Use memory for known false positives, recurring review patterns, severity calibration, and project-specific vocabulary.
 
+## Project Risk Policy
+
+Built-in signals identify common auth, persistence, API, shell, I/O, schema,
+migration, validation, and concurrency surfaces. `review.risk.rules` adds
+project-specific, explainable risk without hard-coding domain knowledge into
+Apex Ray:
+
+```yaml
+review:
+  risk:
+    built_in_enabled: true
+    rules:
+      - id: settlement-boundary
+        title: Money movement and ledger settlement
+        severity: critical
+        score: 98
+        paths:
+          - "src/settlement/**"
+          - "src/ledger/**"
+        exclude_paths:
+          - "**/*.test.ts"
+        languages: [typescript]
+        file_kinds: [source, migration]
+        statuses: [added, modified, renamed]
+        text:
+          - transfer
+          - rounding
+          - idempotency
+        risk:
+          - persistence
+          - external_io
+        categories: [financial, money_movement]
+        reviewer_tags: [finance]
+        guidance: Preserve authorization, idempotency, currency precision, and ledger balance.
+```
+
+Path/language/kind/status filters are combined with AND. `text` tokens match
+changed lines and localize the signal to those lines. `risk` tokens match
+built-in signals on the file. Within `text` and `risk`, any listed token can
+trigger the rule. If neither trigger list is present, matching scope alone
+creates one file-level signal.
+
+`severity` drives residual P0/P1 coverage. `score` (0–100) refines pack
+priority within that policy; an explicit zero is respected. Categories,
+reviewer tags, and guidance are preserved in context packs and reports so an
+agent can explain why a change was routed and what invariant to inspect.
+
+Keep these rules about business impact, not coding style. Use project rules
+and memory cards for detailed behavioral constraints; use risk policy to
+decide attention, depth, and specialist routing.
+
+## Focused Reviewers
+
+`review.reviewers` runs independent passes with distinct focus, scope, model
+profile, verification profile, depth, and budget. Findings retain reviewer
+provenance and duplicate findings from multiple specialists are merged
+without losing attribution.
+
+```yaml
+review:
+  reviewers:
+    - id: correctness
+      name: General correctness
+      focus: Diff-caused behavioral regressions and concrete failure modes.
+      max_packs: 48
+      max_deep_packs: 16
+
+    - id: security
+      name: Security reviewer
+      focus: Authentication, authorization, injection, secrets, SSRF, and trust boundaries.
+      instructions:
+        - Report an exploit path and affected trust boundary.
+        - Do not duplicate generic maintainability feedback.
+      paths:
+        - "src/**"
+        - ".github/workflows/**"
+      exclude_paths:
+        - "**/*.test.ts"
+      risk: [auth, shell, external_io]
+      risk_tags: [security]
+      profile: broad
+      verify_profile: strong
+      review_depth: balanced
+      max_packs: 20
+      max_deep_packs: 10
+      max_input_tokens: 120000
+      verify: true
+      required: true
+
+    - id: finance
+      name: Financial risk reviewer
+      focus: Money movement, precision, idempotency, reconciliation, and loss exposure.
+      risk_tags: [finance]
+      review_depth: deep
+      max_packs: 12
+```
+
+`paths`, `exclude_paths`, `file_kinds`, `risk`, and `risk_tags` scope which
+context packs a reviewer receives. A reviewer with no scope filters sees all
+packs. `review_depth` is:
+
+- `balanced`: selected high-value packs are deep-reviewed and remaining
+  selected packs receive the compact shallow pass;
+- `deep`: only the deep selection is run;
+- `shallow`: all selected packs receive the compact pass.
+
+Set `required: true` when that specialist must finish every selected
+reviewer-pack assignment for the coverage quality gate to pass. Unfinished
+assignments for an optional reviewer remain visible in reviewer coverage and
+continuation todos, but are warnings rather than blocking debt.
+
+Run every enabled reviewer by default, or select one or more explicitly:
+
+```bash
+apex-ray review --base main --reviewer security --reviewer finance
+apex-ray gate pre-push --reviewer security
+```
+
+Repeated `--reviewer` is useful for local investigation and CI matrices.
+Unknown and disabled reviewer IDs fail before provider calls.
+
 ## Coverage
 
 `review.llm.coverage_mode` controls how much of a diff receives LLM review:
@@ -176,12 +303,24 @@ Reports show partial severity, reviewed/unreviewed packs, residual P0/P1 work, a
 
 Tune coverage with:
 
-- `max_packs`: total LLM-reviewable pack cap.
+- `max_packs`: hard total cap across deep and shallow passes.
 - `max_deep_packs`: cap for full deep review.
 - `max_input_tokens`: approximate total LLM review input-token budget.
 - `coverage_mode`: breadth/depth strategy.
+- `max_consecutive_provider_failures`: open the provider circuit after this
+  many consecutive infrastructure failures; auth and quota failures open it
+  immediately.
 
 Prefer `balanced` for normal team use. Use `fast` for cheap smoke review and `exhaustive` for high-risk changes when provider cost and latency are acceptable.
+
+Token estimates include provider-specific prompt/scaffold overhead. They are
+deliberately conservative for CLI providers because observed CLI usage
+includes a fixed agent scaffold that a simple characters/4 estimate misses.
+Provider-reported usage remains authoritative in reports and telemetry.
+
+See [Tuning](tuning.md) for TypeScript-oriented starting presets and a
+measurement loop for pack caps, route escalation, risk policy, specialist
+reviewers, concurrency, and CI cost.
 
 ## Reports
 
@@ -195,9 +334,23 @@ review:
     archive: true
     archive_dir: ${local_data}/reports/runs
     retention: 20
+    compression: auto
+    compression_min_bytes: 65536
 ```
 
-`retention` keeps the newest run directories and prunes older ones. Set `retention: null` to disable pruning. Report archives may contain source snippets, findings, file paths, and provider metadata; keep generated reports ignored unless the team intentionally curates a specific artifact.
+`retention` keeps the newest run directories and prunes older ones. Set
+`retention: null` to disable pruning. Newly generated configurations explicitly
+use `compression: auto`, which stores artifacts at
+or above the threshold as deterministic `.gz` files and records encoding and
+sizes in the versioned `manifest.json`; `none` and `gzip` force either behavior. Older
+configurations that omit `compression` retain the legacy uncompressed behavior. Small
+archives remain directly readable.
+
+Report archives may contain source snippets, findings, file paths, and
+provider metadata; keep generated reports ignored unless the team
+intentionally curates a specific artifact. Manifest source paths are stored
+relative to the repository where possible. External sources use opaque IDs,
+and same-named artifacts are stored under distinct filenames.
 
 ## Pre-Push Gate
 
@@ -211,6 +364,16 @@ Default behavior:
 - block on failed LLM coverage quality gate;
 - block on `critical` partial coverage;
 - print live progress to stderr and a compact, agent-readable summary to stdout.
+
+When `auto_followup_p0` is enabled, the gate can make one deep continuation
+pass over residual P0 work. `auto_followup_p0_max_pack_reviews` limits primary
+reviewer-pack assignments in that pass (the default is `16`), including when
+several reviewers match the same context pack. Globally unreviewed P0 work and
+deferred assignments for reviewers marked `required: true` remain blocking
+coverage debt. Deferred optional-specialist assignments remain visible as
+warnings and continuation todos. This bounds API or subscription use without
+hiding unfinished work. Provider retries, fallbacks, and finding verification
+can add requests beyond this primary-review cap.
 
 Set `review.gates.pre_push.enabled: false` in local config to skip the hook gate. Prefer local config for personal cost/model/provider differences instead of editing the shared hook command.
 
@@ -273,16 +436,36 @@ review:
       incremental_retry:
         enabled: true
         state_path: .apex-ray/reports/pre-push-state.json
+        max_resolution_calls_per_retry: 8
 ```
 
 The first run still reviews `review.base...HEAD`. Later eligible retry runs review only `previous_gate_head..HEAD`, carry forward unresolved blocking findings and coverage debt, and write combined gate state to `state_path`.
+
+`max_resolution_calls_per_retry` bounds sequential LLM resolution calls when a
+new file could affect several carried findings. Apex Ray resolves critical
+findings first and keeps deferred findings blocking for the next retry. At an
+unchanged HEAD, deferred calls reuse only the exact matching evidence report;
+after every deferred finding has been attempted, the same evidence is not sent
+to the provider again.
 
 Incremental retry is fail-closed:
 
 - previous verified blocking findings keep blocking until the resolution verifier returns `resolved`;
 - `still_present` and `uncertain` resolution results keep blocking;
 - critical carried coverage debt is not cleared by a delta-only run;
+- a continuation command emitted by the gate updates the same pre-push JSON
+  report; the next eligible retry validates that report and resumes bounded P0
+  coverage instead of permanently OR-ing stale debt;
+- when commits were added while carried coverage was being resumed, the gate
+  preserves the earlier retry HEAD and asks for one more run so the new delta
+  cannot bypass review;
+- a missing or mismatched coverage-debt report falls back to a full
+  `review.base...HEAD` review while retaining prior blocking findings;
 - missing state, missing previous HEAD, merge-base changes, or config/rule/memory/model/prompt/gate-policy changes fall back to a full `review.base...HEAD` review.
+
+Except for the coverage-debt recovery case above, a full fallback is a new
+authoritative review for its target and configuration and replaces the prior
+incremental state.
 
 ## Config Validation
 

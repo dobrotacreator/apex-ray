@@ -1,10 +1,11 @@
 import json
 import subprocess
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Protocol, cast
 
+from apex_ray.llm.api import APILLMProvider
 from apex_ray.llm.cli import (
     build_claude_command,
     build_codex_command,
@@ -13,6 +14,7 @@ from apex_ray.llm.cli import (
     resolve_codex_path,
 )
 from apex_ray.llm.errors import LLMProviderError
+from apex_ray.llm.http import JSONTransport
 from apex_ray.llm.prompts import (
     build_resolution_prompt,
     build_review_prompt,
@@ -68,6 +70,7 @@ class FakeLLMProvider:
         self.verification_approvals = verification_approvals or []
         self.resolution_statuses = resolution_statuses or []
         self.reviewed_pack_ids: list[str] = []
+        self.reviewed_prompts: list[str] = []
         self.verified_batch_pack_ids: list[str] = []
         self.verified_batches: list[list[str]] = []
         self.verified_finding_titles: list[str] = []
@@ -76,6 +79,15 @@ class FakeLLMProvider:
     def review_context_pack(self, pack: ContextPack, repo_root: Path) -> list[Finding]:
         self.reviewed_pack_ids.append(pack.id)
         return [finding.model_copy(update={"context_pack_id": pack.id}) for finding in self.findings]
+
+    def review_rendered_prompt_with_usage(
+        self,
+        pack: ContextPack,
+        repo_root: Path,
+        prompt: str,
+    ) -> LLMReviewResult:
+        self.reviewed_prompts.append(prompt)
+        return LLMReviewResult(findings=self.review_context_pack(pack, repo_root))
 
     def verify_finding(self, finding: Finding, pack: ContextPack, repo_root: Path) -> FindingVerification:
         self.verified_finding_titles.append(finding.title)
@@ -125,11 +137,18 @@ class CodexCLIProvider:
         return self.review_context_pack_with_usage(pack, repo_root).findings
 
     def review_context_pack_with_usage(self, pack: ContextPack, repo_root: Path) -> LLMReviewResult:
-        codex_path = resolve_codex_path(self.config.codex_path, repo_root)
         prompt = (
             build_shallow_review_prompt(pack) if self.config.review_depth == "shallow" else build_review_prompt(pack)
         )
+        return self.review_rendered_prompt_with_usage(pack, repo_root, prompt)
 
+    def review_rendered_prompt_with_usage(
+        self,
+        pack: ContextPack,
+        repo_root: Path,
+        prompt: str,
+    ) -> LLMReviewResult:
+        codex_path = resolve_codex_path(self.config.codex_path, repo_root)
         with tempfile.TemporaryDirectory(prefix="apex-ray-codex-") as tmp:
             tmp_path = Path(tmp)
             schema_path = tmp_path / "finding_schema.json"
@@ -270,11 +289,18 @@ class ClaudeCodeCLIProvider:
         return self.review_context_pack_with_usage(pack, repo_root).findings
 
     def review_context_pack_with_usage(self, pack: ContextPack, repo_root: Path) -> LLMReviewResult:
-        claude_path = resolve_claude_path(self.config.claude_path, repo_root)
         prompt = (
             build_shallow_review_prompt(pack) if self.config.review_depth == "shallow" else build_review_prompt(pack)
         )
+        return self.review_rendered_prompt_with_usage(pack, repo_root, prompt)
 
+    def review_rendered_prompt_with_usage(
+        self,
+        pack: ContextPack,
+        repo_root: Path,
+        prompt: str,
+    ) -> LLMReviewResult:
+        claude_path = resolve_claude_path(self.config.claude_path, repo_root)
         with tempfile.TemporaryDirectory(prefix="apex-ray-claude-") as tmp:
             tmp_path = Path(tmp)
             command = build_claude_command(
@@ -377,13 +403,36 @@ class ClaudeCodeCLIProvider:
             return parse_resolution_response(response_text, finding)
 
 
-def provider_from_config(config: LLMConfig) -> LLMProvider:
+def provider_from_config(
+    config: LLMConfig,
+    *,
+    api_transport: JSONTransport | None = None,
+    environment: Mapping[str, str] | None = None,
+    sleep_fn: Callable[[float], None] | None = None,
+) -> LLMProvider:
     if config.provider == LLMProviderName.FAKE:
         return FakeLLMProvider()
     if config.provider == LLMProviderName.CODEX_CLI:
         return CodexCLIProvider(config)
     if config.provider == LLMProviderName.CLAUDE_CODE_CLI:
         return ClaudeCodeCLIProvider(config)
+    if config.provider in {
+        LLMProviderName.OPENAI_API,
+        LLMProviderName.ANTHROPIC_API,
+        LLMProviderName.DEEPSEEK_API,
+        LLMProviderName.QWEN_API,
+        LLMProviderName.KIMI_API,
+        LLMProviderName.ZAI_API,
+        LLMProviderName.OPENAI_COMPATIBLE,
+    }:
+        if sleep_fn is None:
+            return APILLMProvider(config, transport=api_transport, environment=environment)
+        return APILLMProvider(
+            config,
+            transport=api_transport,
+            environment=environment,
+            sleep_fn=sleep_fn,
+        )
     raise LLMProviderError(f"Unsupported LLM provider: {config.provider}")
 
 
@@ -391,7 +440,21 @@ def review_context_pack_with_provider(
     provider: LLMProvider,
     pack: ContextPack,
     repo_root: Path,
+    *,
+    prompt: str | None = None,
 ) -> LLMReviewResult:
+    rendered_reviewer = getattr(provider, "review_rendered_prompt_with_usage", None)
+    if prompt is not None:
+        if not callable(rendered_reviewer):
+            raise LLMProviderError(
+                f"{type(provider).__name__} does not support supplied rendered review prompts; "
+                "implement review_rendered_prompt_with_usage()."
+            )
+        reviewer_with_prompt = cast(
+            Callable[[ContextPack, Path, str], LLMReviewResult],
+            rendered_reviewer,
+        )
+        return reviewer_with_prompt(pack, repo_root, prompt)
     batch_reviewer = getattr(provider, "review_context_pack_with_usage", None)
     if callable(batch_reviewer):
         reviewer = cast(Callable[[ContextPack, Path], LLMReviewResult], batch_reviewer)

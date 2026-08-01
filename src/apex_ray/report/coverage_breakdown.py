@@ -93,7 +93,7 @@ def _build_slice_coverage(
     slice_order: list[str] = []
     packs_by_slice: dict[str, list[ContextPack]] = {}
     for pack in context_packs:
-        slice_name = _pack_review_slice(pack)
+        slice_name = pack_review_slice(pack)
         if slice_name not in packs_by_slice:
             packs_by_slice[slice_name] = []
             slice_order.append(slice_name)
@@ -126,7 +126,7 @@ def _build_slice_coverage(
     return summaries
 
 
-def _pack_review_slice(pack: ContextPack) -> str:
+def pack_review_slice(pack: ContextPack) -> str:
     if _is_high_risk_pack(pack):
         return "high_risk"
     if pack.file_kind in {FileKind.SCHEMA, FileKind.CONFIG, FileKind.MIGRATION, FileKind.DEPENDENCY}:
@@ -168,7 +168,11 @@ def _source_line_coverage_ratio(file_coverage: list[LLMFileCoverageSummary]) -> 
 
 
 def _is_high_risk_pack(pack: ContextPack) -> bool:
-    if any(str(signal.severity) == "high" for signal in pack.risk_signals):
+    if any(
+        str(signal.severity) in {"critical", "high"}
+        and not (pack.file_kind == FileKind.TEST and signal.source == "built_in" and signal.kind == "auth")
+        for signal in pack.risk_signals
+    ):
         return True
     if any(str(rule.mode) == "strict" for rule in pack.rule_matches):
         return True
@@ -177,6 +181,35 @@ def _is_high_risk_pack(pack: ContextPack) -> bool:
 
 def _pack_risk_by_severity(pack: ContextPack) -> Counter[str]:
     return Counter(str(signal.severity) for signal in pack.risk_signals)
+
+
+def pack_residual_priority(
+    pack: ContextPack,
+    archived_priority: str | None = None,
+) -> str:
+    risk_by_severity = _pack_risk_by_severity(pack)
+    rule_modes = Counter(str(rule.mode) for rule in pack.rule_matches)
+    rule_severities = Counter(str(rule.severity) for rule in pack.rule_matches)
+    if (
+        _is_high_risk_pack(pack)
+        or rule_modes.get("strict", 0)
+        or rule_severities.get("critical", 0)
+        or rule_severities.get("high", 0)
+    ):
+        current_priority = "p0"
+    elif (
+        risk_by_severity.get("medium", 0)
+        or risk_by_severity.get("critical", 0)
+        or risk_by_severity.get("high", 0)
+        or pack.file_kind in {FileKind.SOURCE, FileKind.SCHEMA, FileKind.MIGRATION, FileKind.CONFIG}
+        or pack.stats.truncated
+    ):
+        current_priority = "p1"
+    else:
+        current_priority = "p2"
+    if archived_priority not in {"p0", "p1", "p2"}:
+        return current_priority
+    return _highest_residual_priority((current_priority, archived_priority)) or current_priority
 
 
 def _pack_symbol_names(packs: list[ContextPack]) -> list[str]:

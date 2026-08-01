@@ -8,7 +8,7 @@ import { CONTRACT_DEPENDENCY_DEPTH_LIMIT, IGNORED_CONTRACT_DEPENDENCY_NAMES } fr
 import { isDeclarationInsideTarget } from "../declaration-utils.js";
 import { addReference } from "../references/merge.js";
 import { hasAncestor, referenceForNode } from "../references/utils.js";
-import type { Reference } from "../types.js";
+import type { Reference, SourceFilePredicate } from "../types.js";
 import { isInsideRepo, isRepoRelativePath, normalizeRelPath } from "../utils.js";
 
 export function addContractDeclarationReferences(
@@ -18,9 +18,10 @@ export function addContractDeclarationReferences(
   targetNode: ts.Node,
   repo: string,
   limit: number,
+  sourceAllowed: SourceFilePredicate = () => true,
 ): void {
   if (!symbol) return;
-  for (const declaration of contractDeclarationsForSymbol(symbol, targetNode, repo)) {
+  for (const declaration of contractDeclarationsForSymbol(symbol, targetNode, repo, sourceAllowed)) {
     if (refs.length >= limit) break;
     addReference(refs, seen, referenceForNode(repo, declaration.getSourceFile(), declaration, "contract"), limit);
   }
@@ -36,6 +37,7 @@ export function addContractSymbolWithDependencies(
   repo: string,
   limit: number,
   depth: number,
+  sourceAllowed: SourceFilePredicate = () => true,
 ): void {
   if (!symbol || refs.length >= limit) return;
   const firstVisit = !contractSymbolsSeen.has(symbol);
@@ -43,7 +45,7 @@ export function addContractSymbolWithDependencies(
     contractSymbolsSeen.add(symbol);
   }
 
-  const declarations = contractDeclarationsForSymbol(symbol, targetNode, repo);
+  const declarations = contractDeclarationsForSymbol(symbol, targetNode, repo, sourceAllowed);
   for (const declaration of declarations) {
     if (refs.length >= limit) break;
     addReference(refs, seen, referenceForNode(repo, declaration.getSourceFile(), declaration, "contract"), limit);
@@ -61,16 +63,26 @@ export function addContractSymbolWithDependencies(
       repo,
       limit,
       depth + 1,
+      sourceAllowed,
     );
   }
 }
 
-export function contractDeclarationsForSymbol(symbol: ts.Symbol, targetNode: ts.Node, repo: string): ts.Declaration[] {
+export function contractDeclarationsForSymbol(
+  symbol: ts.Symbol,
+  targetNode: ts.Node,
+  repo: string,
+  sourceAllowed: SourceFilePredicate = () => true,
+): ts.Declaration[] {
   const declarations: ts.Declaration[] = [];
   for (const declaration of symbol.declarations ?? []) {
     if (isDeclarationInsideTarget(declaration, targetNode, targetNode.getSourceFile())) continue;
     const source = declaration.getSourceFile();
-    if (source.isDeclarationFile || !isInsideRepo(repo, source.fileName)) continue;
+    if (
+      source.isDeclarationFile ||
+      !isInsideRepo(repo, source.fileName) ||
+      !sourceAllowed(source)
+    ) continue;
     const file = normalizeRelPath(path.relative(repo, source.fileName));
     if (!isRepoRelativePath(file)) continue;
     declarations.push(declaration);
@@ -111,6 +123,7 @@ function collectContractDeclarationDependencies(
   repo: string,
   limit: number,
   depth: number,
+  sourceAllowed: SourceFilePredicate,
 ): void {
   const pickedPropertyNamesBySymbol = pickedPropertyNamesByDependencySymbol(declaration, checker);
   visit(declaration);
@@ -131,6 +144,7 @@ function collectContractDeclarationDependencies(
           repo,
           limit,
           depth,
+          sourceAllowed,
         );
         const pickedPropertyNames = pickedPropertyNamesBySymbol.get(dependencySymbol);
         if (pickedPropertyNames) {
@@ -145,6 +159,7 @@ function collectContractDeclarationDependencies(
             limit,
             depth,
             new Set(),
+            sourceAllowed,
           );
         }
       }
@@ -206,12 +221,13 @@ function addPickedPropertyContractReferences(
   limit: number,
   depth: number,
   visited: Set<ts.Symbol>,
+  sourceAllowed: SourceFilePredicate,
 ): void {
   if (!symbol || propertyNames.size === 0 || refs.length >= limit || depth > CONTRACT_DEPENDENCY_DEPTH_LIMIT) return;
   if (visited.has(symbol)) return;
   visited.add(symbol);
 
-  const declarations = contractDeclarationsForSymbol(symbol, targetNode, repo);
+  const declarations = contractDeclarationsForSymbol(symbol, targetNode, repo, sourceAllowed);
   for (const declaration of declarations) {
     if (refs.length >= limit) return;
     collectPickedPropertyAssignments(refs, seen, declaration, propertyNames, repo, limit);
@@ -241,6 +257,7 @@ function addPickedPropertyContractReferences(
           limit,
           depth + 1,
           visited,
+          sourceAllowed,
         );
       }
     }

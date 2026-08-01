@@ -58,9 +58,11 @@ nav:
       - Review Workflow: review-workflow.md
       - Configuration: configuration.md
       - LLM Providers: providers.md
+      - GitHub Actions: github-actions.md
   - Project Knowledge:
       - Rules And Memory: memory.md
       - Telemetry: telemetry.md
+      - Tuning: tuning.md
   - Quality:
       - Historical PR Evals: pr-eval.md
   - Internals:

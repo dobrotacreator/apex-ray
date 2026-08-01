@@ -1,4 +1,4 @@
-from apex_ray.models import ContextPack, Finding, LLMConfig, RuleMatch
+from apex_ray.models import ContextPack, Finding, LLMAPIConfig, LLMConfig, RuleMatch
 
 
 def verification_groups_by_route(
@@ -134,7 +134,10 @@ def config_for_profile_or_model(
     if profile_or_model in config.profiles:
         profile = config.profiles[profile_or_model]
         resolved = config.model_copy(deep=True)
+        provider_changed = profile.provider is not None and profile.provider != config.provider
         if profile.provider:
+            if provider_changed:
+                resolved.api = LLMAPIConfig()
             resolved.provider = profile.provider
         if profile.model is not None:
             resolved.model = profile.model
@@ -146,6 +149,13 @@ def config_for_profile_or_model(
             resolved.codex_path = profile.codex_path
         if profile.claude_path is not None:
             resolved.claude_path = profile.claude_path
+        if profile.api is not None:
+            resolved.api = LLMAPIConfig.model_validate(
+                {
+                    **resolved.api.model_dump(),
+                    **profile.api.model_dump(exclude_unset=True),
+                }
+            )
         return resolved, profile_or_model, reason
 
     resolved = config.model_copy(deep=True)

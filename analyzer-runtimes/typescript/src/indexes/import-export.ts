@@ -4,14 +4,24 @@ import { moduleExportNameText, propertyNameText } from "../ast-utils.js";
 import { NAMESPACE_EXPORT_LOCAL_NAME, STAR_EXPORT_LOCAL_NAME } from "../constants.js";
 import { referenceForNode } from "../references/utils.js";
 import type { CommonJsExportEntry, ExportIndexEntry } from "../types.js";
+import {
+  appendIndexEntry,
+  collectionShouldStop,
+  type IndexCollectionControl,
+} from "./collection.js";
 
 export { collectImportIndex } from "./imports.js";
 
-export function collectExportIndex(repo: string, source: ts.SourceFile): ExportIndexEntry[] {
+export function collectExportIndex(
+  repo: string,
+  source: ts.SourceFile,
+  control?: IndexCollectionControl,
+): ExportIndexEntry[] {
   const exports: ExportIndexEntry[] = [];
   for (const statement of source.statements) {
+    if (collectionShouldStop(control)) break;
     if (ts.isExpressionStatement(statement)) {
-      for (const entry of commonJsExportEntries(statement.expression)) {
+      for (const entry of commonJsExportEntries(statement.expression, control)) {
         exports.push({
           moduleSpecifier: null,
           localName: entry.localName,
@@ -29,98 +39,114 @@ export function collectExportIndex(repo: string, source: ts.SourceFile): ExportI
       : null;
     if (!statement.exportClause) {
       if (moduleSpecifier === null || !moduleSpecifierNode) continue;
-      exports.push({
+      if (!appendIndexEntry(exports, {
         moduleSpecifier,
         localName: STAR_EXPORT_LOCAL_NAME,
         exportedName: STAR_EXPORT_LOCAL_NAME,
         reference: referenceForNode(repo, source, moduleSpecifierNode, "import"),
-      });
+      }, control)) break;
       continue;
     }
     if (ts.isNamespaceExport(statement.exportClause)) {
       if (moduleSpecifier === null) continue;
-      exports.push({
+      if (!appendIndexEntry(exports, {
         moduleSpecifier,
         localName: NAMESPACE_EXPORT_LOCAL_NAME,
         exportedName: statement.exportClause.name.text,
         reference: referenceForNode(repo, source, statement.exportClause.name, "import"),
-      });
+      }, control)) break;
       continue;
     }
 
     if (!ts.isNamedExports(statement.exportClause)) continue;
     for (const specifier of statement.exportClause.elements) {
-      exports.push({
+      if (!appendIndexEntry(exports, {
         moduleSpecifier,
         localName: moduleExportNameText(specifier.propertyName ?? specifier.name),
         exportedName: moduleExportNameText(specifier.name),
         reference: referenceForNode(repo, source, specifier.name, "import"),
-      });
+      }, control)) break;
     }
   }
   return exports;
 }
 
-export function commonJsExportEntries(expression: ts.Expression): CommonJsExportEntry[] {
+export function commonJsExportEntries(
+  expression: ts.Expression,
+  control?: IndexCollectionControl,
+): CommonJsExportEntry[] {
+  if (collectionShouldStop(control)) return [];
   if (!ts.isBinaryExpression(expression) || expression.operatorToken.kind !== ts.SyntaxKind.EqualsToken) {
     return [];
   }
 
   if (isModuleExportsExpression(expression.left)) {
-    return commonJsModuleExportsEntries(expression.right);
+    return commonJsModuleExportsEntries(expression.right, control);
   }
 
   const exportedName = commonJsNamedExportName(expression.left);
   if (!exportedName) return [];
   const localName = exportedExpressionLocalName(expression.right);
   if (!localName) return [];
-  return [
+  const entries: CommonJsExportEntry[] = [];
+  appendIndexEntry(
+    entries,
     {
       localName,
       exportedName,
       defaultExported: exportedName === "default",
       referenceNode: expression.left,
     },
-  ];
+    control,
+  );
+  return entries;
 }
 
-function commonJsModuleExportsEntries(expression: ts.Expression): CommonJsExportEntry[] {
+function commonJsModuleExportsEntries(
+  expression: ts.Expression,
+  control?: IndexCollectionControl,
+): CommonJsExportEntry[] {
   if (ts.isObjectLiteralExpression(expression)) {
     const entries: CommonJsExportEntry[] = [];
     for (const property of expression.properties) {
+      if (collectionShouldStop(control)) break;
       if (ts.isShorthandPropertyAssignment(property)) {
-        entries.push({
+        if (!appendIndexEntry(entries, {
           localName: property.name.text,
           exportedName: property.name.text,
           defaultExported: false,
           referenceNode: property.name,
-        });
+        }, control)) break;
         continue;
       }
       if (!ts.isPropertyAssignment(property)) continue;
       const exportedName = propertyNameText(property.name);
       const localName = exportedExpressionLocalName(property.initializer);
       if (!exportedName || !localName) continue;
-      entries.push({
+      if (!appendIndexEntry(entries, {
         localName,
         exportedName,
         defaultExported: exportedName === "default",
         referenceNode: property.name,
-      });
+      }, control)) break;
     }
     return entries;
   }
 
   const localName = exportedExpressionLocalName(expression);
   if (!localName) return [];
-  return [
+  const entries: CommonJsExportEntry[] = [];
+  appendIndexEntry(
+    entries,
     {
       localName,
       exportedName: "default",
       defaultExported: true,
       referenceNode: expression,
     },
-  ];
+    control,
+  );
+  return entries;
 }
 
 function exportedExpressionLocalName(expression: ts.Expression): string | null {

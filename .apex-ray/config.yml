@@ -17,37 +17,269 @@ review:
     - "analyzer-runtimes/typescript/node_modules/**"
     - "analyzer-runtimes/typescript/dist/**"
     - "analyzer-runtimes/typescript/dist-test/**"
-    - ".apex-ray/cache/**"
-    - ".apex-ray/telemetry/**"
-    - ".apex-ray/reports/**"
-    - ".apex-ray/eval/telemetry/**"
-    - ".apex-ray/eval/runs/**"
-    - ".apex-ray/evals/runs/**"
   rule_paths:
     - .apex-ray/rules
   memory:
     enabled: true
     paths:
       - .apex-ray/memory
+  risk:
+    built_in_enabled: true
+    rules:
+      - id: provider-and-ci-trust-boundary
+        title: LLM provider and CI trust boundary
+        severity: critical
+        score: 98
+        paths:
+          - "src/apex_ray/llm/api.py"
+          - "src/apex_ray/llm/http.py"
+          - "src/apex_ray/llm/providers.py"
+          - ".github/actions/**"
+          - ".github/workflows/**"
+        exclude_paths:
+          - "tests/**"
+        categories: [security, external-io, ci]
+        reviewer_tags: [security]
+        guidance: Check credential isolation, endpoint trust, redaction, untrusted PR input, token permissions, and fail-closed behavior.
+      - id: provider-and-ci-trust-boundary-tests
+        title: LLM provider and CI trust-boundary regression tests
+        severity: medium
+        score: 74
+        paths:
+          - "tests/test_github_actions.py"
+          - "tests/test_llm_api.py"
+        categories: [security, external-io, ci, test-contract]
+        reviewer_tags: [security]
+        guidance: Preserve adversarial coverage for credential isolation, endpoint trust, redaction, untrusted PR input, permissions, retry classification, and fail-closed behavior.
+      - id: configuration-and-report-contract
+        title: Configuration and report compatibility contract
+        severity: medium
+        score: 74
+        paths:
+          - ".apex-ray/config.yml"
+          - "examples/configs/**"
+          - "src/apex_ray/config.py"
+          - "src/apex_ray/context/**"
+          - "src/apex_ray/models.py"
+          - "src/apex_ray/invocation.py"
+          - "src/apex_ray/llm/**"
+          - "src/apex_ray/local_data.py"
+          - "src/apex_ray/memory.py"
+          - "src/apex_ray/pipeline/**"
+          - "src/apex_ray/report/**"
+          - "src/apex_ray/rules.py"
+          - "src/apex_ray/telemetry.py"
+          - "tests/test_config.py"
+          - "tests/test_context.py"
+          - "tests/test_example_configs.py"
+          - "tests/test_invocation.py"
+          - "tests/test_local_data.py"
+          - "tests/test_llm.py"
+          - "tests/test_memory.py"
+          - "tests/test_pipeline.py"
+          - "tests/test_report*.py"
+          - "tests/test_reviewers.py"
+          - "tests/test_rules.py"
+          - "tests/test_sarif.py"
+          - "tests/test_telemetry.py"
+        categories: [compatibility, public-api]
+        reviewer_tags: [compatibility]
+        guidance: Preserve config precedence, strict validation, prior report loading, stable defaults, and machine-readable schema behavior.
+      - id: typescript-analyzer-core
+        title: TypeScript analyzer performance and correctness
+        severity: medium
+        score: 76
+        paths:
+          - "analyzer-runtimes/typescript/package.json"
+          - "analyzer-runtimes/typescript/package-lock.json"
+          - "analyzer-runtimes/typescript/tsconfig.json"
+          - "analyzer-runtimes/typescript/tsconfig.test.json"
+          - "analyzer-runtimes/typescript/src/**"
+          - "analyzer-runtimes/typescript/test/**"
+          - "src/apex_ray/analyzers/typescript.py"
+          - "tests/test_analyzers.py"
+          - "tests/test_python_analyzer_contracts.py"
+        categories: [typescript, performance, analyzer]
+        reviewer_tags: [typescript-core]
+        guidance: Check symbol/reference completeness, cache invalidation, bounded memory, workspace scale, and fallback behavior.
+      - id: gate-state-test-contract
+        title: Pre-push gate-state regression contract
+        severity: medium
+        score: 72
+        paths:
+          - "tests/test_cli.py"
+          - "tests/test_gates.py"
+          - "tests/test_git.py"
+        categories: [compatibility, gate, test-contract]
+        reviewer_tags: [compatibility]
+        guidance: Preserve fail-closed coverage for carried debt, incremental retry, reviewed refs, stale state, and local worktree boundaries.
+      - id: private-derived-artifact
+        title: Private-derived artifacts require anonymization
+        severity: high
+        score: 92
+        paths:
+          - ".apex-ray/config.local.yml"
+          - ".apex-ray/cache/**"
+          - ".apex-ray/telemetry/**"
+          - ".apex-ray/reports/**"
+          - ".apex-ray/eval/telemetry/**"
+          - ".apex-ray/eval/runs/**"
+          - ".apex-ray/evals/runs/**"
+          - "tests/fixtures/**"
+          - "tests/benchmarks/**"
+          - "benchmarks/**"
+          - "fixtures/**"
+          - "docs/fixtures/**"
+          - "docs/samples/**"
+          - "research/**"
+          - ".apex-ray/eval/labels/**"
+          - ".apex-ray/evals/cases/**"
+          - "**/*.zip"
+          - "**/*.tar"
+          - "**/*.tgz"
+          - "**/*telemetry*.json"
+          - "**/*telemetry*.jsonl"
+          - "**/*telemetry*.csv"
+          - "**/*telemetry*.tsv"
+        categories: [security, privacy, data-governance]
+        reviewer_tags: [security]
+        guidance: Require minimal synthetic or fully anonymized data; reject company, product, customer, account, endpoint, credential, private-domain, and proprietary-object identifiers.
+      - id: credential-bearing-artifact
+        title: Credential-bearing files must never enter commits
+        severity: critical
+        score: 100
+        paths:
+          - ".[eE][nN][vV]"
+          - ".[eE][nN][vV].*"
+          - "*.[pP][eE][mM]"
+          - "*.[kK][eE][yY]"
+          - "**/.[eE][nN][vV]"
+          - "**/.[eE][nN][vV].*"
+          - "**/*.[pP][eE][mM]"
+          - "**/*.[kK][eE][yY]"
+        exclude_paths:
+          - ".[eE][nN][vV]*.[eE][xX][aA][mM][pP][lL][eE]"
+          - ".[eE][nN][vV]*.[sS][aA][mM][pP][lL][eE]"
+          - ".[eE][nN][vV]*.[tT][eE][mM][pP][lL][aA][tT][eE]"
+          - "**/.[eE][nN][vV]*.[eE][xX][aA][mM][pP][lL][eE]"
+          - "**/.[eE][nN][vV]*.[sS][aA][mM][pP][lL][eE]"
+          - "**/.[eE][nN][vV]*.[tT][eE][mM][pP][lL][aA][tT][eE]"
+        categories: [security, credentials, data-governance]
+        reviewer_tags: [security]
+        guidance: Reject the file, rotate any exposed credential or private key, and replace required examples with non-secret placeholders.
   llm:
     enabled: true
     provider: codex_cli
-    effort: medium
-    timeout_seconds: 900
-    jobs: 1
+    profiles:
+      broad:
+        provider: codex_cli
+        model: gpt-5.6-terra
+        effort: low
+      strong:
+        provider: codex_cli
+        model: gpt-5.6-sol
+        effort: medium
+    routing:
+      review_profile: broad
+      verify_profile: strong
+      escalated_review_profile: strong
+      escalated_verify_profile: strong
+      escalate_review_when:
+        risk:
+          - auth
+          - shell
+          - migration
+          - "policy:provider-and-ci-trust-boundary-tests"
+          - "policy:configuration-and-report-contract"
+          - "policy:typescript-analyzer-core"
+          - "policy:gate-state-test-contract"
+          - "policy:private-derived-artifact"
+          - "policy:credential-bearing-artifact"
+        rule_severity:
+          - high
+          - critical
+        strict_rule: true
+      escalate_verify_when:
+        finding_severity:
+          - high
+          - critical
     coverage_mode: balanced
-    max_packs: 64
-    max_deep_packs: 48
-    max_input_tokens: 300000
+    max_packs: 48
+    max_deep_packs: 16
+    max_input_tokens: 180000
+    timeout_seconds: 900
+    jobs: 2
+    max_consecutive_provider_failures: 3
     verify: true
     cache_dir: ${local_data}/cache/llm
+  reviewers:
+    - id: correctness
+      name: Correctness
+      focus: Diff-caused behavioral regressions, broken contracts, and concrete failure modes.
+      profile: broad
+      verify_profile: strong
+      review_depth: balanced
+      max_packs: 36
+      max_deep_packs: 12
+      max_input_tokens: 130000
+      verify: true
+      required: true
+    - id: security
+      name: Security
+      focus: Credential exposure, endpoint trust, injection, authorization, CI permissions, and untrusted input boundaries.
+      instructions:
+        - State the violated trust boundary and a concrete exploit or leak path.
+        - Do not report generic defense-in-depth suggestions as defects.
+      risk:
+        - auth
+        - shell
+        - external_io
+      risk_tags:
+        - security
+      profile: strong
+      verify_profile: strong
+      review_depth: deep
+      max_packs: 10
+      max_deep_packs: 10
+      max_input_tokens: 55000
+      verify: true
+    - id: typescript
+      name: TypeScript analyzer
+      focus: Analyzer correctness, symbol/reference coverage, cache invalidation, memory growth, and large-workspace performance.
+      instructions:
+        - Check both analyzer runtime behavior and the Python integration contract.
+        - Require bounded behavior on generated, minified, dependency, and large-workspace inputs.
+      risk_tags:
+        - typescript-core
+      profile: broad
+      verify_profile: strong
+      review_depth: balanced
+      max_packs: 12
+      max_deep_packs: 8
+      max_input_tokens: 65000
+      verify: true
+    - id: compatibility
+      name: Configuration and report compatibility
+      focus: Config precedence, schema evolution, archive loading, report stability, and safe defaults.
+      risk_tags:
+        - compatibility
+      profile: broad
+      verify_profile: strong
+      review_depth: balanced
+      max_packs: 10
+      max_deep_packs: 6
+      max_input_tokens: 50000
+      verify: true
   telemetry:
     enabled: true
     path: ${local_data}/telemetry/review-runs.jsonl
+    path_mode: anonymized
   reports:
     archive: true
     archive_dir: ${local_data}/reports/runs
     retention: 20
+    compression: auto
+    compression_min_bytes: 65536
   gates:
     pre_push:
       enabled: true
@@ -58,6 +290,7 @@ review:
       max_stdout_findings: 10
       stdout_format: agent
       auto_followup_p0: true
+      auto_followup_p0_max_pack_reviews: 16
       progress: auto
       progress_interval_seconds: 5
       incremental_retry:
