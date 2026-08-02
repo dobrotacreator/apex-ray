@@ -518,6 +518,36 @@ def test_client_counts_hard_eviction_of_allowlisted_snapshot_as_dropped(tmp_path
     assert client.dropped_notifications == 1
 
 
+def test_client_drops_stale_snapshot_when_replacement_exceeds_byte_limit(tmp_path: Path) -> None:
+    uri = path_to_file_uri(tmp_path / "lib" / "resource.dart")
+    diagnostics_method = "textDocument/publishDiagnostics"
+    with _client(
+        tmp_path,
+        notification_limit=2,
+        notification_bytes_limit=512,
+        notification_snapshot_keys={(diagnostics_method, uri)},
+    ) as client:
+        assert (
+            client.request(
+                "test/floodNotificationSnapshots",
+                {"count": 1, "allowedUri": uri},
+            )
+            == 4
+        )
+        assert len(client.notifications(diagnostics_method, uri=uri)) == 1
+
+        assert (
+            client.request(
+                "test/floodNotificationSnapshots",
+                {"count": 1, "allowedUri": uri, "payloadSize": 1_000},
+            )
+            == 4
+        )
+
+    assert client.notifications(diagnostics_method, uri=uri) == []
+    assert client.dropped_notifications == 1
+
+
 def test_client_passes_explicit_environment_without_mutating_parent(tmp_path: Path) -> None:
     with _client(tmp_path, "environment", env={"APEX_RAY_LSP_TEST": "isolated"}) as client:
         notification = client.wait_for_notification("test/environment", timeout=1)

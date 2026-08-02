@@ -186,8 +186,10 @@ def _run_normal(stdin: BinaryIO, stdout: BinaryIO, *, shutdown_error: bool = Fal
             assert isinstance(params, dict)
             count = params.get("count")
             allowed_uri = params.get("allowedUri")
+            payload_size = params.get("payloadSize", 0)
             assert isinstance(count, int)
             assert isinstance(allowed_uri, str)
+            assert isinstance(payload_size, int) and payload_size >= 0
             for sequence in range(count):
                 _write_message(
                     stdout,
@@ -215,7 +217,7 @@ def _run_normal(stdin: BinaryIO, stdout: BinaryIO, *, shutdown_error: bool = Fal
                         "method": "textDocument/publishDiagnostics",
                         "params": {
                             "uri": allowed_uri,
-                            "diagnostics": [{"message": f"diagnostic-{sequence}"}],
+                            "diagnostics": [{"message": f"diagnostic-{sequence}" + ("x" * payload_size)}],
                         },
                     },
                 )

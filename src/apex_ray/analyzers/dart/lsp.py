@@ -763,6 +763,9 @@ class DartLspClient:
         size = len(encode_lsp_message(message))
         with self._notification_condition:
             if snapshot_key is not None:
+                # Full-state snapshots supersede prior state even when the new
+                # snapshot is too large to retain. Keeping the old value would
+                # expose stale diagnostics/outline metadata after a real drop.
                 for index in range(len(self._notifications) - 1, -1, -1):
                     retained = self._notifications[index]
                     if (retained.get("method"), _notification_uri(retained)) != snapshot_key:
