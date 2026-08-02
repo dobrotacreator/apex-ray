@@ -36,6 +36,17 @@ class _PlatformChannelDeadlineExpired(RuntimeError):
     pass
 
 
+@dataclass(slots=True)
+class _StringLexerState:
+    delimiter: str
+    raw: bool
+
+
+@dataclass(slots=True)
+class _InterpolationLexerState:
+    brace_depth: int = 0
+
+
 @dataclass(frozen=True, slots=True)
 class PlatformChannelMethod:
     name: str
@@ -91,7 +102,7 @@ def _extract_platform_channel_endpoints(
         if "package:flutter/services.dart" not in imports:
             return []
 
-    code_positions = _source_code_positions(source, deadline=deadline)
+    code_positions = _source_code_positions(source, language=language, deadline=deadline)
     constants = _literal_constants(source, language, code_positions=code_positions, deadline=deadline)
     declarations = _channel_declarations(
         source,
@@ -317,7 +328,7 @@ def _channel_declarations(
     endpoints: list[PlatformChannelEndpoint] = []
     for match in pattern.finditer(source):
         _check_deadline(deadline)
-        if not code_positions[match.start("type")]:
+        if not code_positions[match.start("type")] or not code_positions[match.start("value")]:
             continue
         value = match.group("value")
         if value.startswith("@"):
@@ -351,12 +362,17 @@ def _method_literals(
     methods: list[tuple[str | None, PlatformChannelMethod]] = []
     invoke_pattern = re.compile(
         rf"(?P<receiver>{_IDENTIFIER})\s*\.\s*"
-        rf"invoke(?:Method|ListMethod|MapMethod)(?:\s*<[^;()]+>)?\s*\(\s*(?P<value>{_STRING})"
+        rf"(?P<invoke>invoke(?:Method|ListMethod|MapMethod))(?:\s*<[^;()]+>)?\s*\(\s*"
+        rf"(?P<value>{_STRING})"
         rf"(?=\s*[,\)])"
     )
     for match in invoke_pattern.finditer(source):
         _check_deadline(deadline)
-        if not code_positions[match.start("receiver")]:
+        if (
+            not code_positions[match.start("receiver")]
+            or not code_positions[match.start("invoke")]
+            or not code_positions[match.start("value")]
+        ):
             continue
         value = _literal_value(match.group("value"))
         if value is not None and "$" not in value:
@@ -383,7 +399,7 @@ def _method_literals(
         _check_deadline(deadline)
         for match in handler_pattern.finditer(source, region_start, region_end):
             _check_deadline(deadline)
-            if not code_positions[match.start()]:
+            if not code_positions[match.start()] or not code_positions[match.start("value")]:
                 continue
             value = _literal_value(match.group("value"))
             if value is not None and "$" not in value:
@@ -435,7 +451,7 @@ def _literal_constants(
     ambiguous: set[str] = set()
     for match in pattern.finditer(source):
         _check_deadline(deadline)
-        if not code_positions[match.start("name")]:
+        if not code_positions[match.start("name")] or not code_positions[match.start("value")]:
             continue
         name = match.group("name")
         value = _literal_value(match.group("value"))
@@ -456,32 +472,84 @@ def _method_handler_regions(
     code_positions: bytearray,
     deadline: float | None,
 ) -> list[tuple[str | None, int, int]]:
-    call_pattern = re.compile(rf"(?:(?P<receiver>{_IDENTIFIER})\s*\.\s*)?setMethodCallHandler\b[^;{{]{{0,500}}\{{")
+    call_pattern = re.compile(
+        rf"(?:(?P<receiver>{_IDENTIFIER})\s*\.\s*)?"
+        rf"(?P<handler>setMethodCallHandler)\b[^;{{]{{0,500}}\{{"
+    )
     regions: list[tuple[str | None, int, int]] = []
     for match in call_pattern.finditer(source):
         _check_deadline(deadline)
-        if not code_positions[match.start()]:
+        if not code_positions[match.start()] or not code_positions[match.start("handler")]:
             continue
         opening = source.find("{", match.start(), match.end())
+        if opening < 0 or not code_positions[opening]:
+            continue
         closing = _matching_source_brace(source, opening, deadline=deadline)
         if closing is not None:
             regions.append((match.group("receiver"), opening + 1, closing))
     return regions
 
 
-def _source_code_positions(source: str, *, deadline: float | None) -> bytearray:
-    """Mark offsets that are outside comments and string literals."""
+def _source_code_positions(
+    source: str,
+    *,
+    deadline: float | None,
+    language: str = "dart",
+) -> bytearray:
+    """Mark executable code while masking comments and literal string text.
+
+    Dart interpolation expressions are executable code, including expressions
+    nested in interpolated strings. The iterative state stack avoids recursion;
+    callers bound its work with the platform-channel source and deadline limits.
+    """
 
     code_positions = bytearray(b"\x01") * len(source)
+    states: list[_StringLexerState | _InterpolationLexerState] = []
     index = 0
     next_deadline_check = 0
     while index < len(source):
         if index >= next_deadline_check:
             _check_deadline(deadline)
             next_deadline_check = index + 1024
+
+        state = states[-1] if states else None
+        if isinstance(state, _StringLexerState):
+            if source.startswith(state.delimiter, index):
+                end = index + len(state.delimiter)
+                code_positions[index:end] = b"\x00" * (end - index)
+                states.pop()
+                index = end
+                continue
+            if state.raw:
+                code_positions[index] = 0
+                index += 1
+                continue
+            if source[index] == "\\":
+                end = min(len(source), index + 2)
+                code_positions[index:end] = b"\x00" * (end - index)
+                index = end
+                continue
+            if language == "dart" and source[index] == "$":
+                if source[index + 1 : index + 2] == "{":
+                    states.append(_InterpolationLexerState())
+                    index += 2
+                    continue
+                if _is_dart_identifier_start(source[index + 1 : index + 2]):
+                    index += 2
+                    while index < len(source) and _is_dart_identifier_part(source[index]):
+                        if index >= next_deadline_check:
+                            _check_deadline(deadline)
+                            next_deadline_check = index + 1024
+                        index += 1
+                    continue
+            code_positions[index] = 0
+            index += 1
+            continue
+
         if source.startswith("//", index):
             end = source.find("\n", index + 2)
             end = len(source) if end < 0 else end
+            _check_deadline(deadline)
             code_positions[index:end] = b"\x00" * (end - index)
             index = end
             continue
@@ -503,19 +571,58 @@ def _source_code_positions(source: str, *, deadline: float | None) -> bytearray:
                     index += 1
             code_positions[start:index] = b"\x00" * (index - start)
             continue
-        if source[index] in {"'", '"'} or (source[index] in {"r", "R"} and source[index + 1 : index + 2] in {"'", '"'}):
-            string_end = _skip_source_string(source, index, deadline=deadline)
-            if string_end is not None:
-                code_positions[index:string_end] = b"\x00" * (string_end - index)
-                # The opening offset represents a real literal token. Keeping
-                # it marked lets token-anchored patterns (Kotlin's `"x" ->`)
-                # distinguish literals in code from quote-like text inside an
-                # enclosing comment or string.
-                code_positions[index] = 1
-                index = string_end
+
+        string_state = _source_string_state(source, index, allow_raw=language == "dart")
+        if string_state is not None:
+            next_state, content_start = string_state
+            code_positions[index:content_start] = b"\x00" * (content_start - index)
+            # Token-anchored native handler patterns begin at the literal's
+            # opening offset. Literal contents remain masked.
+            code_positions[index] = 1
+            states.append(next_state)
+            index = content_start
+            continue
+
+        if isinstance(state, _InterpolationLexerState):
+            if source[index] == "{":
+                state.brace_depth += 1
+                index += 1
+                continue
+            if source[index] == "}":
+                if state.brace_depth == 0:
+                    states.pop()
+                else:
+                    state.brace_depth -= 1
+                index += 1
                 continue
         index += 1
     return code_positions
+
+
+def _source_string_state(
+    source: str,
+    start: int,
+    *,
+    allow_raw: bool,
+) -> tuple[_StringLexerState, int] | None:
+    quote_index = start
+    raw = False
+    if allow_raw and source[start : start + 1] in {"r", "R"} and source[start + 1 : start + 2] in {"'", '"'}:
+        raw = True
+        quote_index += 1
+    if source[quote_index : quote_index + 1] not in {"'", '"'}:
+        return None
+    quote = source[quote_index]
+    delimiter = quote * (3 if source.startswith(quote * 3, quote_index) else 1)
+    return _StringLexerState(delimiter=delimiter, raw=raw), quote_index + len(delimiter)
+
+
+def _is_dart_identifier_start(character: str) -> bool:
+    return bool(character) and (character == "_" or character.isalpha())
+
+
+def _is_dart_identifier_part(character: str) -> bool:
+    return character == "_" or character.isalnum()
 
 
 def _matching_source_brace(source: str, opening: int, *, deadline: float | None) -> int | None:

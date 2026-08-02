@@ -1,3 +1,4 @@
+import apex_ray.analyzers.dart.platform_channels as platform_channels_module
 from apex_ray.analyzers.dart.platform_channels import (
     PlatformChannelIndex,
     extract_platform_channel_endpoints,
@@ -124,3 +125,63 @@ fun configure(messenger: BinaryMessenger) {
         ("realInvoke", "invoke"),
         ("realHandle", "handle"),
     ]
+
+
+def test_dart_platform_channel_extraction_keeps_nested_interpolation_code() -> None:
+    source = r'''
+import 'package:flutter/services.dart';
+
+final bridge = MethodChannel('sample/interpolation');
+final direct = "before ${bridge.invokeMethod<void>('ping')} after";
+final escaped = "literal \${bridge.invokeMethod<void>('fake/escaped')}";
+final simpleIdentifier = "$bridge.invokeMethod<void>('fake/simple')";
+final simpleDeclaration = "$MethodChannel('fake/simple-channel')";
+final crossedHandler = "$setMethodCallHandler((call) { ${(() {
+  switch (call.method) { case 'fake/cross-region': return null; }
+})()} })";
+final nested = """
+  outer ${(() {
+    const hidden = "bridge.invokeMethod<void>('fake/string')";
+    const rawHidden = r"${bridge.invokeMethod<void>('fake/raw')}";
+    /* } bridge.invokeMethod<void>('fake/comment') { */
+    final values = <String, Object?>{'key': {'nested': true}};
+    bridge.setMethodCallHandler((call) async {
+      switch (call.method) {
+        case 'interpolationHandle':
+          return null;
+      }
+    });
+    return "inner ${bridge.invokeMethod<void>('nestedPing')}";
+  })()}
+""";
+'''
+
+    endpoints = extract_platform_channel_endpoints("lib/interpolation.dart", source)
+
+    assert len(endpoints) == 1
+    assert [(method.name, method.direction) for method in endpoints[0].methods] == [
+        ("ping", "invoke"),
+        ("interpolationHandle", "handle"),
+        ("nestedPing", "invoke"),
+    ]
+
+
+def test_dart_lexer_exposes_simple_identifier_interpolation_only() -> None:
+    source = "final value = 'literal MethodChannel(\\\"fake\\\") $bridge suffix';"
+
+    code_positions = platform_channels_module._source_code_positions(source, deadline=None)
+
+    interpolation = source.index("$bridge")
+    fake_declaration = source.index("MethodChannel")
+    assert all(code_positions[interpolation : interpolation + len("$bridge")])
+    assert not any(code_positions[fake_declaration : fake_declaration + len("MethodChannel")])
+
+
+def test_dart_interpolation_lexer_is_iterative_at_deep_nesting() -> None:
+    depth = 1_500
+    source = '"${' * depth + "bridge" + '}"' * depth
+
+    code_positions = platform_channels_module._source_code_positions(source, deadline=None)
+
+    identifier = source.index("bridge")
+    assert all(code_positions[identifier : identifier + len("bridge")])
