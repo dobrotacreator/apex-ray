@@ -2,7 +2,7 @@ import re
 import time
 from bisect import bisect_left
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from apex_ray.models import AnalyzerReference
 
@@ -31,15 +31,23 @@ _RESOURCE_TYPES = (
 )
 _ASYNC_CONTEXT_EVENT_RE = re.compile(
     r"(?P<async_open>\basync\s*\{)"
+    r"|(?P<exit_guard>"
+    r"\bif\s*\(\s*!\s*(?:context\s*\.\s*)?mounted\s*\)\s*"
+    r"(?:return(?:\s+[^;{}]*)?|throw\s+[^;{}]+)\s*;"
+    r")"
+    r"|(?P<guard>\bif\s*\(\s*!?\s*(?:context\s*\.\s*)?mounted\s*\))"
     r"|(?P<open>\{)"
     r"|(?P<close>\})"
     r"|(?P<await>\bawait\b)"
-    r"|(?P<mounted>\b(?:context\s*\.\s*)?mounted\b)"
     r"|(?P<context>"
     r"\bNavigator\s*\.\s*of\s*\(\s*context\b"
     r"|\bshow(?:Dialog|ModalBottomSheet)\s*\([^)]*\bcontext\b"
     r"|\bcontext\s*\.\s*(?!mounted\b)"
     r")"
+)
+_TERMINATING_MOUNTED_GUARD_BODY_RE = re.compile(
+    r"\s*(?:return(?:\s+[^;{}]*)?|throw\s+[^;{}]+)\s*;\s*\Z",
+    re.DOTALL,
 )
 
 MetadataSink = Callable[[int, str], None]
@@ -57,7 +65,22 @@ class _DartMetadataLimitReached(RuntimeError):
 @dataclass(slots=True)
 class _AsyncContextState:
     saw_await: bool = False
-    mounted_guard: bool = False
+    guard_epoch: int = 0
+    early_exit_guard_depths: list[int] = field(default_factory=list)
+    positive_guard_depths: list[int] = field(default_factory=list)
+    pending_guard: str | None = None
+    pending_guard_end: int = 0
+    pending_guard_epoch: int = 0
+
+
+@dataclass(slots=True)
+class _AsyncContextBrace:
+    async_state: _AsyncContextState | None = None
+    guard_state: _AsyncContextState | None = None
+    guard_kind: str | None = None
+    guard_epoch: int = 0
+    guard_depth: int = 0
+    content_start: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -196,7 +219,10 @@ def collect_dart_framework_metadata(
 
     This compatibility wrapper prepares a one-file index. Call
     :func:`build_dart_framework_metadata_index` once and use ``for_range`` when
-    collecting metadata for multiple symbols from the same source.
+    collecting metadata for multiple symbols from the same source. Its legacy
+    list return type is intentionally best-effort and has no completeness
+    signal; callers that make completeness decisions must inspect the index's
+    ``truncated`` attribute instead. The production analyzer does so.
     """
 
     if max_items <= 0 or is_generated_dart_path(path):
@@ -355,7 +381,7 @@ def _collect_async_context(
     nested async closure. The return value reports deadline truncation.
     """
 
-    brace_stack: list[_AsyncContextState | None] = []
+    brace_stack: list[_AsyncContextBrace] = []
     active_async: list[_AsyncContextState] = []
     current_line = 1
     previous_position = 0
@@ -367,25 +393,34 @@ def _collect_async_context(
         kind = event.lastgroup
         if kind == "async_open":
             state = _AsyncContextState()
-            brace_stack.append(state)
+            brace_stack.append(_AsyncContextBrace(async_state=state))
             active_async.append(state)
         elif kind == "open":
-            brace_stack.append(None)
+            frame = _mounted_guard_frame(masked, event, active_async, len(brace_stack) + 1)
+            brace_stack.append(frame)
         elif kind == "close":
             if not brace_stack:
                 continue
-            state = brace_stack.pop()
+            frame = brace_stack.pop()
+            _close_mounted_guard_frame(masked, event, frame, len(brace_stack))
+            for state in active_async:
+                state.early_exit_guard_depths = [
+                    depth for depth in state.early_exit_guard_depths if depth <= len(brace_stack)
+                ]
+            state = frame.async_state
             if state is not None and active_async and active_async[-1] is state:
                 active_async.pop()
         elif not active_async:
             continue
         elif kind == "await":
-            active_async[-1].saw_await = True
-            active_async[-1].mounted_guard = False
-        elif kind == "mounted" and active_async[-1].saw_await:
-            active_async[-1].mounted_guard = True
+            _reset_mounted_guards_after_await(active_async[-1])
+        elif kind == "exit_guard" and active_async[-1].saw_await:
+            active_async[-1].early_exit_guard_depths.append(len(brace_stack))
+            _clear_pending_mounted_guard(active_async[-1])
+        elif kind == "guard" and active_async[-1].saw_await:
+            _start_pending_mounted_guard(active_async[-1], event)
         elif kind == "context" and active_async[-1].saw_await:
-            guarded = active_async[-1].mounted_guard
+            guarded = _mounted_guard_is_active(masked, active_async[-1], event)
             add(
                 current_line,
                 f"async BuildContext use after await; mounted guard: {'present' if guarded else 'absent'}",
@@ -395,6 +430,94 @@ def _collect_async_context(
 
 def _iter_async_context_events(masked: str) -> Iterator[re.Match[str]]:
     return _ASYNC_CONTEXT_EVENT_RE.finditer(masked)
+
+
+def _reset_mounted_guards_after_await(state: _AsyncContextState) -> None:
+    state.saw_await = True
+    state.guard_epoch += 1
+    state.early_exit_guard_depths.clear()
+    state.positive_guard_depths.clear()
+    _clear_pending_mounted_guard(state)
+
+
+def _start_pending_mounted_guard(state: _AsyncContextState, event: re.Match[str]) -> None:
+    state.pending_guard = "negative" if re.search(r"\(\s*!", event.group()) else "positive"
+    state.pending_guard_end = event.end()
+    state.pending_guard_epoch = state.guard_epoch
+
+
+def _mounted_guard_frame(
+    masked: str,
+    event: re.Match[str],
+    active_async: list[_AsyncContextState],
+    depth: int,
+) -> _AsyncContextBrace:
+    if not active_async:
+        return _AsyncContextBrace()
+    state = active_async[-1]
+    if (
+        state.pending_guard is None
+        or state.pending_guard_epoch != state.guard_epoch
+        or masked[state.pending_guard_end : event.start()].strip()
+    ):
+        _clear_pending_mounted_guard(state)
+        return _AsyncContextBrace()
+
+    frame = _AsyncContextBrace(
+        guard_state=state,
+        guard_kind=state.pending_guard,
+        guard_epoch=state.guard_epoch,
+        guard_depth=depth,
+        content_start=event.end(),
+    )
+    if state.pending_guard == "positive":
+        state.positive_guard_depths.append(depth)
+    _clear_pending_mounted_guard(state)
+    return frame
+
+
+def _close_mounted_guard_frame(
+    masked: str,
+    event: re.Match[str],
+    frame: _AsyncContextBrace,
+    parent_depth: int,
+) -> None:
+    state = frame.guard_state
+    if state is None:
+        return
+    if frame.guard_kind == "positive":
+        try:
+            state.positive_guard_depths.remove(frame.guard_depth)
+        except ValueError:
+            pass
+        return
+    if (
+        frame.guard_kind == "negative"
+        and frame.guard_epoch == state.guard_epoch
+        and _TERMINATING_MOUNTED_GUARD_BODY_RE.fullmatch(masked[frame.content_start : event.start()])
+    ):
+        state.early_exit_guard_depths.append(parent_depth)
+
+
+def _clear_pending_mounted_guard(state: _AsyncContextState) -> None:
+    state.pending_guard = None
+    state.pending_guard_end = 0
+    state.pending_guard_epoch = state.guard_epoch
+
+
+def _mounted_guard_is_active(
+    masked: str,
+    state: _AsyncContextState,
+    event: re.Match[str],
+) -> bool:
+    pending_positive_guard = bool(
+        state.pending_guard == "positive"
+        and state.pending_guard_epoch == state.guard_epoch
+        and ";" not in masked[state.pending_guard_end : event.start()]
+    )
+    if state.pending_guard == "positive" and not pending_positive_guard:
+        _clear_pending_mounted_guard(state)
+    return bool(state.early_exit_guard_depths or state.positive_guard_depths or pending_positive_guard)
 
 
 def _mask_comments_and_strings(source: str, *, deadline: float | None = None) -> str:

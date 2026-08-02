@@ -18,6 +18,7 @@ from .protocol import (
     DEFAULT_MAX_CONTENT_BYTES,
     DartLspError,
     DartLspProtocolError,
+    DartLspTransportError,
     encode_lsp_message,
     path_to_file_uri,
     read_lsp_message,
@@ -463,7 +464,10 @@ class DartLspClient:
                 self.notify("exit")
                 process = self._process
                 try:
-                    process.wait(timeout=min(self.timeout, 2.0))
+                    wait_timeout = min(self.timeout, 2.0)
+                    if self.deadline is not None:
+                        wait_timeout = min(wait_timeout, max(0.0, self.deadline - time.monotonic()))
+                    process.wait(timeout=wait_timeout)
                 except subprocess.TimeoutExpired:
                     self._terminate_process_group()
         finally:
@@ -579,6 +583,11 @@ class DartLspClient:
             try:
                 self._raise_if_failed()
                 write_lsp_frame(stream, job.frame)
+            except DartLspTransportError:
+                error = self._process_exit_error()
+                self._set_failure(error)
+                self._complete_write(job, error)
+                return
             except DartLspError as exc:
                 self._set_failure(exc)
                 self._complete_write(job, exc)
@@ -744,14 +753,22 @@ class DartLspClient:
             self._notification_condition.notify_all()
 
     def _cancel_request(self, request_id: int | str) -> None:
-        with suppress(DartLspError):
-            self._send_payload(
+        try:
+            frame = encode_lsp_message(
                 {
                     "jsonrpc": "2.0",
                     "method": "$/cancelRequest",
                     "params": {"id": request_id},
                 }
             )
+        except DartLspError:
+            return
+        job = _WriteJob(frame)
+        with self._failure_lock:
+            if self._failure is not None or self._stop.is_set():
+                return
+            with suppress(Full):
+                self._writes.put_nowait(job)
 
     def _raise_if_failed(self) -> None:
         with self._failure_lock:

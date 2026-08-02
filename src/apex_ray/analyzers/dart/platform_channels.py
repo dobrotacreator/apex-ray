@@ -91,11 +91,23 @@ def _extract_platform_channel_endpoints(
         if "package:flutter/services.dart" not in imports:
             return []
 
-    constants = _literal_constants(source, language, deadline=deadline)
-    declarations = _channel_declarations(source, language, constants, deadline=deadline)
+    code_positions = _source_code_positions(source, deadline=deadline)
+    constants = _literal_constants(source, language, code_positions=code_positions, deadline=deadline)
+    declarations = _channel_declarations(
+        source,
+        language,
+        constants,
+        code_positions=code_positions,
+        deadline=deadline,
+    )
     if not declarations:
         return []
-    method_candidates = _method_literals(source, language, deadline=deadline)
+    method_candidates = _method_literals(
+        source,
+        language,
+        code_positions=code_positions,
+        deadline=deadline,
+    )
     endpoint_count = len(declarations)
     endpoints: list[PlatformChannelEndpoint] = []
     for declaration in declarations:
@@ -230,7 +242,8 @@ def platform_channel_contracts(
         relevant_lines = [dart_endpoint.line, *(method.line for method in dart_endpoint.methods)]
         if not any(line >= start_line and (end_line is None or line <= end_line) for line in relevant_lines):
             continue
-        dart_methods = {method.name for method in dart_endpoint.methods}
+        dart_invoked = {method.name for method in dart_endpoint.methods if method.direction == "invoke"}
+        dart_handled = {method.name for method in dart_endpoint.methods if method.direction == "handle"}
         for native in index.endpoints:
             if (
                 native.side != "native"
@@ -238,11 +251,13 @@ def platform_channel_contracts(
                 or native.channel_type != dart_endpoint.channel_type
             ):
                 continue
-            native_methods = {method.name for method in native.methods}
-            exact_methods = sorted(dart_methods & native_methods)
+            native_invoked = {method.name for method in native.methods if method.direction == "invoke"}
+            native_handled = {method.name for method in native.methods if method.direction == "handle"}
+            exact_methods = sorted((dart_invoked & native_handled) | (dart_handled & native_invoked))
             method_summary = ", ".join(exact_methods) if exact_methods else "none observed"
             text = (
-                f"native {native.channel_type} channel {native.channel_name!r}; exact shared methods: {method_summary}"
+                f"native {native.channel_type} channel {native.channel_name!r}; "
+                f"exact direction-matched methods: {method_summary}"
             )
             key = (native.file, native.line, text)
             if key in seen:
@@ -265,6 +280,7 @@ def _channel_declarations(
     language: str,
     constants: dict[str, str],
     *,
+    code_positions: bytearray,
     deadline: float | None,
 ) -> list[PlatformChannelEndpoint]:
     if language == "dart":
@@ -301,6 +317,8 @@ def _channel_declarations(
     endpoints: list[PlatformChannelEndpoint] = []
     for match in pattern.finditer(source):
         _check_deadline(deadline)
+        if not code_positions[match.start("type")]:
+            continue
         value = match.group("value")
         if value.startswith("@"):
             value = value[1:]
@@ -327,6 +345,7 @@ def _method_literals(
     source: str,
     language: str,
     *,
+    code_positions: bytearray,
     deadline: float | None,
 ) -> list[tuple[str | None, PlatformChannelMethod]]:
     methods: list[tuple[str | None, PlatformChannelMethod]] = []
@@ -337,6 +356,8 @@ def _method_literals(
     )
     for match in invoke_pattern.finditer(source):
         _check_deadline(deadline)
+        if not code_positions[match.start("receiver")]:
+            continue
         value = _literal_value(match.group("value"))
         if value is not None and "$" not in value:
             methods.append(
@@ -354,10 +375,16 @@ def _method_literals(
         handler_pattern = re.compile(rf"isEqualToString\s*:\s*@?(?P<value>{_STRING})")
     else:
         handler_pattern = re.compile(rf"\bcase\s+(?P<value>{_STRING})")
-    for receiver, region_start, region_end in _method_handler_regions(source, deadline=deadline):
+    for receiver, region_start, region_end in _method_handler_regions(
+        source,
+        code_positions=code_positions,
+        deadline=deadline,
+    ):
         _check_deadline(deadline)
         for match in handler_pattern.finditer(source, region_start, region_end):
             _check_deadline(deadline)
+            if not code_positions[match.start()]:
+                continue
             value = _literal_value(match.group("value"))
             if value is not None and "$" not in value:
                 methods.append(
@@ -369,7 +396,13 @@ def _method_literals(
     return methods
 
 
-def _literal_constants(source: str, language: str, *, deadline: float | None) -> dict[str, str]:
+def _literal_constants(
+    source: str,
+    language: str,
+    *,
+    code_positions: bytearray,
+    deadline: float | None,
+) -> dict[str, str]:
     if language == "dart":
         pattern = re.compile(
             rf"\b(?:static\s+)?const(?:\s+{_IDENTIFIER})?\s+(?P<name>{_IDENTIFIER})\s*=\s*"
@@ -402,6 +435,8 @@ def _literal_constants(source: str, language: str, *, deadline: float | None) ->
     ambiguous: set[str] = set()
     for match in pattern.finditer(source):
         _check_deadline(deadline)
+        if not code_positions[match.start("name")]:
+            continue
         name = match.group("name")
         value = _literal_value(match.group("value"))
         if value is None or "$" in value:
@@ -415,16 +450,72 @@ def _literal_constants(source: str, language: str, *, deadline: float | None) ->
     return constants
 
 
-def _method_handler_regions(source: str, *, deadline: float | None) -> list[tuple[str | None, int, int]]:
+def _method_handler_regions(
+    source: str,
+    *,
+    code_positions: bytearray,
+    deadline: float | None,
+) -> list[tuple[str | None, int, int]]:
     call_pattern = re.compile(rf"(?:(?P<receiver>{_IDENTIFIER})\s*\.\s*)?setMethodCallHandler\b[^;{{]{{0,500}}\{{")
     regions: list[tuple[str | None, int, int]] = []
     for match in call_pattern.finditer(source):
         _check_deadline(deadline)
+        if not code_positions[match.start()]:
+            continue
         opening = source.find("{", match.start(), match.end())
         closing = _matching_source_brace(source, opening, deadline=deadline)
         if closing is not None:
             regions.append((match.group("receiver"), opening + 1, closing))
     return regions
+
+
+def _source_code_positions(source: str, *, deadline: float | None) -> bytearray:
+    """Mark offsets that are outside comments and string literals."""
+
+    code_positions = bytearray(b"\x01") * len(source)
+    index = 0
+    next_deadline_check = 0
+    while index < len(source):
+        if index >= next_deadline_check:
+            _check_deadline(deadline)
+            next_deadline_check = index + 1024
+        if source.startswith("//", index):
+            end = source.find("\n", index + 2)
+            end = len(source) if end < 0 else end
+            code_positions[index:end] = b"\x00" * (end - index)
+            index = end
+            continue
+        if source.startswith("/*", index):
+            start = index
+            depth = 1
+            index += 2
+            while index < len(source) and depth:
+                if index >= next_deadline_check:
+                    _check_deadline(deadline)
+                    next_deadline_check = index + 1024
+                if source.startswith("/*", index):
+                    depth += 1
+                    index += 2
+                elif source.startswith("*/", index):
+                    depth -= 1
+                    index += 2
+                else:
+                    index += 1
+            code_positions[start:index] = b"\x00" * (index - start)
+            continue
+        if source[index] in {"'", '"'} or (source[index] in {"r", "R"} and source[index + 1 : index + 2] in {"'", '"'}):
+            string_end = _skip_source_string(source, index, deadline=deadline)
+            if string_end is not None:
+                code_positions[index:string_end] = b"\x00" * (string_end - index)
+                # The opening offset represents a real literal token. Keeping
+                # it marked lets token-anchored patterns (Kotlin's `"x" ->`)
+                # distinguish literals in code from quote-like text inside an
+                # enclosing comment or string.
+                code_positions[index] = 1
+                index = string_end
+                continue
+        index += 1
+    return code_positions
 
 
 def _matching_source_brace(source: str, opening: int, *, deadline: float | None) -> int | None:

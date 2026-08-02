@@ -834,6 +834,60 @@ Future<void> outer() async {
     assert async_context_lines == [8]
 
 
+def test_framework_metadata_does_not_treat_arbitrary_mounted_read_as_a_guard() -> None:
+    source = """
+import 'package:flutter/material.dart';
+Future<void> open() async {
+  await Future<void>.value();
+  final wasMounted = mounted;
+  context.go('/unguarded');
+}
+"""
+
+    metadata = collect_dart_framework_metadata("lib/arbitrary_mounted.dart", source)
+
+    assert (6, "async BuildContext use after await; mounted guard: absent") in {
+        (item.line, item.text) for item in metadata
+    }
+
+
+def test_framework_metadata_tracks_mounted_guard_control_flow_and_scope() -> None:
+    source = """
+import 'package:flutter/material.dart';
+Future<void> open() async {
+  await Future<void>.value();
+  if (mounted) {
+    context.go('/inside-positive-guard');
+  }
+  context.go('/outside-positive-guard');
+  if (!mounted) return;
+  context.go('/after-inline-exit');
+  await Future<void>.value();
+  if (!context.mounted) {
+    return;
+  }
+  context.go('/after-braced-exit');
+  await Future<void>.value();
+  if (context.mounted) context.go('/inline-positive-guard');
+  context.go('/after-inline-positive-guard');
+}
+"""
+
+    metadata = collect_dart_framework_metadata("lib/scoped_mounted.dart", source)
+    async_context = {
+        item.line: item.text for item in metadata if item.text.startswith("async BuildContext use after await")
+    }
+
+    assert async_context == {
+        6: "async BuildContext use after await; mounted guard: present",
+        8: "async BuildContext use after await; mounted guard: absent",
+        10: "async BuildContext use after await; mounted guard: present",
+        15: "async BuildContext use after await; mounted guard: present",
+        17: "async BuildContext use after await; mounted guard: present",
+        18: "async BuildContext use after await; mounted guard: absent",
+    }
+
+
 def test_platform_channel_index_matches_only_exact_literal_channels(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     shutil.copytree(FIXTURE_ROOT / "channels", repo)

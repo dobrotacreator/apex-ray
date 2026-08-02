@@ -5,6 +5,7 @@ import pytest
 from pydantic import ValidationError
 from typer.testing import CliRunner
 
+from apex_ray.analyzers.dart.toolchain import resolve_dart_toolchain
 from apex_ray.classify import classify_diff, detect_file_kind, detect_language
 from apex_ray.cli import app
 from apex_ray.config import load_config
@@ -29,6 +30,24 @@ from apex_ray.models import (
 )
 
 runner = CliRunner()
+
+
+def test_dart_version_probe_prefers_the_sdk_version_across_both_streams(tmp_path: Path) -> None:
+    dart = tmp_path / "dart"
+    dart.write_text(
+        "#!/bin/sh\nprintf '%s\\n' 'wrapper notice'\nprintf '%s\\n' 'Dart SDK version: 3.12.2 (stable)' >&2\n",
+        encoding="utf-8",
+    )
+    dart.chmod(0o755)
+
+    resolution = resolve_dart_toolchain(
+        tmp_path,
+        DartAnalyzerConfig(command=[str(dart)]),
+        probe_version=True,
+    )
+
+    assert resolution.version == "3.12.2 (stable)"
+    assert resolution.error is None
 
 
 def _dart_pack() -> ContextPack:

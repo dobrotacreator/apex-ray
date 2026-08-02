@@ -175,14 +175,16 @@ def _probe_dart_version(
         return None, str(exc)
     except subprocess.SubprocessError as exc:
         return None, f"version probe failed ({exc})"
-    output = (completed.stdout or completed.stderr).strip()
+    output_lines = [
+        line.strip() for stream in (completed.stdout, completed.stderr) for line in stream.splitlines() if line.strip()
+    ]
     if completed.returncode != 0:
-        detail = f": {output.splitlines()[0][:512]}" if output else ""
+        detail = f": {output_lines[0][:512]}" if output_lines else ""
         return None, f"version probe exited with code {completed.returncode}{detail}"
-    if not output:
+    if not output_lines:
         return None, "version probe produced no output"
-    version = output.splitlines()[0][:512]
     prefix = "Dart SDK version:"
+    version = next((line for line in output_lines if line.startswith(prefix)), output_lines[0])[:512]
     if version.startswith(prefix):
         version = version.removeprefix(prefix).strip()
     return version or None, None if version else "version probe produced no version"

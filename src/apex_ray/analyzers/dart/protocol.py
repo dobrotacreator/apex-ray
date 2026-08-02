@@ -23,6 +23,10 @@ class DartLspProtocolError(DartLspError):
     """The peer sent an invalid LSP or JSON-RPC message."""
 
 
+class DartLspTransportError(DartLspError):
+    """The LSP byte stream failed during transport I/O."""
+
+
 def encode_lsp_message(payload: Mapping[str, object]) -> bytes:
     """Encode one JSON-RPC object with LSP ``Content-Length`` framing."""
 
@@ -41,14 +45,17 @@ def write_lsp_frame(stream: BinaryIO, frame: bytes) -> None:
     promised by ``Content-Length``.
     """
 
-    view = memoryview(frame)
-    offset = 0
-    while offset < len(view):
-        written = stream.write(view[offset:])
-        if written is None or written <= 0 or written > len(view) - offset:
-            raise DartLspProtocolError("Dart LSP stream made no progress while writing a frame")
-        offset += written
-    stream.flush()
+    try:
+        view = memoryview(frame)
+        offset = 0
+        while offset < len(view):
+            written = stream.write(view[offset:])
+            if written is None or written <= 0 or written > len(view) - offset:
+                raise DartLspProtocolError("Dart LSP stream made no progress while writing a frame")
+            offset += written
+        stream.flush()
+    except (OSError, ValueError) as exc:
+        raise DartLspTransportError(f"Dart LSP stream write failed: {exc}") from exc
 
 
 def read_lsp_message(

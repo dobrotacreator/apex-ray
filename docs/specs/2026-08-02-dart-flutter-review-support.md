@@ -24,8 +24,8 @@ Resolve the command without executing package installation or changing the revie
 
 1. explicit `review.analyzer.dart.command` configuration;
 2. a project-local `.fvm/flutter_sdk/bin/dart` executable;
-3. `dart` on `PATH`;
-4. `fvm dart` when FVM is on `PATH`;
+3. `dart` on `PATH`, treating the caller's environment as an explicit SDK selection;
+4. `fvm dart` when FVM is on `PATH` and no direct Dart SDK was selected;
 5. the Dart binary adjacent to a discoverable Flutter SDK when its location is unambiguous.
 
 The configured command is an argument list, not a shell string. Apex Ray appends `language-server`, `--client-id`, and `--client-version`. It never evaluates a shell, downloads an SDK, runs `pub get`, or invokes build generation.
@@ -169,8 +169,9 @@ Prompts must explicitly treat diagnostics as context, not review findings, and a
 - keep a single server process and open only changed files plus bounded local-package anchors;
 - cap semantic requests per file/symbol and short-circuit layers after the global deadline;
 - exclude generated snippets before context construction;
-- reuse the existing analyzer index-cache surface for a compact Dart result cache keyed by Apex Ray analyzer version, SDK version, relevant configuration, project/package metadata, file identity, and diff ranges;
-- invalidate when `pubspec.yaml`, `pubspec.lock`, `analysis_options.yaml`, `.dart_tool/package_config.json`, or linked package manifests change;
+- reuse the existing analyzer index-cache surface for a compact Dart result cache keyed by Apex Ray analyzer version, SDK/tool executable identity and version, relevant analyzer and privacy configuration, diff ranges, and a bounded fingerprint of the semantic source inventory;
+- include handwritten/generated Dart sources, in-repository local package sources, related tests, platform-channel sources, recursive analysis-option includes, package metadata, and lock/config files in that fingerprint, and disable caching when an external path dependency cannot be represented safely;
+- invalidate when any fingerprinted source changes or when `pubspec.yaml`, `pubspec.lock`, `analysis_options.yaml`, `.dart_tool/package_config.json`, linked package manifests, ignore/allowlist policy, or the resolved toolchain changes;
 - never cache absolute paths in portable committed artifacts;
 - record backend duration, partial/fallback reasons, file/symbol/request counts, generated references suppressed, and cache hit/miss data without source contents.
 

@@ -17,6 +17,7 @@ from apex_ray.analyzers.dart.lsp import (
     DartLspTimeout,
 )
 from apex_ray.analyzers.dart.protocol import (
+    DartLspError,
     encode_lsp_message,
     file_uri_to_path,
     path_to_file_uri,
@@ -47,6 +48,64 @@ class _PartialWriter(io.BytesIO):
         super().flush()
 
 
+class _FailingWriter(io.BytesIO):
+    def __init__(self, stage: str) -> None:
+        super().__init__()
+        self.stage = stage
+
+    def write(self, data: bytes) -> int:
+        if self.stage == "write":
+            raise BrokenPipeError("synthetic broken pipe")
+        return super().write(data)
+
+    def flush(self) -> None:
+        if self.stage == "flush":
+            raise OSError("synthetic flush failure")
+        super().flush()
+
+
+_DEADLINE_TEST_SERVER = r"""
+import json
+import sys
+import time
+
+stdin = sys.stdin.buffer
+stdout = sys.stdout.buffer
+
+
+def read_message():
+    content_length = None
+    while True:
+        line = stdin.readline()
+        if line in {b"\r\n", b"\n"}:
+            break
+        name, value = line.decode("ascii").split(":", 1)
+        if name.lower() == "content-length":
+            content_length = int(value)
+    return json.loads(stdin.read(content_length))
+
+
+def send(payload):
+    body = json.dumps(payload, separators=(",", ":")).encode()
+    stdout.write(f"Content-Length: {len(body)}\r\n\r\n".encode() + body)
+    stdout.flush()
+
+
+while True:
+    message = read_message()
+    method = message.get("method")
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": message["id"], "result": {"capabilities": {}}})
+    elif method == "test/timeout":
+        send({"jsonrpc": "2.0", "method": "test/requestSeen", "params": {}})
+        time.sleep(30)
+    elif method == "shutdown":
+        send({"jsonrpc": "2.0", "id": message["id"], "result": None})
+    elif method == "exit":
+        time.sleep(30)
+"""
+
+
 def _client(tmp_path: Path, mode: str = "normal", **kwargs: object) -> DartLspClient:
     return DartLspClient([sys.executable, str(FIXTURE), mode], tmp_path, **kwargs)
 
@@ -68,6 +127,16 @@ def test_framing_writes_the_complete_frame_when_stream_writes_partially() -> Non
 
     assert stream.getvalue() == encoded
     assert stream.flushed is True
+
+
+@pytest.mark.parametrize("stage", ["write", "flush"])
+def test_framing_normalizes_stream_io_failures(stage: str) -> None:
+    encoded = encode_lsp_message({"jsonrpc": "2.0", "method": "test"})
+
+    with pytest.raises(DartLspError, match="write") as exc_info:
+        write_lsp_frame(_FailingWriter(stage), encoded)
+
+    assert isinstance(exc_info.value.__cause__, OSError)
 
 
 @pytest.mark.parametrize(
@@ -228,6 +297,62 @@ def test_client_enforces_request_and_global_deadlines(tmp_path: Path) -> None:
     with _client(tmp_path, timeout=5, deadline=time.monotonic() + 0.05) as client:
         with pytest.raises(DartLspTimeout, match="global deadline"):
             client.request("test/timeout")
+
+
+def test_timed_out_request_does_not_wait_for_a_fresh_cancellation_timeout(tmp_path: Path) -> None:
+    client = DartLspClient(
+        [sys.executable, "-c", _DEADLINE_TEST_SERVER],
+        tmp_path,
+        timeout=2,
+    )
+    client.start()
+    request_errors: list[BaseException] = []
+    notification_errors: list[BaseException] = []
+    request = threading.Thread(
+        target=lambda: _capture_error(
+            request_errors,
+            lambda: client.request("test/timeout", timeout=0.2),
+        )
+    )
+    blocked_notification = threading.Thread(
+        target=lambda: _capture_error(
+            notification_errors,
+            lambda: client.notify("test/fill-stdin", {"payload": "x" * 2_000_000}),
+        )
+    )
+
+    try:
+        request.start()
+        client.wait_for_notification("test/requestSeen", timeout=1)
+        blocked_notification.start()
+        request.join(timeout=0.5)
+
+        assert not request.is_alive()
+        assert len(request_errors) == 1
+        assert isinstance(request_errors[0], DartLspTimeout)
+    finally:
+        client.close()
+        request.join(timeout=1)
+        blocked_notification.join(timeout=1)
+
+
+def test_graceful_shutdown_wait_obeys_global_analyzer_deadline(tmp_path: Path) -> None:
+    deadline = time.monotonic() + 1
+    client = DartLspClient(
+        [sys.executable, "-c", _DEADLINE_TEST_SERVER],
+        tmp_path,
+        timeout=5,
+        deadline=deadline,
+    )
+    client.start()
+    client.initialize(path_to_file_uri(tmp_path))
+
+    started = time.monotonic()
+    client.shutdown()
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 1.8
+    assert not client.is_running
 
 
 def test_client_write_deadline_terminates_unresponsive_server_and_wakes_requests(tmp_path: Path) -> None:
