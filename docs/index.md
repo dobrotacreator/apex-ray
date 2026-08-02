@@ -28,7 +28,7 @@ Apex Ray reads a git diff, builds compact context packs around changed code, run
 
 - Builds context packs from changed files, symbols, callers, callees, contracts, metadata, and related tests.
 - Runs a language-neutral diff -> context pack -> optional LLM review workflow.
-- Uses enhanced analyzers for TypeScript/JavaScript, Python, and Go today, with Rust planned next.
+- Uses enhanced analyzers for TypeScript/JavaScript, Python, Go, and Dart/Flutter today, with Rust planned next.
 - Supports path-aware project risk policy, project-specific rules, and repo-committed review memory.
 - Runs without LLM calls, with Codex CLI / Claude Code CLI, or through direct OpenAI, Anthropic, DeepSeek, Qwen, Kimi, Z.ai, and custom compatible APIs.
 - Runs multiple focused reviewers with independent scope, profile, depth, verification, and budget controls.
@@ -46,6 +46,7 @@ Apex Ray's review pipeline is language-neutral. It is strongest where an analyze
 | Enhanced analyzer available | TypeScript, JavaScript | NestJS controllers/providers/modules/guards, DTO/schema validators, route and DI metadata, workspace imports/exports, enum/const fanout, cache and permission surfaces, related tests. |
 | Enhanced analyzer available | Python | FastAPI routes/dependencies, Pydantic models/settings/validators, SQLAlchemy sessions/transactions, Alembic migrations, async worker/event flows, external HTTP/cloud/Redis adapters, dataclass/TypedDict/Protocol contracts, pytest/unittest tests and fixtures. |
 | Enhanced analyzer available | Go | Type-aware package loading, repository-relative symbols, changed and deleted symbol ranges, callers/callees, interface contracts, context metadata, syntax-only fallback, and related tests. |
+| Enhanced analyzer available | Dart, Flutter | Dart Analysis Server symbols, references, call/type relationships, parts and local packages, related tests, bounded Flutter framework metadata, generated-code suppression, and exact literal platform-channel contracts. |
 | Enhanced analyzer planned | Rust | Repository-aware symbols, callers/callees, contracts, service boundaries, persistence/I/O surfaces, and related tests. |
 | Generic fallback | Other reviewable diffs | Diff-hunk context, risk signals, project rules, memory, reports, and optional LLM review without a repository-aware symbol graph. |
 
@@ -91,6 +92,7 @@ See [Quick Start](quickstart.md) for the full first-run sequence.
 - [Configuration](configuration.md): shared config, local overrides, coverage, reports, and pre-push gate policy.
 - [LLM Providers](providers.md): local CLIs, direct and custom APIs, profiles, routing, effort, usage, and privacy boundaries.
 - [GitHub Actions](github-actions.md): secure pull-request configuration, API secrets, focused reviewer matrices, artifacts, SARIF, and quality gates.
+- [Dart And Flutter](dart-flutter.md): SDK/FVM selection, semantic coverage, generated-code policy, performance, CI, and troubleshooting.
 - [Rules And Memory](memory.md): project-specific review rules and curated repo memory.
 - [Telemetry](telemetry.md): local JSONL metrics for cost, latency, routing, and coverage tuning.
 - [Tuning](tuning.md): TypeScript-oriented presets and an evidence-driven loop for risk, reviewer, route, and budget calibration.

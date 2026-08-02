@@ -99,7 +99,7 @@ See the full [Quick Start](https://dobrotacreator.github.io/apex-ray/quickstart/
 
 - Builds context packs from changed files, symbols, callers, callees, contracts, metadata, and related tests.
 - Runs a language-neutral diff -> context pack -> optional LLM review workflow.
-- Uses enhanced analyzers for TypeScript/JavaScript, Python, and Go today, with Rust planned next.
+- Uses enhanced analyzers for TypeScript/JavaScript, Python, Go, and Dart/Flutter today, with Rust planned next.
 - Supports project-specific rules and repo-committed review memory.
 - Runs without LLM calls, with Codex CLI / Claude Code CLI subscriptions, or
   with OpenAI, Anthropic, DeepSeek, Qwen, Kimi, Z.ai, and custom compatible
@@ -123,6 +123,7 @@ Apex Ray's review pipeline is language-neutral. It is strongest where an analyze
 | Enhanced analyzer available | TypeScript, JavaScript | NestJS controllers/providers/modules/guards, DTO/schema validators, route and DI metadata, workspace imports/exports, enum/const fanout, cache and permission surfaces, related tests. |
 | Enhanced analyzer available | Python | FastAPI routes/dependencies, Pydantic models/settings/validators, SQLAlchemy sessions/transactions, Alembic migrations, async worker/event flows, external HTTP/cloud/Redis adapters, dataclass/TypedDict/Protocol contracts, pytest/unittest tests and fixtures. |
 | Enhanced analyzer available | Go | Type-aware package loading, repository-relative symbols, changed and deleted symbol ranges, callers/callees, interface contracts, context metadata, syntax-only fallback, and related tests. |
+| Enhanced analyzer available | Dart, Flutter | Dart Analysis Server symbols, references, call/type relationships, parts and local packages, related tests, bounded Flutter framework metadata, generated-code suppression, and exact literal platform-channel contracts. |
 | Enhanced analyzer planned | Rust | Repository-aware symbols, callers/callees, contracts, service boundaries, persistence/I/O surfaces, and related tests. |
 | Generic fallback | Other reviewable diffs | Diff-hunk context, risk signals, project rules, memory, reports, and optional LLM review without a repository-aware symbol graph. |
 
@@ -136,6 +137,7 @@ Apex Ray does not replace CI, tests, linters, typecheck, dependency scanners, SA
 - [Review Workflow](https://dobrotacreator.github.io/apex-ray/review-workflow/)
 - [Configuration](https://dobrotacreator.github.io/apex-ray/configuration/)
 - [LLM Providers](https://dobrotacreator.github.io/apex-ray/providers/)
+- [Dart And Flutter](https://dobrotacreator.github.io/apex-ray/dart-flutter/)
 - [Rules And Memory](https://dobrotacreator.github.io/apex-ray/memory/)
 - [Telemetry](https://dobrotacreator.github.io/apex-ray/telemetry/)
 - [Historical PR Replay Evals](https://dobrotacreator.github.io/apex-ray/pr-eval/)

@@ -143,7 +143,7 @@ Use `.apex-ray/config.yml` for shared policy and `.apex-ray/config.local.yml` fo
 
 ## Language Selection
 
-By default Apex Ray reviews every reviewable diff file it can classify and builds analyzer-backed context where a backend exists. Today the enhanced analyzer backends cover TypeScript/JavaScript, Python, and Go.
+By default Apex Ray reviews every reviewable diff file it can classify and builds analyzer-backed context where a backend exists. Today the enhanced analyzer backends cover TypeScript/JavaScript, Python, Go, and Dart/Flutter.
 
 Use `review.languages` only when a project wants to restrict review scope:
 
@@ -154,9 +154,49 @@ review:
     - javascript
     - python
     - go
+    - dart
 ```
 
 Files in detected but disabled languages are reported as ignored. Rust can be discovered as a project language today, but enhanced analyzer support for it is planned rather than available.
+
+## Dart And Flutter Analyzer
+
+Dart review uses the Analysis Server from the SDK selected by the project. The
+default configuration is backwards compatible and bounded:
+
+```yaml
+review:
+  analyzer:
+    timeout_seconds: 120
+    index_cache_enabled: true
+    dart:
+      enabled: true
+      command: []
+      flutter: auto
+      plugins: true
+      max_changed_symbols: 80
+      max_references_per_symbol: 24
+      max_callees_per_symbol: 16
+      max_related_tests_per_file: 12
+      max_dependency_package_anchors: 16
+```
+
+`command` must be an argument list; it is never parsed by a shell. Leave it
+empty to use project-local FVM, `dart` on `PATH`, FVM on `PATH`, or the Dart
+binary next to Flutter, in that order. `flutter` accepts `auto`, `enabled`, or
+`disabled`. `plugins` defaults to `true` for compatibility with trusted local
+project analysis; set it to `false` when analyzing an untrusted checkout with
+an SDK that supports disabling analyzer plugins. The semantic limits cap graph
+fan-out;
+`max_dependency_package_anchors` additionally bounds the reverse-dependent
+local packages opened to discover cross-package consumers. The global
+analyzer timeout bounds the server and all requests.
+
+Apex Ray does not install an SDK, run `pub get`, or invoke code generation.
+Resolve dependencies with the selected SDK before review. Common generated
+Dart files remain available for symbol resolution but are excluded from
+review targets and raw context snippets. See [Dart And Flutter](dart-flutter.md)
+for full setup, semantics, cache behavior, and safe fallback details.
 
 ## Rules
 

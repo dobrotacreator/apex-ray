@@ -1,0 +1,6 @@
+name: sample_app
+dependencies:
+  flutter:
+    sdk: flutter
+  sample_shared:
+    path: ../shared

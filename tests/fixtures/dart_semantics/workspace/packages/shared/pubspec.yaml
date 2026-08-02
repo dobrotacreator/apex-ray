@@ -1,0 +1,4 @@
+name: sample_shared
+dependencies:
+  sample_app:
+    path: ../app

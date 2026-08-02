@@ -59,6 +59,7 @@ nav:
       - Configuration: configuration.md
       - LLM Providers: providers.md
       - GitHub Actions: github-actions.md
+      - Dart And Flutter: dart-flutter.md
   - Project Knowledge:
       - Rules And Memory: memory.md
       - Telemetry: telemetry.md

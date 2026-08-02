@@ -17,6 +17,7 @@ from apex_ray.resolution import (
 )
 
 LANGUAGE_HINTS = {
+    "dart": "Dart/Flutter",
     "javascript": "TypeScript/JavaScript",
     "python": "Python",
     "typescript": "TypeScript/JavaScript",
@@ -898,6 +899,20 @@ def _language_review_guidance(pack: ContextPack) -> str:
             "DTO/schema validators, route parameter/body contracts, DI/provider registration, "
             "enum/const collection fanout, object/array guard changes, and workspace import/export/member references."
         )
+    if language == "Dart/Flutter":
+        return (
+            "Language hint: Dart/Flutter.\n"
+            "For Dart packs, pay extra attention to async and stream error semantics, nullability and sealed/type "
+            "contracts, serialization compatibility, generated-interface drift, and related unit coverage. "
+            "When concrete Flutter evidence is present, check widget/State ownership; lifecycle cleanup for "
+            "controllers, focus nodes, listeners, subscriptions, timers, and streams; async BuildContext and stale "
+            "state use; BLoC/Cubit and MobX transitions; DI/provider boundaries; GoRouter/Navigator redirects, "
+            "parameters, and returned-result contracts; permissions, storage, network, isolates, and background "
+            "execution; MethodChannel/EventChannel/BasicMessageChannel name, type, and error parity; and widget "
+            "accessibility, responsiveness, rebuild scope, and relevant test coverage. Treat analyzer diagnostics "
+            "as context, not review findings, and do not restate style or lint output already handled by dart analyze "
+            "or flutter_lints."
+        )
     return (
         f"Language hint: {language}.\n"
         "For fallback or unknown-language packs, prioritize generic boundary, auth, validation, persistence, "
@@ -940,6 +955,14 @@ def _language_shallow_review_guidance(pack: ContextPack) -> str:
             "For TypeScript/JavaScript boundary risks, look for direct evidence of "
             "NestJS/DTO/schema/DI/provider/route/cache changes in the supplied snippets."
         )
+    if language == "Dart/Flutter":
+        return (
+            "Language hint: Dart/Flutter.\n"
+            "For Dart/Flutter boundary risks, use only direct evidence of lifecycle/cleanup, async BuildContext or "
+            "stale state, state transitions, routing, serialization, permissions/storage/network boundaries, "
+            "platform-channel parity, rebuild scope, or test-coverage changes. Treat analyzer diagnostics as "
+            "context, not findings, and do not repeat dart analyze or flutter_lints output."
+        )
     return (
         f"Language hint: {language}.\n"
         "For fallback or unknown-language boundary risks, use only directly visible auth, validation, persistence, "
@@ -961,6 +984,15 @@ def _language_verifier_guidance(pack: ContextPack) -> str:
             "Language hint: TypeScript/JavaScript.\n"
             "For TypeScript/JavaScript-specific findings, approve only when the failure mode is grounded in supplied "
             "TS/JS context such as NestJS/DTO/schema/DI/provider/route/cache boundaries or workspace references."
+        )
+    if language == "Dart/Flutter":
+        return (
+            "Language hint: Dart/Flutter.\n"
+            "For Dart/Flutter-specific findings, approve only when the failure mode is grounded in concrete supplied "
+            "Dart/Flutter evidence such as lifecycle ownership, async context/state, state transitions, navigation, "
+            "serialization, platform-channel parity, permissions/storage/network boundaries, widget behavior, or "
+            "related tests. Treat analyzer diagnostics as context, not findings, and reject restated dart analyze, "
+            "flutter_lints, or style output."
         )
     return (
         f"Language hint: {language}.\n"

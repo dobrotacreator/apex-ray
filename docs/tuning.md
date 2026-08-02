@@ -85,6 +85,12 @@ Do not ignore migrations, schemas, deployment configuration, or generated
 client/server contracts merely because they are large; those surfaces often
 carry compatibility risk. Classify or scope them deliberately.
 
+For Dart/Flutter, do not broadly ignore `*.g.dart`, `*.freezed.dart`, router,
+DI, mock, or generated-client files. Apex Ray keeps recognized Dart outputs
+index-only and removes their raw snippets automatically, preserving useful
+handwritten-to-generated relationships without spending prompt budget. See
+[Dart And Flutter](dart-flutter.md#generated-code).
+
 Keep the TypeScript index cache and adaptive sharding enabled:
 
 ```yaml
@@ -265,6 +271,7 @@ trusted-config boundary.
 | Repeated provider failures | Failure type and circuit-open reason | Fix credentials/quota/endpoint first; do not raise the circuit threshold to retry deterministic failures. |
 | Low cache hit rate on repeated diffs | Config, model, prompt, and cache location | Use shared `git_common` storage and avoid unnecessary profile/prompt churn. |
 | TypeScript analyzer memory or latency spike | Included file classes and cache/shard metrics | Ignore build/dependency output, retain adaptive sharding, and test the specific large workspace. |
+| Dart analyzer is partial or slow | SDK/package resolution, changed-symbol fan-out, analyzer warnings, and cache status | Resolve packages with the selected SDK, keep generated files index-only, lower Dart semantic caps, or increase the global timeout only after measuring. |
 
 ## Validate A Tuning Change
 

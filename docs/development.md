@@ -6,6 +6,7 @@
 - Node.js 24+
 - npm
 - Go 1.24+ for Go analyzer development
+- a Dart or Flutter SDK only for live Dart analyzer smoke tests
 - uv
 - git
 
@@ -52,6 +53,15 @@ The Python analyzer lives under `src/apex_ray/analyzers/python/`. Keep it groupe
 
 The bundled Go analyzer lives under `analyzer-runtimes/go/`. It uses `golang.org/x/tools/go/packages` for semantic package loading and emits the same analyzer JSON contract consumed by Python. Keep Go analyzer code grouped under `cmd/` and `internal/`; Python integration belongs in `src/apex_ray/analyzers/go.py`.
 
+The Dart/Flutter analyzer lives under `src/apex_ray/analyzers/dart/`. Keep LSP
+transport/lifecycle, SDK resolution, semantic mapping, generated filtering,
+cache behavior, related-test ranking, framework metadata, and platform-channel
+indexing in their existing focused modules. It consumes the selected project's
+`dart language-server`; do not vendor an SDK or add a second Dart analyzer
+runtime. Exhaustive protocol tests use the fake server under
+`tests/fixtures/dart_lsp/`, while CI provides the live installed-wheel Flutter
+smoke.
+
 Avoid adding new flat prefix modules like `cli_*.py`, `pipeline_*.py`, `llm_*.py`, `report_*.py`, `contract-*.ts`, or `workspace-*.ts`; use package-local names inside the relevant directory. Keep Python package `__init__.py` files thin and focused on public re-exports.
 
 ## Checks
@@ -68,6 +78,7 @@ npm --prefix analyzer-runtimes/typescript run typecheck
 npm --prefix analyzer-runtimes/typescript test
 npm --prefix analyzer-runtimes/typescript run coverage
 go -C analyzer-runtimes/go test ./...
+uv run pytest -q tests/test_dart_*.py
 uv build --sdist --wheel
 uv run twine check dist/*
 git diff --check

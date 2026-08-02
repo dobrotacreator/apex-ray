@@ -75,6 +75,14 @@ jobs:
       - name: Check package metadata
         run: uv run twine check dist/*
 
+      - name: Set up pinned Flutter SDK for installed-wheel smoke
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2  # v2.23.0
+        with:
+          flutter-version: "3.44.8"
+          channel: stable
+          cache: true
+          pub-cache: true
+
       - name: Smoke test installed wheel
         run: |
           wheel="$(find dist -maxdepth 1 -name '*.whl' -print -quit)"
@@ -271,4 +279,175 @@ jobs:
               for pack in report["context_packs"]
               for metadata in pack.get("metadata", [])
           ), "expected Go boundary metadata in context pack"
+          PY
+          dart_reviewdir="$(mktemp -d)"
+          cd "$dart_reviewdir"
+          git init
+          git config user.email "apex@example.test"
+          git config user.name "Apex Test"
+          mkdir -p .apex-ray lib test packages/counter_core/lib/src
+          printf '.dart_tool/\nbuild/\n' > .gitignore
+          cat > .apex-ray/config.yml <<'YAML'
+          review:
+            analyzer:
+              dart:
+                plugins: false
+            llm:
+              enabled: false
+          YAML
+          cat > pubspec.yaml <<'YAML'
+          name: apex_ray_flutter_smoke
+          publish_to: none
+          environment:
+            sdk: ">=3.9.0 <4.0.0"
+          workspace:
+            - packages/counter_core
+          dependencies:
+            flutter:
+              sdk: flutter
+            counter_core: ^1.0.0
+          dev_dependencies:
+            flutter_test:
+              sdk: flutter
+          YAML
+          cat > packages/counter_core/pubspec.yaml <<'YAML'
+          name: counter_core
+          version: 1.0.0
+          publish_to: none
+          resolution: workspace
+          environment:
+            sdk: ">=3.9.0 <4.0.0"
+          dependencies:
+            flutter:
+              sdk: flutter
+          YAML
+          cat > packages/counter_core/lib/counter.dart <<'DART'
+          import 'package:flutter/foundation.dart';
+
+          part 'src/counter.g.dart';
+
+          class CounterController extends ChangeNotifier {
+            int _value = 0;
+
+            int get value => _value;
+
+            void increment() {
+              _value += 1;
+              notifyListeners();
+            }
+          }
+          DART
+          cat > packages/counter_core/lib/src/counter.g.dart <<'DART'
+          part of '../counter.dart';
+
+          // CI_GENERATED_SECRET_DO_NOT_PROMPT
+          extension GeneratedCounterReplay on CounterController {
+            void replayGenerated() {
+              increment();
+            }
+          }
+          DART
+          cat > lib/counter_consumer.dart <<'DART'
+          import 'package:counter_core/counter.dart';
+
+          class CounterConsumer {
+            CounterConsumer(this.controller);
+
+            final CounterController controller;
+
+            void increment() => controller.increment();
+          }
+          DART
+          cat > test/counter_test.dart <<'DART'
+          import 'package:apex_ray_flutter_smoke/counter_consumer.dart';
+          import 'package:counter_core/counter.dart';
+          import 'package:flutter_test/flutter_test.dart';
+
+          void main() {
+            test('increments through a local package dependency', () {
+              final controller = CounterController();
+              final consumer = CounterConsumer(controller);
+
+              consumer.increment();
+              controller.increment();
+
+              expect(controller.value, 2);
+            });
+          }
+          DART
+          flutter pub get
+          git add .
+          git commit -m "initial"
+          perl -0pi -e 's/_value \+= 1;/_value += 2;/' packages/counter_core/lib/counter.dart
+          doctor_output="$("$GITHUB_WORKSPACE/.ci-smoke-venv/bin/apex-ray" doctor)"
+          echo "$doctor_output"
+          grep -q "Detected languages: dart" <<<"$doctor_output"
+          grep -q "Package managers: pub" <<<"$doctor_output"
+          grep -q "Framework hints: flutter" <<<"$doctor_output"
+          grep -q "Dart analyzer available: true" <<<"$doctor_output"
+          "$GITHUB_WORKSPACE/.ci-smoke-venv/bin/apex-ray" review --worktree --no-llm --output dart-review.md --json dart-review.json
+          test -s dart-review.md
+          test -s dart-review.json
+          "$GITHUB_WORKSPACE/.ci-smoke-venv/bin/python" - <<'PY'
+          import json
+          from pathlib import Path
+
+          report_path = Path("dart-review.json")
+          report = json.loads(report_path.read_text(encoding="utf-8"))
+          dart_results = [
+              analyzer_result
+              for analyzer_result in report["analyzer_results"]
+              if analyzer_result.get("language") == "dart"
+          ]
+          assert dart_results, "expected Dart analyzer results from installed wheel"
+          warnings = "\n".join(
+              warning
+              for analyzer_result in dart_results
+              for warning in analyzer_result.get("warnings", [])
+          )
+          assert "Dart analyzer unavailable" not in warnings
+          assert "Unable to start Dart LSP server" not in warnings
+          changed_file = next(
+              analyzer_file
+              for analyzer_result in dart_results
+              for analyzer_file in analyzer_result.get("files", [])
+              if analyzer_file.get("path") == "packages/counter_core/lib/counter.dart"
+          )
+          assert changed_file.get("changed_symbols"), (
+              "expected changed symbols from the live Dart Analysis Server for the nested local package"
+          )
+          references = {
+              reference.get("file")
+              for symbol in changed_file.get("changed_symbols", [])
+              for reference in symbol.get("references", [])
+          }
+          assert "lib/counter_consumer.dart" in references, (
+              "expected a semantic reference from the unchanged reverse-dependent root package"
+          )
+          assert "test/counter_test.dart" in references, (
+              "expected a semantic reference from the root Flutter test across the package boundary"
+          )
+          assert "test/counter_test.dart" in changed_file.get("related_tests", []), (
+              "expected the cross-package semantic Flutter test relationship"
+          )
+          serialized_report = report_path.read_text(encoding="utf-8")
+          assert "CI_GENERATED_SECRET_DO_NOT_PROMPT" not in serialized_report, (
+              "generated Dart source must not enter report or prompt context"
+          )
+          assert "packages/counter_core/lib/src/counter.g.dart" not in serialized_report, (
+              "generated Dart source from the nested package must stay absent"
+          )
+          assert all(
+              not snippet.get("file", "").endswith(".g.dart")
+              for pack in report["context_packs"]
+              for key in (
+                  "changed_snippets",
+                  "reference_snippets",
+                  "callee_snippets",
+                  "contract_snippets",
+                  "metadata_snippets",
+                  "related_test_snippets",
+              )
+              for snippet in pack.get(key, [])
+          ), "generated Dart snippets must not enter context packs"
           PY

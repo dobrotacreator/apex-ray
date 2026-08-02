@@ -1,8 +1,9 @@
+import json
 import shutil
 import time
 from enum import StrEnum
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Protocol
 
 import typer
 
@@ -35,6 +36,7 @@ from apex_ray.llm import LLMProviderError
 from apex_ray.local_data import LOCAL_DATA_TOKEN, LocalDataPathError, resolve_config_path, resolve_runtime_config_paths
 from apex_ray.models import (
     DEFAULT_AUTO_FOLLOWUP_P0_MAX_PACK_REVIEWS,
+    DartAnalyzerConfig,
     LLMCoverageMode,
     LLMProviderName,
     ReviewConfig,
@@ -76,6 +78,23 @@ class InitHookMode(StrEnum):
     LEFTHOOK = "lefthook"
     GIT = "git"
     NONE = "none"
+
+
+class _DartToolchainResolution(Protocol):
+    @property
+    def command(self) -> list[str]: ...
+
+    @property
+    def source(self) -> str: ...
+
+    @property
+    def version(self) -> str | None: ...
+
+    @property
+    def error(self) -> str | None: ...
+
+    @property
+    def remediation(self) -> str | None: ...
 
 
 class InitAgentFilesMode(StrEnum):
@@ -220,6 +239,38 @@ def doctor(
     typer.echo(f"- Go available: {str(shutil.which('go') is not None).lower()}")
     typer.echo(f"- Go analyzer: {go_runtime}")
     typer.echo(f"- Go analyzer available: {str(go_runtime.exists()).lower()}")
+    typer.echo(f"- Dart analyzer enabled: {str(review_config.analyzer.dart.enabled).lower()}")
+    if not review_config.analyzer.dart.enabled:
+        typer.echo("- Dart SDK command: skipped (analyzer disabled)")
+        typer.echo("- Dart SDK source: disabled")
+        typer.echo("- Dart SDK version: skipped")
+        typer.echo("- Dart analyzer available: false")
+    else:
+        try:
+            dart_toolchain = _resolve_dart_toolchain_for_doctor(root, review_config.analyzer.dart)
+        except Exception as exc:
+            typer.echo("- Dart SDK command: not found")
+            typer.echo("- Dart SDK source: unavailable")
+            typer.echo("- Dart SDK version: unavailable")
+            typer.echo("- Dart analyzer available: false")
+            typer.echo(f"- Dart SDK error: unable to inspect Dart SDK ({exc})")
+            typer.echo(
+                "- Dart remediation: Install Flutter or Dart, configure FVM, or set review.analyzer.dart.command."
+            )
+        else:
+            command = json.dumps(dart_toolchain.command, ensure_ascii=False) if dart_toolchain.command else "not found"
+            version = dart_toolchain.version or "unavailable"
+            if version.startswith("Dart SDK version:"):
+                version = version.removeprefix("Dart SDK version:").strip() or "unavailable"
+            typer.echo(f"- Dart SDK command: {command}")
+            typer.echo(f"- Dart SDK source: {dart_toolchain.source}")
+            typer.echo(f"- Dart SDK version: {version}")
+            dart_available = bool(dart_toolchain.command) and dart_toolchain.error is None
+            typer.echo(f"- Dart analyzer available: {str(dart_available).lower()}")
+            if dart_toolchain.error:
+                typer.echo(f"- Dart SDK error: {dart_toolchain.error}")
+            if dart_toolchain.remediation:
+                typer.echo(f"- Dart remediation: {dart_toolchain.remediation}")
     typer.echo(f"- Node available: {str(shutil.which('node') is not None).lower()}")
     typer.echo(f"- TypeScript analyzer: {analyzer_script}")
     typer.echo(f"- TypeScript analyzer built: {str(analyzer_script.exists()).lower()}")
@@ -247,6 +298,15 @@ def _python_analyzer_available() -> bool:
     except Exception:
         return False
     return callable(run_python_analyzer)
+
+
+def _resolve_dart_toolchain_for_doctor(
+    root: Path,
+    config: DartAnalyzerConfig,
+) -> _DartToolchainResolution:
+    from apex_ray.analyzers.dart.toolchain import resolve_dart_toolchain
+
+    return resolve_dart_toolchain(root, config, probe_version=True, timeout_seconds=2.0)
 
 
 @app.command("telemetry-summary")

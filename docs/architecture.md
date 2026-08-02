@@ -102,6 +102,35 @@ The analyzer under `analyzer-runtimes/go/` is a Go program bundled as source int
 
 Python calls the analyzer as a subprocess through `go run`, receives structured JSON, and falls back to diff-only context when the Go toolchain or analyzer runtime is unavailable.
 
+### Dart And Flutter Analyzer
+
+The Dart backend under `src/apex_ray/analyzers/dart/` starts the Analysis
+Server from the SDK selected by the reviewed repository and communicates over
+standard JSON-RPC/LSP framing. Apex Ray bundles the client, mapping, cache, and
+framework adapters, but not a Dart or Flutter SDK.
+
+- one language-server process serves changed handwritten Dart files and a
+  bounded set of local-package reverse-dependency anchors;
+- document symbols map declarations and exact changed ranges into the shared
+  analyzer schema;
+- references plus call/type hierarchy produce consumers, callers, callees,
+  and contracts when supported by the selected server;
+- a bounded lexical layer preserves imports, exports, parts, Flutter
+  framework evidence, related tests, and exact literal platform channels;
+- generated Dart remains available to semantic resolution but generated
+  targets, locations, and raw snippets are filtered before context packing;
+- request limits, a global deadline, process-group cleanup, and a
+  content-addressed result cache bound runtime and repeated work.
+
+Trusted local runs preserve the selected project's analyzer-plugin behavior.
+Restricted pull-request CI instead pins an SDK executable outside the reviewed
+checkout and disables analyzer plugins; an older SDK that cannot enforce this
+restriction falls back to diff-only Dart coverage.
+
+Unsupported optional LSP methods degrade to warnings. Startup, protocol,
+timeout, and per-file failures are scoped to Dart so other language backends
+can still succeed and affected files receive diff-only context.
+
 ### Python Analyzer
 
 The Python analyzer lives under `src/apex_ray/analyzers/python/` and runs in-process with the Python stdlib `ast` parser. It builds repository-aware context for Python changes:
@@ -301,6 +330,11 @@ Benchmark reports can be compared to detect regressions in expected findings, ex
 - `ts_project/`: a tiny TypeScript project with `src/`, `tests/`, `tsconfig.json`, and several diffs. It exercises the core analyzer/context/review path.
 - `ts_quality/*/`: synthetic TS/JS repositories with one `repo/` directory and one `change.diff`. Each fixture targets a specific context or review-quality behavior: references, workspace imports, NestJS metadata, schema contracts, route entries, permission changes, cache leaks, related tests, and similar cases.
 - `python_quality/*/`: synthetic Python repositories with one `repo/` directory and one `change.diff`. These cases exercise Python analyzer/context behavior such as importing consumers, callees, protocol/base contracts, FastAPI route metadata, Pydantic schema contracts, SQLAlchemy transaction boundaries, Alembic migrations, external I/O adapters, worker/event metadata, pytest fixture overrides, and related tests.
+- `dart_lsp/`: a deterministic fake Analysis Server used for framing,
+  notifications, reverse requests, errors, timeout, Unicode URI, and process
+  lifecycle coverage without a local SDK.
+- `dart_semantics/`: synthetic Dart/Flutter sources for directives, generated
+  policy, framework metadata, related tests, and platform-channel contracts.
 
 `tests/benchmarks/` contains YAML wrappers around those fixtures:
 

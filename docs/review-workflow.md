@@ -156,7 +156,7 @@ Commit a `kind: false_positive` memory card only for repeated, generalizable cal
 Apex Ray uses two local caches by default:
 
 - `${local_data}/cache/llm` for provider responses keyed by prompt context and routing. With the default `review.local_data.root: git_common`, linked worktrees from the same local clone share this cache.
-- analyzer repo index caches where a backend supports them. Today this applies to TypeScript/JavaScript repository analysis; the Python analyzer is in-process and does not yet maintain a persistent repo index cache.
+- analyzer repo index caches where a backend supports them. Today this applies to TypeScript/JavaScript and Dart repository analysis; the Python analyzer is in-process and does not yet maintain a persistent repo index cache.
 
 Refresh LLM cache entries:
 
@@ -205,6 +205,9 @@ Typical issues:
 - `Config: not found`: run `apex-ray init` in the target repository or pass `--config`.
 - `Python analyzer available: false`: reinstall Apex Ray or run from a healthy source checkout. The Python analyzer is built in and should normally be available whenever the CLI imports successfully.
 - `TypeScript analyzer built: false`: reinstall the published package, or in a source checkout run the TypeScript analyzer build from [Development](development.md).
+- `Dart analyzer available: false`: select the project's Dart/Flutter SDK,
+  activate FVM, or configure `review.analyzer.dart.command`; then resolve
+  dependencies with the same SDK. See [Dart And Flutter](dart-flutter.md).
 - Provider command not found: for a CLI provider, install the configured Codex CLI or Claude Code CLI, or override its executable path in `.apex-ray/config.local.yml`.
 - API credential or endpoint rejected: check the selected environment-variable names and, in CI, `APEX_RAY_API_ALLOWED_HOSTS` plus the role-specific `APEX_RAY_API_ALLOWED_BASE_URL_ENV_VARS`, `APEX_RAY_API_ALLOWED_API_KEY_ENV_VARS`, and `APEX_RAY_API_ALLOWED_HEADER_ENV_VARS` policies. For a custom CI orchestrator, set trusted job variable `APEX_RAY_CI=true`.
 - Hook cannot find `apex-ray`: install Apex Ray on the user `PATH` used by git hooks, or update the hook environment.

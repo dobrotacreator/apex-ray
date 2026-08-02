@@ -1,0 +1,4 @@
+name: sample_consumer
+dependencies:
+  sample_app:
+    path: ../app

@@ -23,17 +23,19 @@ apex-ray doctor
 
 ## Requirements
 
-Apex Ray can review git diffs through a language-neutral pipeline. Enhanced analyzers currently cover TypeScript/JavaScript, Python, and Go:
+Apex Ray can review git diffs through a language-neutral pipeline. Enhanced analyzers currently cover TypeScript/JavaScript, Python, Go, and Dart/Flutter:
 
 - Python 3.14+
 - git
 - Node.js 24+ and npm only when reviewing TypeScript or JavaScript with the bundled analyzer
 - Go only when reviewing Go with the bundled analyzer
+- a project-compatible Dart SDK, or Flutter SDK for Flutter projects, only
+  when reviewing Dart; resolve package dependencies before review
 - Codex CLI or Claude Code CLI only when the selected LLM provider is a local CLI
 - an API key environment variable only when the selected LLM provider is a direct or custom API
 - GitHub CLI only for historical PR replay commands
 
-Run `apex-ray doctor` from the repository you want to review. It checks git discovery, detected languages, the built-in Python analyzer, Go, Node.js, and the bundled TypeScript analyzer.
+Run `apex-ray doctor` from the repository you want to review. It checks git discovery, detected languages, the built-in Python analyzer, Go, Dart/FVM/Flutter SDK selection, Node.js, and the bundled TypeScript analyzer. See [Dart And Flutter](dart-flutter.md) for SDK resolution, dependency setup, generated-code policy, and troubleshooting.
 
 ## Initialize A Project
 
@@ -137,5 +139,6 @@ apex-ray review \
 - Configure shared review policy in [Configuration](configuration.md).
 - Configure a local CLI, direct API, or custom compatible endpoint in [LLM Providers](providers.md).
 - Run focused reviewer matrices on pull requests with [GitHub Actions](github-actions.md).
+- Configure semantic mobile review with [Dart And Flutter](dart-flutter.md).
 - Learn how to read reports and choose review targets in [Review Workflow](review-workflow.md).
 - Add project-specific rules and memory in [Rules And Memory](memory.md).

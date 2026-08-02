@@ -1,4 +1,5 @@
 from .common import AnalyzerBackendRun, AnalyzerError, AnalyzerRun, run_analyzers
+from .dart import DART_LANGUAGES, dart_changed_files, has_dart_changes, run_dart_analyzer
 from .go import GO_LANGUAGES, go_analyzer_runtime_dir, go_changed_files, has_go_changes, run_go_analyzer
 from .python import (
     PYTHON_CALLEE_LIMIT,
@@ -23,6 +24,7 @@ from .typescript import (
 )
 
 __all__ = [
+    "DART_LANGUAGES",
     "GO_LANGUAGES",
     "PYTHON_CALLEE_LIMIT",
     "PYTHON_DELETED_SYMBOL_RE",
@@ -37,13 +39,16 @@ __all__ = [
     "AnalyzerBackendRun",
     "AnalyzerError",
     "AnalyzerRun",
+    "dart_changed_files",
     "go_analyzer_runtime_dir",
     "go_changed_files",
+    "has_dart_changes",
     "has_go_changes",
     "has_python_changes",
     "has_ts_js_changes",
     "python_changed_files",
     "run_analyzers",
+    "run_dart_analyzer",
     "run_go_analyzer",
     "run_python_analyzer",
     "run_typescript_analyzer",
