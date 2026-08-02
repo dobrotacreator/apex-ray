@@ -538,7 +538,7 @@ def test_dart_analyzer_maps_lsp_semantics_and_filters_generated_context(
         "--client-id",
         "apex-ray",
         "--client-version",
-        "0.1.11",
+        dart_runner_module.__version__,
         "--no-plugins",
     ]
     assert client.closed is True
