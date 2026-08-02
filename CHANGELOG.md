@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.12](https://github.com/dobrotacreator/apex-ray/compare/v0.1.11...v0.1.12) (2026-08-02)
+
+
+### Features
+
+* **analyzer:** add Dart and Flutter review support ([#81](https://github.com/dobrotacreator/apex-ray/issues/81)) ([4823551](https://github.com/dobrotacreator/apex-ray/commit/48235517abff1e67b7a824ac3faaa7e7bab470a1))
+
 ## [0.1.11](https://github.com/dobrotacreator/apex-ray/compare/v0.1.10...v0.1.11) (2026-08-01)
 
 
