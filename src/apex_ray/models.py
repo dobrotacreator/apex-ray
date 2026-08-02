@@ -377,6 +377,24 @@ class ReviewerConfig(StrictApexModel):
     required: bool = False
 
 
+class DartAnalyzerConfig(StrictApexModel):
+    enabled: bool = True
+    command: list[str] = Field(default_factory=list)
+    flutter: Literal["auto", "enabled", "disabled"] = "auto"
+    plugins: bool = True
+    max_changed_symbols: int = Field(default=80, gt=0)
+    max_references_per_symbol: int = Field(default=24, gt=0)
+    max_callees_per_symbol: int = Field(default=16, gt=0)
+    max_related_tests_per_file: int = Field(default=12, gt=0)
+    max_dependency_package_anchors: int = Field(default=16, gt=0)
+
+    @model_validator(mode="after")
+    def validate_command(self) -> Self:
+        if any(not argument.strip() or "\x00" in argument for argument in self.command):
+            raise ValueError("review.analyzer.dart.command arguments must be non-empty and contain no NUL bytes")
+        return self
+
+
 class AnalyzerConfig(StrictApexModel):
     index_cache_enabled: bool = True
     index_cache_dir: str | None = None
@@ -387,6 +405,7 @@ class AnalyzerConfig(StrictApexModel):
     large_change_file_threshold: int = Field(default=20, gt=0)
     large_change_shard_size: int = Field(default=4, gt=0)
     script_path: str | None = None
+    dart: DartAnalyzerConfig = Field(default_factory=DartAnalyzerConfig)
 
 
 class LocalDataConfig(StrictApexModel):
@@ -805,6 +824,10 @@ class AnalyzerFile(ApexModel):
     exports: list[str] = Field(default_factory=list)
     related_tests: list[str] = Field(default_factory=list, alias="relatedTests")
     changed_symbols: list[AnalyzerSymbol] = Field(default_factory=list, alias="changedSymbols")
+    uncovered_changed_ranges: list[tuple[int, int]] = Field(
+        default_factory=list,
+        alias="uncoveredChangedRanges",
+    )
 
 
 class AnalyzerIndexCacheStats(ApexModel):

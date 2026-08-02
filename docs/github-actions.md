@@ -105,6 +105,104 @@ is a bounded TypeScript/API starting point. See [Tuning](tuning.md) before
 expanding matrix reviewers or token budgets, because each reviewer has an
 independent cap.
 
+## Dart And Flutter Projects
+
+The Apex Ray action does not install Flutter or run package resolution. For a
+semantic Flutter review, select a pinned project-compatible SDK, restore the
+SDK and Pub caches, and create `.dart_tool/package_config.json` before the
+review. The following shape checks out the exact PR head itself, then tells the
+remotely pinned Apex Ray action to use that prepared checkout:
+
+```yaml
+jobs:
+  review:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    environment: apex-ray-review
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout exact review head
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up the project's Flutter SDK
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          flutter-version: "<exact-project-flutter-version>"
+          channel: stable
+          cache: true
+          pub-cache: true
+
+      - name: Resolve locked Flutter dependencies
+        run: flutter pub get --enforce-lockfile
+
+      - name: Review Flutter diff
+        uses: dobrotacreator/apex-ray/.github/actions/apex-ray-review@<full-release-commit-sha>
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        with:
+          checkout: "false"
+          reviewers: correctness
+          llm: auto
+          artifact-name: apex-ray-flutter
+          sarif-category: apex-ray-flutter
+```
+
+Replace both placeholders with immutable values reviewed by the team. The
+Flutter action commit shown above is the pinned `v2.23.0` implementation; keep
+the SDK version exact instead of following `latest`. If the project checks in
+an FVM version file, the setup action also supports `flutter-version-file:
+.fvmrc`; pinning the resolved version explicitly makes upgrades visible in the
+workflow diff.
+
+For a pure Dart project, use a full reviewed commit SHA of
+`dart-lang/setup-dart` with an exact `sdk` version, then run `dart pub get
+--enforce-lockfile` before Apex Ray. The restricted action recognizes both the
+official setup-dart tool-cache layout and Flutter's bundled Dart SDK.
+
+Scope API secrets only to the Apex Ray step as shown. Dependency resolution
+has network access and consumes pull-request-controlled manifests, so it must
+run before any credential is mapped into the step environment. Use a committed
+application lockfile with `--enforce-lockfile`, avoid executing repository
+scripts or builds in the review job, and provide private package-registry
+credentials only through a separately reviewed policy when they are required.
+
+For a Pub workspace, run `flutter pub get --enforce-lockfile` at the workspace
+root. For a repository with independent packages, invoke `pub get` in a fixed,
+trusted list of relevant package directories; do not execute a helper script
+from the pull-request head in a credentialed review job. The Dart language
+server uses the resulting package configurations; Apex Ray does not run
+application entry points or generators.
+
+The shared config normally leaves `review.analyzer.dart.command: []`; the Dart
+executable added to `PATH` by the setup action is then selected automatically.
+In restricted pull-request mode, the action ignores any repository-provided
+Dart command, resolves the `PATH` entry to a native Dart SDK binary inside
+`RUNNER_TOOL_CACHE` (unwrapping Flutter's shell launcher without executing it),
+and starts the language server with analyzer plugins disabled. Arbitrary PATH
+shims and SDKs outside the runner tool cache are rejected. If the selected SDK
+cannot enforce that mode, the action disables Dart semantics and keeps
+diff-only Dart coverage instead of executing a less restricted server, and
+emits an `Apex Ray analyzer fallback` workflow warning so reduced coverage is
+visible on the job.
+Local trusted runs may use project-local FVM and analyzer plugins. Generated
+Dart remains available to semantic resolution, while generated review targets
+and raw snippets are suppressed. See [Dart analyzer configuration](configuration.md#dart-and-flutter-analyzer)
+for the local configuration and fallback policy.
+
+The Flutter project maintains the [stable SDK
+archive](https://docs.flutter.dev/install/archive), and Dart documents why
+[`pub get` creates package configuration and why `--enforce-lockfile` is
+appropriate in CI](https://dart.dev/tools/pub/cmd/pub-get). The third-party
+setup action's cache inputs are documented in its
+[pinned release](https://github.com/subosito/flutter-action/releases/tag/v2.23.0).
+
 ## Configure focused reviewers
 
 Reviewer ids in the workflow must exist in the trusted repository config. A
@@ -259,7 +357,11 @@ same-repository pull-request jobs access to those credentials.
 For every pull request, the default `trust-pr-config: false` loads
 `.apex-ray/config.yml` from the base commit and writes a restricted temporary
 copy. The restricted copy disables custom analyzer scripts, external
-rule/memory files, caches, telemetry, report archives, and triage writes.
+rule/memory files, caches, telemetry, report archives, and triage writes. For
+Dart, it also replaces repository-provided commands with the validated native
+binary of a Dart SDK in `RUNNER_TOOL_CACHE` and disables analyzer plugins;
+without a compatible SDK there, the Dart backend becomes diff-only and the
+action emits a workflow warning.
 Inline risk rules and reviewer definitions from the base branch remain
 available. The optional `base` input changes only the diff-analysis base; it
 cannot select the configuration trust root. With this default (and always for
@@ -280,7 +382,8 @@ are allowed to choose the declarative API endpoint, reviewer, and risk
 configuration. The option is ignored for forks. Head configuration still goes
 through the restricted-copy sanitizer: custom analyzer scripts, external
 rule/memory files, CLI LLM providers, caches, telemetry, report archives, and
-triage writes cannot execute from the pull-request checkout. Review changes to
+triage writes cannot execute from the pull-request checkout; Dart commands and
+analyzer plugins remain restricted as described above. Review changes to
 shared config, reviewer prompts, API environment-variable names, and endpoint
 allowlists as security changes before merging them to the base branch.
 

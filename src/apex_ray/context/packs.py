@@ -50,6 +50,17 @@ def build_context_packs(
             if not changed_file:
                 continue
             packs.extend(_packs_for_file(result, analyzed_file, changed_file, config, repo_root))
+            if analyzed_file.uncovered_changed_ranges:
+                packs.append(
+                    _fallback_pack_for_file(
+                        changed_file,
+                        config,
+                        repo_root,
+                        "Analyzer semantic-enrichment limit reached; this remaining scope uses diff-only context.",
+                        ranges=analyzed_file.uncovered_changed_ranges,
+                        pack_id=f"{changed_file.path}#diff-uncovered",
+                    )
+                )
             packed_paths.add(changed_file.path)
 
     for changed_file in changed_files:
@@ -63,7 +74,7 @@ def build_context_packs(
 
 
 def _should_build_fallback_pack(changed_file: ChangedFile) -> bool:
-    if changed_file.is_ignored:
+    if changed_file.is_ignored or (changed_file.language == "dart" and changed_file.file_kind == FileKind.GENERATED):
         return False
     return changed_file.file_kind in {
         FileKind.SOURCE,
@@ -81,18 +92,41 @@ def _fallback_pack_for_file(
     config: ReviewConfig,
     repo_root: Path | None,
     fallback_reason: str | None = None,
+    *,
+    ranges: list[tuple[int, int]] | None = None,
+    pack_id: str | None = None,
 ) -> ContextPack:
     related_test_snippets: list[CodeSnippet] = []
-    changed_snippets = _changed_hunk_snippets(repo_root, changed_file, config.context)
-    risk_signals = _risk_signals_for_ranges(changed_file, [], include_file_level=True)
+    scoped_file = changed_file
+    if ranges:
+        scoped_file = changed_file.model_copy(
+            update={
+                "hunks": [
+                    hunk
+                    for hunk in changed_file.hunks
+                    if any(
+                        _ranges_overlap(
+                            hunk.new_start,
+                            hunk.new_start + max(hunk.new_lines - 1, 0),
+                            start,
+                            end,
+                        )
+                        for start, end in ranges
+                    )
+                ]
+            }
+        )
+    changed_ranges = ranges or [
+        (hunk.new_start, hunk.new_start + max(hunk.new_lines - 1, 0)) for hunk in changed_file.hunks
+    ]
+    changed_snippets = _changed_hunk_snippets(repo_root, scoped_file, config.context)
+    risk_signals = _risk_signals_for_ranges(changed_file, changed_ranges, include_file_level=True)
     return _finalize_review_pack(
         ContextPack(
-            id=f"{changed_file.path}#diff",
+            id=pack_id or f"{changed_file.path}#diff",
             file=changed_file.path,
             file_kind=changed_file.file_kind,
-            changed_lines=[
-                (hunk.new_start, hunk.new_start + max(hunk.new_lines - 1, 0)) for hunk in changed_file.hunks
-            ],
+            changed_lines=changed_ranges,
             impact_notes=_impact_notes(
                 [],
                 [],
@@ -107,7 +141,7 @@ def _fallback_pack_for_file(
                 [],
                 related_test_snippets,
             ),
-            diff_snippet=_diff_snippet(changed_file),
+            diff_snippet=_diff_snippet(changed_file, ranges),
             changed_snippets=changed_snippets,
             symbol=None,
             symbols=[],

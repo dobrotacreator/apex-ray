@@ -23,17 +23,39 @@ apex-ray doctor
 
 ## Requirements
 
-Apex Ray can review git diffs through a language-neutral pipeline. Enhanced analyzers currently cover TypeScript/JavaScript, Python, and Go:
+Apex Ray can review git diffs through a language-neutral pipeline. Enhanced analyzers currently cover TypeScript/JavaScript, Python, Go, and Dart/Flutter:
 
 - Python 3.14+
 - git
 - Node.js 24+ and npm only when reviewing TypeScript or JavaScript with the bundled analyzer
 - Go only when reviewing Go with the bundled analyzer
+- a project-compatible Dart SDK, or Flutter SDK for Flutter projects, only
+  when reviewing Dart; resolve package dependencies before review
 - Codex CLI or Claude Code CLI only when the selected LLM provider is a local CLI
 - an API key environment variable only when the selected LLM provider is a direct or custom API
 - GitHub CLI only for historical PR replay commands
 
-Run `apex-ray doctor` from the repository you want to review. It checks git discovery, detected languages, the built-in Python analyzer, Go, Node.js, and the bundled TypeScript analyzer.
+Run `apex-ray doctor` from the repository you want to review. It checks git discovery, detected languages, the built-in Python analyzer, Go, Dart/FVM/Flutter SDK selection, Node.js, and the bundled TypeScript analyzer.
+
+### Dart and Flutter setup
+
+Apex Ray uses the project-compatible Dart SDK selected by the repository. It
+does not bundle an SDK, resolve packages, or run code generation. Before the
+first review:
+
+1. Select the same Dart or Flutter SDK version used to build the project. Use
+   the checked-in FVM selection when the team uses FVM.
+2. When the repository uses FVM, run `fvm flutter pub get`; otherwise run
+   `flutter pub get` for Flutter or `dart pub get` for pure Dart. For an
+   application with a committed lockfile in CI, add `--enforce-lockfile` to
+   the matching command.
+3. Run `apex-ray doctor` and confirm that `Dart analyzer available` is `true`.
+
+Dependency resolution creates `.dart_tool/package_config.json`, which the
+Analysis Server uses for `package:` imports. Resolve once at the root of a Pub
+workspace. In an older repository of independent packages, resolve each
+changed package that owns a `pubspec.yaml`. See [Configuration](configuration.md#dart-and-flutter-analyzer)
+for SDK selection and analyzer limits.
 
 ## Initialize A Project
 

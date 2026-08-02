@@ -39,6 +39,8 @@ DEPENDENCY_CONFIG_NAMES = {
     "pom.xml",
     "build.gradle",
     "build.gradle.kts",
+    "pubspec.yaml",
+    "pubspec.yml",
 }
 
 CONFIG_EXTENSIONS = {".json", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf"}
@@ -57,6 +59,104 @@ GENERATED_TS_JS_SUFFIXES = (
     ".generated.d.mts",
     ".generated.d.cts",
 )
+GENERATED_DART_SUFFIXES = (
+    ".g.dart",
+    ".freezed.dart",
+    ".config.dart",
+    ".mocks.dart",
+    ".gr.dart",
+    ".chopper.dart",
+)
+
+DART_RISK_KEYWORDS: dict[str, tuple[RiskSeverity, tuple[str, ...], str]] = {
+    "navigation": (
+        RiskSeverity.MEDIUM,
+        (
+            "gorouter(",
+            "go_route",
+            "context.go(",
+            "context.push(",
+            "navigator.",
+            "redirect:",
+        ),
+        "Flutter routing or navigation behavior changed.",
+    ),
+    "permissions": (
+        RiskSeverity.HIGH,
+        ("permission_handler", "permission.", "requestpermission(", "openappsettings("),
+        "Device permission handling changed.",
+    ),
+    "platform_channel": (
+        RiskSeverity.HIGH,
+        (
+            "methodchannel(",
+            "eventchannel(",
+            "basicmessagechannel(",
+            "invokemethod(",
+            "setmethodcallhandler(",
+        ),
+        "Flutter platform-channel contract changed.",
+    ),
+    "persistence": (
+        RiskSeverity.MEDIUM,
+        (
+            "sharedpreferences",
+            "fluttersecurestorage",
+            "sqflite",
+            "hive.",
+            "isar.",
+            "drift.",
+        ),
+        "Flutter persistence or secure-storage behavior changed.",
+    ),
+    "serialization": (
+        RiskSeverity.MEDIUM,
+        ("jsonserializable", "jsonkey(", "fromjson(", "tojson(", "@freezed"),
+        "Dart serialization or generated model contract changed.",
+    ),
+    "state_lifecycle": (
+        RiskSeverity.MEDIUM,
+        (
+            "initstate(",
+            "dispose(",
+            "didchangedependencies(",
+            "didupdatewidget(",
+            "setstate(",
+            "context.mounted",
+            "streamsubscription",
+            "addlistener(",
+        ),
+        "Flutter state or lifecycle behavior changed.",
+    ),
+}
+
+DART_PATH_RISK_PARTS: dict[str, tuple[RiskSeverity, tuple[str, ...], str]] = {
+    "navigation": (
+        RiskSeverity.MEDIUM,
+        ("navigation", "routing", "routes"),
+        "Flutter routing or navigation boundary changed.",
+    ),
+    "permissions": (
+        RiskSeverity.HIGH,
+        ("permission", "permissions"),
+        "Device permission boundary changed.",
+    ),
+    "platform_channel": (
+        RiskSeverity.HIGH,
+        ("platform_channel", "platform_channels"),
+        "Flutter platform-channel boundary changed.",
+    ),
+    "persistence": (
+        RiskSeverity.MEDIUM,
+        ("database", "persistence", "storage"),
+        "Persistence or storage boundary changed.",
+    ),
+    "state_lifecycle": (
+        RiskSeverity.MEDIUM,
+        ("bloc", "cubit", "state"),
+        "Flutter state-management boundary changed.",
+    ),
+}
 
 RISK_KEYWORDS: dict[str, tuple[RiskSeverity, tuple[str, ...], str]] = {
     "auth": (
@@ -186,7 +286,7 @@ def detect_file_kind(path: str) -> FileKind:
     if "vendor" in parts or "vendors" in parts:
         return FileKind.VENDORED
     if _contains_part(normalized, ("generated", "__generated__", "dist", "build")) or name.endswith(
-        GENERATED_TS_JS_SUFFIXES
+        GENERATED_TS_JS_SUFFIXES + GENERATED_DART_SUFFIXES
     ):
         return FileKind.GENERATED
     if name in DEPENDENCY_CONFIG_NAMES:
@@ -232,17 +332,25 @@ def add_risk_signals(file: ChangedFile) -> None:
     elif file.file_kind == FileKind.DEPENDENCY:
         _append_signal(file, seen, "dependency", RiskSeverity.LOW, "Dependency manifest changed.", None)
 
+    if file.language == "dart":
+        path_parts = set(PurePosixPath(file.path.replace("\\", "/").lower()).parts)
+        for kind, (severity, expected_parts, reason) in DART_PATH_RISK_PARTS.items():
+            if path_parts.intersection(expected_parts):
+                _append_signal(file, seen, kind, severity, reason, None)
+
+    risk_keyword_groups = (RISK_KEYWORDS, DART_RISK_KEYWORDS) if file.language == "dart" else (RISK_KEYWORDS,)
     for hunk in file.hunks:
         for index, line in enumerate(hunk.lines):
             if line.kind == DiffLineKind.CONTEXT:
                 continue
             content = line.content.lower()
             target_line = current_line_anchor(hunk, index)
-            for kind, (severity, keywords, reason) in RISK_KEYWORDS.items():
-                if any(_matches_risk_keyword(content, keyword) for keyword in keywords):
-                    signal = _append_signal(file, seen, kind, severity, reason, target_line)
-                    if signal:
-                        hunk.risk_signals.append(signal)
+            for risk_keywords in risk_keyword_groups:
+                for kind, (severity, keywords, reason) in risk_keywords.items():
+                    if any(_matches_risk_keyword(content, keyword) for keyword in keywords):
+                        signal = _append_signal(file, seen, kind, severity, reason, target_line)
+                        if signal:
+                            hunk.risk_signals.append(signal)
 
 
 def _matches_risk_keyword(content: str, keyword: str) -> bool:
@@ -289,5 +397,6 @@ def _contains_part(path: str, names: tuple[str, ...]) -> bool:
 
 def _looks_like_test(path: str) -> bool:
     return bool(
-        re.search(r"(^|/)(tests?|__tests__|spec)(/|$)", path) or re.search(r"(\.|_)(test|spec)\.[a-z0-9]+$", path)
+        re.search(r"(^|/)(tests?|__tests__|spec|integration_test)(/|$)", path)
+        or re.search(r"(\.|_)(test|spec)\.[a-z0-9]+$", path)
     )

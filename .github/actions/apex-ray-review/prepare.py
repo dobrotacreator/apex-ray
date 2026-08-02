@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tomllib
@@ -23,6 +24,16 @@ _QUALITY_GATE_STATUSES = {"disabled", "pass", "warn", "fail"}
 _ZERO_SHA = "0" * 40
 _MAX_ANNOTATIONS = 50
 _MAX_ANNOTATION_CHARS = 4_000
+_NATIVE_EXECUTABLE_MAGICS = (
+    b"\x7fELF",
+    b"MZ",
+    b"\xca\xfe\xba\xbe",
+    b"\xbe\xba\xfe\xca",
+    b"\xce\xfa\xed\xfe",
+    b"\xcf\xfa\xed\xfe",
+    b"\xfe\xed\xfa\xce",
+    b"\xfe\xed\xfa\xcf",
+)
 
 
 class PlanOptions(NamedTuple):
@@ -107,7 +118,13 @@ def create_plan(options: PlanOptions) -> dict[str, Any]:
         else:
             raw_config = _read_git_file(workspace, config_base_sha, requested_config)
         config_document = _load_config_document(raw_config)
-        safe_config = _sanitize_config(config_document, runner_temp)
+        notices: list[str] = []
+        safe_config = _sanitize_config(
+            config_document,
+            runner_temp,
+            workspace,
+            notices=notices,
+        )
         if not untrusted_pr and llm != "false":
             _reject_cli_routes_when_llm_can_run(
                 safe_config,
@@ -129,6 +146,7 @@ def create_plan(options: PlanOptions) -> dict[str, Any]:
         else:
             config_source = "restricted-head" if use_head_config else "restricted-base"
     else:
+        notices = []
         head_config = safe_workspace_path(
             workspace,
             requested_config,
@@ -186,6 +204,7 @@ def create_plan(options: PlanOptions) -> dict[str, Any]:
         "artifact_name": artifact_name,
         "sarif_category": sarif_category,
         "fail_on_quality_gate": options.fail_on_quality_gate,
+        "notices": notices,
         "args": args,
     }
 
@@ -420,6 +439,9 @@ def _load_config_document(raw_config: str | None) -> dict[str, Any]:
 def _sanitize_config(
     document: dict[str, Any],
     runner_temp: Path,
+    workspace: Path,
+    *,
+    notices: list[str] | None = None,
 ) -> dict[str, Any]:
     safe_document = deepcopy(document)
     review_value = safe_document.get("review", {})
@@ -436,10 +458,30 @@ def _sanitize_config(
         {
             "script_path": None,
             "index_cache_enabled": True,
-            "index_cache_dir": str(local_data_root / "cache" / "analyzer" / "typescript"),
+            "index_cache_dir": str(local_data_root / "cache" / "analyzer"),
             "refresh_index_cache": False,
         }
     )
+    dart = _mapping(analyzer, "dart")
+    dart["plugins"] = False
+    dart_enabled = dart.get("enabled", True) is not False
+    trusted_dart = _trusted_dart_command(workspace) if dart_enabled else None
+    if not dart_enabled:
+        dart["command"] = []
+    elif trusted_dart is not None and _dart_supports_disabled_plugins(trusted_dart, runner_temp):
+        dart["command"] = trusted_dart
+    else:
+        dart.update({"enabled": False, "command": []})
+        if notices is not None:
+            reason = (
+                "no validated Dart SDK in RUNNER_TOOL_CACHE was available"
+                if trusted_dart is None
+                else "the external Dart SDK cannot disable analyzer plugins"
+            )
+            notices.append(
+                "Dart semantic analysis was disabled for this restricted pull-request review because "
+                f"{reason}; Dart files retain diff-only review coverage."
+            )
     llm = _mapping(review, "llm")
     llm.update(
         {
@@ -472,6 +514,131 @@ def _sanitize_config(
     )
     review["local_data"] = {"root": str(local_data_root)}
     return safe_document
+
+
+def _trusted_dart_command(workspace: Path) -> list[str] | None:
+    """Resolve PATH to a native Dart SDK binary in the runner tool cache.
+
+    Flutter exposes ``bin/dart`` as a shell launcher. Restricted review must
+    never execute that launcher (or another PATH shim) from the repository
+    checkout, so the launcher is used only to locate Flutter's bundled native
+    Dart SDK executable.
+    """
+
+    raw_executable = shutil.which("dart")
+    raw_tool_cache = os.environ.get("RUNNER_TOOL_CACHE", "").strip()
+    if raw_executable is None or not raw_tool_cache:
+        return None
+    try:
+        unresolved_tool_cache = Path(os.path.abspath(os.path.expanduser(raw_tool_cache)))
+        tool_cache = unresolved_tool_cache.resolve(strict=True)
+        unresolved_executable = Path(os.path.abspath(os.path.expanduser(raw_executable)))
+        executable = Path(raw_executable).resolve(strict=True)
+        trust_boundaries = [workspace.resolve(strict=True)]
+        caller_workspace = os.environ.get("GITHUB_WORKSPACE", "").strip()
+        if caller_workspace:
+            trust_boundaries.append(Path(caller_workspace).resolve(strict=True))
+    except OSError:
+        return None
+    if not tool_cache.is_dir():
+        return None
+    if any(tool_cache.is_relative_to(boundary) or boundary.is_relative_to(tool_cache) for boundary in trust_boundaries):
+        return None
+    if not (unresolved_executable.is_relative_to(unresolved_tool_cache) and executable.is_relative_to(tool_cache)):
+        return None
+
+    executable_names = ("dart.exe", "dart") if os.name == "nt" else ("dart", "dart.exe")
+    candidates = [executable]
+    if executable.name.casefold() in {"dart", "dart.bat", "dart.exe"}:
+        candidates.extend(executable.parent / "cache" / "dart-sdk" / "bin" / name for name in executable_names)
+    for candidate in candidates:
+        trusted_binary = _validated_dart_sdk_binary(
+            candidate,
+            tool_cache=tool_cache,
+            trust_boundaries=trust_boundaries,
+        )
+        if trusted_binary is not None:
+            return [str(trusted_binary)]
+    return None
+
+
+def _validated_dart_sdk_binary(
+    candidate: Path,
+    *,
+    tool_cache: Path,
+    trust_boundaries: list[Path],
+) -> Path | None:
+    """Return a canonical native Dart SDK binary or fail closed."""
+
+    try:
+        if candidate.is_symlink():
+            return None
+        executable = candidate.resolve(strict=True)
+        sdk_root = executable.parent.parent
+        if (
+            executable.name.casefold() not in {"dart", "dart.exe"}
+            or not executable.is_file()
+            or not os.access(executable, os.X_OK)
+            or not executable.is_relative_to(tool_cache)
+            or any(executable.is_relative_to(boundary) for boundary in trust_boundaries)
+            or not _has_native_executable_magic(executable)
+        ):
+            return None
+
+        required_sdk_files = (
+            sdk_root / "version",
+            sdk_root / "lib" / "core" / "core.dart",
+            sdk_root / "bin" / "snapshots" / "analysis_server.dart.snapshot",
+        )
+        for required_path in required_sdk_files:
+            if required_path.is_symlink():
+                return None
+            resolved_required = required_path.resolve(strict=True)
+            if (
+                not resolved_required.is_file()
+                or not resolved_required.is_relative_to(sdk_root)
+                or not resolved_required.is_relative_to(tool_cache)
+                or any(resolved_required.is_relative_to(boundary) for boundary in trust_boundaries)
+            ):
+                return None
+
+        version_path = required_sdk_files[0]
+        if version_path.stat().st_size > 128:
+            return None
+        version = version_path.read_text(encoding="utf-8").strip()
+        if not _VERSION_RE.fullmatch(version):
+            return None
+    except OSError, UnicodeError:
+        return None
+    return executable
+
+
+def _has_native_executable_magic(path: Path) -> bool:
+    try:
+        with path.open("rb") as executable_file:
+            magic = executable_file.read(4)
+    except OSError:
+        return False
+    return any(magic.startswith(expected) for expected in _NATIVE_EXECUTABLE_MAGICS)
+
+
+def _dart_supports_disabled_plugins(command: list[str], runner_temp: Path) -> bool:
+    """Probe the SDK's hidden fail-closed plugin switch outside the checkout."""
+
+    probe_root = runner_temp / "apex-ray-ci" / "dart-probe"
+    try:
+        probe_root.mkdir(parents=True, exist_ok=True)
+        completed = subprocess.run(
+            [*command, "language-server", "--no-plugins", "--help"],
+            cwd=probe_root,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            check=False,
+            timeout=3.0,
+        )
+    except OSError, subprocess.SubprocessError:
+        return False
+    return completed.returncode == 0
 
 
 def _reject_cli_routes_when_llm_can_run(
@@ -673,7 +840,17 @@ def _plan_from_environment() -> int:
     )
     plan_path.chmod(0o600)
     _write_plan_outputs(plan, plan_path)
+    _emit_plan_notices(plan)
     return 0
+
+
+def _emit_plan_notices(plan: dict[str, Any]) -> None:
+    """Expose fail-closed analyzer fallbacks without trusting notice text."""
+
+    for notice in plan.get("notices", []):
+        if isinstance(notice, str):
+            title = _workflow_command_escape("Apex Ray analyzer fallback", property_value=True)
+            print(f"::warning title={title}::{_workflow_command_escape(notice)}")
 
 
 def _run(plan_path: Path) -> int:

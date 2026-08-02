@@ -142,6 +142,18 @@ def _analyzer_backends(
             run=analyzers.run_python_analyzer,
             partial_fallback_reason="Python analyzer failed; using diff-only fallback context.",
         ),
+        _AnalyzerBackend(
+            name="dart",
+            display_name="Dart",
+            changed_files=analyzers.dart_changed_files,
+            run=lambda root, files, config: analyzers.run_dart_analyzer(
+                root,
+                files,
+                config,
+                project_files=project_files,
+            ),
+            partial_fallback_reason="Dart analyzer failed for this file; using diff-only fallback context.",
+        ),
     ]
 
 

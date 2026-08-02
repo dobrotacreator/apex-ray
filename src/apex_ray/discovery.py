@@ -5,6 +5,8 @@ import subprocess
 import time
 from pathlib import Path
 
+import yaml
+
 from apex_ray import git
 from apex_ray.config import find_config
 from apex_ray.models import ProjectProfile
@@ -31,6 +33,7 @@ LANGUAGE_EXTENSIONS = {
     ".sql": "sql",
     ".graphql": "graphql",
     ".gql": "graphql",
+    ".dart": "dart",
 }
 DISCOVERY_IGNORED_DIRS = {
     ".git",
@@ -42,6 +45,7 @@ DISCOVERY_IGNORED_DIRS = {
     ".next",
     ".turbo",
     ".sim-data",
+    ".dart_tool",
     "dist",
     "build",
     "out",
@@ -60,6 +64,8 @@ GIT_INVENTORY_BYTE_LIMIT = 64 * 1024 * 1024
 GIT_INVENTORY_ENTRY_LIMIT = 250_000
 DEFAULT_GIT_ROOT_TIMEOUT_SECONDS = 30.0
 PACKAGE_JSON_BYTE_LIMIT = 4 * 1024 * 1024
+PUBSPEC_BYTE_LIMIT = 4 * 1024 * 1024
+PUBSPEC_NAMES = {"pubspec.yaml", "pubspec.yml"}
 
 
 class DiscoveryError(RuntimeError):
@@ -149,8 +155,8 @@ def discover_project_with_files(
         timeout_seconds=_remaining_discovery_seconds(deadline),
     )
     detected_languages = sorted(_detect_languages(files, deadline))
-    package_managers = sorted(_detect_package_managers(root, deadline))
-    framework_hints = sorted(_detect_frameworks(root, deadline))
+    package_managers = sorted(_detect_package_managers(root, deadline, files=files))
+    framework_hints = sorted(_detect_frameworks(root, deadline, files=files))
 
     return (
         ProjectProfile(
@@ -311,7 +317,12 @@ def _detect_languages(files: list[Path], deadline: float | None = None) -> set[s
     return languages
 
 
-def _detect_package_managers(root: Path, deadline: float | None = None) -> set[str]:
+def _detect_package_managers(
+    root: Path,
+    deadline: float | None = None,
+    *,
+    files: list[Path] | None = None,
+) -> set[str]:
     managers: set[str] = set()
     markers = {
         "pyproject.toml": "python",
@@ -327,10 +338,17 @@ def _detect_package_managers(root: Path, deadline: float | None = None) -> set[s
         _check_discovery_deadline(deadline)
         if (root / filename).exists():
             managers.add(manager)
+    if _pubspec_paths(root, files):
+        managers.add("pub")
     return managers
 
 
-def _detect_frameworks(root: Path, deadline: float | None = None) -> set[str]:
+def _detect_frameworks(
+    root: Path,
+    deadline: float | None = None,
+    *,
+    files: list[Path] | None = None,
+) -> set[str]:
     frameworks: set[str] = set()
     filenames: set[str] = set()
     _check_discovery_deadline(deadline)
@@ -376,8 +394,47 @@ def _detect_frameworks(root: Path, deadline: float | None = None) -> set[str]:
         }.items():
             if dep in deps:
                 frameworks.add(framework)
+    for pubspec_path in _pubspec_paths(root, files):
+        pubspec_text = _read_bounded_regular_text(
+            pubspec_path,
+            deadline=deadline,
+            max_bytes=PUBSPEC_BYTE_LIMIT,
+        )
+        if pubspec_text is None:
+            continue
+        try:
+            parsed = yaml.safe_load(pubspec_text)
+        except yaml.YAMLError, RecursionError:
+            continue
+        if _manifest_declares_flutter_sdk(parsed):
+            frameworks.add("flutter")
+            break
     _check_discovery_deadline(deadline)
     return frameworks
+
+
+def _pubspec_paths(root: Path, files: list[Path] | None) -> list[Path]:
+    candidates = [Path(name) for name in sorted(PUBSPEC_NAMES) if (root / name).exists()]
+    if files is not None:
+        candidates.extend(
+            path
+            for path in files
+            if not path.is_absolute() and ".." not in path.parts and path.name.lower() in PUBSPEC_NAMES
+        )
+    return [root / path for path in sorted(set(candidates), key=lambda item: (len(item.parts), item.as_posix()))]
+
+
+def _manifest_declares_flutter_sdk(raw: object) -> bool:
+    if not isinstance(raw, dict):
+        return False
+    for group_name in ("dependencies", "dev_dependencies"):
+        dependencies = raw.get(group_name)
+        if not isinstance(dependencies, dict):
+            continue
+        flutter = dependencies.get("flutter")
+        if isinstance(flutter, dict) and flutter.get("sdk") == "flutter":
+            return True
+    return False
 
 
 def _read_bounded_regular_text(

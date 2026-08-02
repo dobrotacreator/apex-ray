@@ -95,6 +95,39 @@ review:
     return _git(root, "rev-parse", "HEAD")
 
 
+def _write_fake_dart_sdk(
+    tool_cache: Path,
+    *,
+    flutter_launcher: bool = True,
+) -> tuple[Path, Path]:
+    """Create the minimum inert SDK shape accepted by the Action resolver."""
+
+    if flutter_launcher:
+        sdk_root = tool_cache / "flutter" / "3.44.8" / "x64" / "bin" / "cache" / "dart-sdk"
+    else:
+        # dart-lang/setup-dart caches the extracted SDK contents directly in
+        # the architecture directory rather than retaining a dart-sdk basename.
+        sdk_root = tool_cache / "dart" / "3.12.2" / "x64"
+    native_dart = sdk_root / "bin" / "dart"
+    native_dart.parent.mkdir(parents=True)
+    native_dart.write_bytes(b"\x7fELF" + (b"\x00" * 64))
+    native_dart.chmod(0o755)
+    (sdk_root / "version").write_text("3.12.2\n", encoding="utf-8")
+    core_library = sdk_root / "lib" / "core" / "core.dart"
+    core_library.parent.mkdir(parents=True)
+    core_library.write_text("library dart.core;\n", encoding="utf-8")
+    analysis_server = sdk_root / "bin" / "snapshots" / "analysis_server.dart.snapshot"
+    analysis_server.parent.mkdir(parents=True)
+    analysis_server.write_bytes(b"snapshot")
+
+    if not flutter_launcher:
+        return native_dart, native_dart
+    launcher = sdk_root.parents[1] / "dart"
+    launcher.write_text("#!/bin/sh\nexit 99\n", encoding="utf-8")
+    launcher.chmod(0o755)
+    return launcher, native_dart
+
+
 def _commit_config(root: Path, text: str) -> str:
     config = root / ".apex-ray" / "config.yml"
     config.write_text(text, encoding="utf-8")
@@ -409,6 +442,18 @@ def test_plan_environment_uses_the_isolated_repository_checkout(
     assert f"markdown-path={repository / '.apex-ray' / 'ci' / 'review.md'}\n" in outputs
 
 
+def test_plan_notices_emit_escaped_workflow_warnings(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    helper = _load_helper()
+
+    helper._emit_plan_notices({"notices": ["Dart fallback%\n::error::injected"]})
+
+    annotation = capsys.readouterr().out
+    assert annotation == ("::warning title=Apex Ray analyzer fallback::Dart fallback%25%0A::error::injected\n")
+    assert "\n::error::injected" not in annotation
+
+
 @pytest.mark.parametrize(
     "config_text",
     [
@@ -442,6 +487,254 @@ def test_restricted_config_defaults_only_missing_or_empty_documents(
     helper = _load_helper()
 
     assert helper._load_config_document(config_text) == expected
+
+
+def test_restricted_dart_toolchain_rejects_checkout_executables(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    helper = _load_helper()
+    workspace = tmp_path / "repo"
+    workspace_dart = workspace / ".fvm" / "flutter_sdk" / "bin" / "dart"
+    tool_cache = tmp_path / "toolcache"
+    flutter_dart, native_dart = _write_fake_dart_sdk(tool_cache)
+    workspace_dart.parent.mkdir(parents=True)
+    workspace_dart.write_text("#!/bin/sh\nexit 99\n", encoding="utf-8")
+    workspace_dart.chmod(0o755)
+    monkeypatch.setenv("RUNNER_TOOL_CACHE", str(tool_cache))
+
+    monkeypatch.setattr(helper.shutil, "which", lambda name: str(workspace_dart) if name == "dart" else None)
+    assert helper._trusted_dart_command(workspace) is None
+
+    monkeypatch.setattr(helper.shutil, "which", lambda name: str(flutter_dart) if name == "dart" else None)
+    assert helper._trusted_dart_command(workspace) == [str(native_dart.resolve())]
+
+
+def test_restricted_dart_toolchain_rejects_caller_checkout_executables(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    helper = _load_helper()
+    caller_workspace = tmp_path / "caller"
+    review_workspace = caller_workspace / ".apex-ray-review-1-1" / "repository"
+    caller_dart = caller_workspace / "tool" / "dart"
+    tool_cache = tmp_path / "runner-tool-cache"
+    external_dart, native_dart = _write_fake_dart_sdk(tool_cache, flutter_launcher=False)
+    review_workspace.mkdir(parents=True)
+    caller_dart.parent.mkdir(parents=True)
+    caller_dart.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    caller_dart.chmod(0o755)
+    monkeypatch.setenv("GITHUB_WORKSPACE", str(caller_workspace))
+    monkeypatch.setenv("RUNNER_TOOL_CACHE", str(tool_cache))
+
+    monkeypatch.setattr(helper.shutil, "which", lambda name: str(caller_dart) if name == "dart" else None)
+    assert helper._trusted_dart_command(review_workspace) is None
+
+    monkeypatch.setattr(helper.shutil, "which", lambda name: str(external_dart) if name == "dart" else None)
+    assert helper._trusted_dart_command(review_workspace) == [str(native_dart.resolve())]
+
+
+def test_restricted_dart_toolchain_accepts_setup_dart_tool_cache_layout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    helper = _load_helper()
+    workspace = tmp_path / "repo"
+    tool_cache = tmp_path / "runner-tool-cache"
+    path_dart, native_dart = _write_fake_dart_sdk(tool_cache, flutter_launcher=False)
+    workspace.mkdir()
+    monkeypatch.setenv("RUNNER_TOOL_CACHE", str(tool_cache))
+    monkeypatch.setattr(helper.shutil, "which", lambda name: str(path_dart) if name == "dart" else None)
+
+    assert native_dart.parent.parent.name == "x64"
+    assert helper._trusted_dart_command(workspace) == [str(native_dart.resolve())]
+
+
+def test_restricted_dart_toolchain_rejects_sdk_assets_linked_into_checkout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    helper = _load_helper()
+    workspace = tmp_path / "repo"
+    tool_cache = tmp_path / "runner-tool-cache"
+    path_dart, native_dart = _write_fake_dart_sdk(tool_cache, flutter_launcher=False)
+    workspace.mkdir()
+    checkout_snapshot = workspace / "analysis_server.dart.snapshot"
+    checkout_snapshot.write_bytes(b"untrusted snapshot")
+    sdk_snapshot = native_dart.parent / "snapshots" / "analysis_server.dart.snapshot"
+    sdk_snapshot.unlink()
+    sdk_snapshot.symlink_to(checkout_snapshot)
+    monkeypatch.setenv("RUNNER_TOOL_CACHE", str(tool_cache))
+    monkeypatch.setattr(helper.shutil, "which", lambda name: str(path_dart) if name == "dart" else None)
+
+    assert helper._trusted_dart_command(workspace) is None
+
+
+def test_restricted_dart_toolchain_rejects_external_path_wrapper_that_changes_behavior_in_checkout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    helper = _load_helper()
+    workspace = tmp_path / "repo"
+    runner_temp = tmp_path / "runner"
+    tool_cache = tmp_path / "runner-tool-cache"
+    external_bin = tool_cache / "path-bin"
+    marker = tmp_path / "wrapper-ran-from-checkout"
+    workspace.mkdir()
+    runner_temp.mkdir()
+    external_bin.mkdir(parents=True)
+    wrapper = external_bin / "dart"
+    wrapper.write_text(
+        f'#!/bin/sh\nif [ "$PWD" = "{workspace}" ]; then : > "{marker}"; fi\nexit 0\n',
+        encoding="utf-8",
+    )
+    wrapper.chmod(0o755)
+    monkeypatch.setenv("RUNNER_TOOL_CACHE", str(tool_cache))
+    monkeypatch.setattr(helper.shutil, "which", lambda name: str(wrapper) if name == "dart" else None)
+
+    sanitized = helper._sanitize_config(
+        {"review": {"analyzer": {"dart": {"enabled": True}}}},
+        runner_temp,
+        workspace,
+    )
+    command = sanitized["review"]["analyzer"]["dart"]["command"]
+    if command:
+        subprocess.run([*command, "--version"], cwd=workspace, check=False)
+
+    assert sanitized["review"]["analyzer"]["dart"]["enabled"] is False
+    assert command == []
+    assert not marker.exists()
+
+
+def test_restricted_config_pins_external_dart_and_disables_analyzer_plugins(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    helper = _load_helper()
+    workspace = tmp_path / "repo"
+    runner_temp = tmp_path / "runner"
+    tool_cache = tmp_path / "toolcache"
+    external_dart, native_dart = _write_fake_dart_sdk(tool_cache)
+    workspace.mkdir()
+    runner_temp.mkdir()
+    monkeypatch.setenv("RUNNER_TOOL_CACHE", str(tool_cache))
+    monkeypatch.setattr(helper.shutil, "which", lambda name: str(external_dart) if name == "dart" else None)
+    monkeypatch.setattr(helper, "_dart_supports_disabled_plugins", lambda _command, _root: True)
+
+    sanitized = helper._sanitize_config(
+        {
+            "review": {
+                "analyzer": {
+                    "dart": {
+                        "enabled": True,
+                        "command": ["scripts/untrusted-dart"],
+                        "plugins": True,
+                    }
+                }
+            }
+        },
+        runner_temp,
+        workspace,
+    )
+
+    assert sanitized["review"]["analyzer"]["dart"] == {
+        "enabled": True,
+        "command": [str(native_dart.resolve())],
+        "plugins": False,
+    }
+
+
+def test_restricted_config_disables_dart_without_a_trusted_external_sdk(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    helper = _load_helper()
+    workspace = tmp_path / "repo"
+    runner_temp = tmp_path / "runner"
+    workspace.mkdir()
+    runner_temp.mkdir()
+    monkeypatch.setattr(helper.shutil, "which", lambda _name: None)
+
+    notices: list[str] = []
+    sanitized = helper._sanitize_config(
+        {"review": {"analyzer": {"dart": {"enabled": True, "command": ["./dart"]}}}},
+        runner_temp,
+        workspace,
+        notices=notices,
+    )
+
+    assert sanitized["review"]["analyzer"]["dart"] == {
+        "enabled": False,
+        "command": [],
+        "plugins": False,
+    }
+    assert len(notices) == 1
+    assert "no validated Dart SDK in RUNNER_TOOL_CACHE" in notices[0]
+    assert "diff-only" in notices[0]
+
+
+def test_restricted_config_disables_dart_when_sdk_cannot_disable_plugins(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    helper = _load_helper()
+    workspace = tmp_path / "repo"
+    runner_temp = tmp_path / "runner"
+    tool_cache = tmp_path / "toolcache"
+    external_dart, _native_dart = _write_fake_dart_sdk(tool_cache, flutter_launcher=False)
+    workspace.mkdir()
+    runner_temp.mkdir()
+    monkeypatch.setenv("RUNNER_TOOL_CACHE", str(tool_cache))
+    monkeypatch.setattr(helper.shutil, "which", lambda name: str(external_dart) if name == "dart" else None)
+    monkeypatch.setattr(helper, "_dart_supports_disabled_plugins", lambda _command, _root: False)
+
+    notices: list[str] = []
+    sanitized = helper._sanitize_config(
+        {"review": {"analyzer": {"dart": {"enabled": True}}}},
+        runner_temp,
+        workspace,
+        notices=notices,
+    )
+
+    assert sanitized["review"]["analyzer"]["dart"] == {
+        "enabled": False,
+        "command": [],
+        "plugins": False,
+    }
+    assert len(notices) == 1
+    assert "cannot disable analyzer plugins" in notices[0]
+    assert "diff-only" in notices[0]
+
+
+def test_restricted_config_preserves_explicitly_disabled_dart_without_probe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    helper = _load_helper()
+    workspace = tmp_path / "repo"
+    runner_temp = tmp_path / "runner"
+    workspace.mkdir()
+    runner_temp.mkdir()
+    monkeypatch.setattr(
+        helper.shutil,
+        "which",
+        lambda _name: (_ for _ in ()).throw(AssertionError("unexpected Dart lookup")),
+    )
+    notices: list[str] = []
+
+    sanitized = helper._sanitize_config(
+        {"review": {"analyzer": {"dart": {"enabled": False, "command": ["./dart"]}}}},
+        runner_temp,
+        workspace,
+        notices=notices,
+    )
+
+    assert sanitized["review"]["analyzer"]["dart"] == {
+        "enabled": False,
+        "command": [],
+        "plugins": False,
+    }
+    assert notices == []
 
 
 def test_read_git_file_returns_none_when_trusted_base_path_is_absent(
@@ -821,7 +1114,7 @@ review:
     assert review["analyzer"]["script_path"] is None
     assert review["analyzer"]["index_cache_enabled"] is True
     assert review["analyzer"]["index_cache_dir"] == str(
-        runner_temp / "apex-ray-ci" / "local-data" / "cache" / "analyzer" / "typescript"
+        runner_temp / "apex-ray-ci" / "local-data" / "cache" / "analyzer"
     )
     assert review["analyzer"]["refresh_index_cache"] is False
     assert review["llm"]["provider"] == "openai_api"
