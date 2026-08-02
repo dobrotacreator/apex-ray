@@ -203,6 +203,7 @@ def test_client_initializes_handles_reverse_requests_and_preserves_notifications
             initialization_options={"onlyAnalyzeProjectsWithOpenFiles": True},
         )
         reverse = client.wait_for_notification("test/reverseRequestsHandled", timeout=1)
+        initialize_params = client.wait_for_notification("test/initializeParams", timeout=1)
         outline = client.wait_for_notification(
             "dart/textDocument/publishOutline",
             timeout=1,
@@ -211,6 +212,11 @@ def test_client_initializes_handles_reverse_requests_and_preserves_notifications
 
         assert result["serverInfo"] == {"name": "fake-dart-lsp", "version": "1.0"}
         assert client.server_capabilities["documentSymbolProvider"] is True
+        assert initialize_params["params"]["initializationOptions"] == {
+            "onlyAnalyzeProjectsWithOpenFiles": True,
+            "outline": False,
+            "flutterOutline": True,
+        }
         responses = reverse["params"]["responses"]
         assert responses["server-config"]["result"] == [
             {"analysis": True},
@@ -449,6 +455,67 @@ def test_client_bounds_aggregate_notification_memory(tmp_path: Path) -> None:
     assert notifications[-1]["params"]["sequence"] == 9
     assert client.notification_bytes <= 800
     assert client.dropped_notifications == 10 - len(notifications)
+
+
+def test_client_filters_and_compacts_allowlisted_notification_snapshots(tmp_path: Path) -> None:
+    uri = path_to_file_uri(tmp_path / "lib" / "resource.dart")
+    diagnostics_method = "textDocument/publishDiagnostics"
+    flutter_outline_method = "dart/textDocument/publishFlutterOutline"
+    with _client(
+        tmp_path,
+        notification_limit=2,
+        notification_bytes_limit=4_096,
+        notification_snapshot_keys=frozenset(
+            {
+                (diagnostics_method, uri),
+                (flutter_outline_method, uri),
+            }
+        ),
+    ) as client:
+        assert (
+            client.request(
+                "test/floodNotificationSnapshots",
+                {"count": 600, "allowedUri": uri},
+            )
+            == 2_400
+        )
+        diagnostics = client.notifications(diagnostics_method, uri=uri)
+        outlines = client.notifications(flutter_outline_method, uri=uri)
+
+    assert len(diagnostics) == 1
+    assert diagnostics[0]["params"]["diagnostics"][0]["message"] == "diagnostic-599"
+    assert len(outlines) == 1
+    assert outlines[0]["params"]["outline"]["label"] == "outline-599"
+    assert client.notification_bytes <= 4_096
+    assert client.dropped_notifications == 0
+
+
+def test_client_counts_hard_eviction_of_allowlisted_snapshot_as_dropped(tmp_path: Path) -> None:
+    uri = path_to_file_uri(tmp_path / "lib" / "resource.dart")
+    diagnostics_method = "textDocument/publishDiagnostics"
+    flutter_outline_method = "dart/textDocument/publishFlutterOutline"
+    with _client(
+        tmp_path,
+        notification_limit=1,
+        notification_bytes_limit=4_096,
+        notification_snapshot_keys=frozenset(
+            {
+                (diagnostics_method, uri),
+                (flutter_outline_method, uri),
+            }
+        ),
+    ) as client:
+        assert (
+            client.request(
+                "test/floodNotificationSnapshots",
+                {"count": 1, "allowedUri": uri},
+            )
+            == 4
+        )
+
+    assert client.notifications(diagnostics_method, uri=uri) == []
+    assert len(client.notifications(flutter_outline_method, uri=uri)) == 1
+    assert client.dropped_notifications == 1
 
 
 def test_client_passes_explicit_environment_without_mutating_parent(tmp_path: Path) -> None:

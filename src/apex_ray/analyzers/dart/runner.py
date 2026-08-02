@@ -62,6 +62,8 @@ _DART_NOTIFICATION_METADATA_PREFIXES = (
     "Dart analyzer diagnostic (",
     "Flutter widget outline:",
 )
+_DART_DIAGNOSTICS_NOTIFICATION_METHOD = "textDocument/publishDiagnostics"
+_DART_FLUTTER_OUTLINE_NOTIFICATION_METHOD = "dart/textDocument/publishFlutterOutline"
 
 
 def has_dart_changes(files: list[ChangedFile]) -> bool:
@@ -307,19 +309,22 @@ def run_dart_analyzer(
     semantic_partial_files: set[str] = set()
     document_symbol_budget = [DART_DOCUMENT_SYMBOL_LIMIT_TOTAL]
     reference_source_reader = DartReferenceSourceReader(root, deadline=deadline)
+    uris = {path: path_to_file_uri((root / path).resolve()) for path in sources}
+    snapshot_methods = {_DART_DIAGNOSTICS_NOTIFICATION_METHOD}
+    if flutter_outline:
+        snapshot_methods.add(_DART_FLUTTER_OUTLINE_NOTIFICATION_METHOD)
+    notification_snapshot_keys = frozenset((method, uri) for method in snapshot_methods for uri in uris.values())
     try:
         with DartLspClient(
             command,
             root,
             timeout=min(30.0, float(config.timeout_seconds)),
             deadline=deadline,
+            notification_snapshot_keys=notification_snapshot_keys,
         ) as client:
             client.initialize(path_to_file_uri(root), flutter_outline=flutter_outline)
-            uris: dict[str, str] = {}
             for path, source in sources.items():
-                uri = path_to_file_uri((root / path).resolve())
-                uris[path] = uri
-                client.did_open(uri, source)
+                client.did_open(uris[path], source)
             for path, source in anchor_sources.items():
                 if path not in uris:
                     client.did_open(path_to_file_uri((root / path).resolve()), source)
@@ -869,7 +874,7 @@ def _latest_flutter_outline_metadata(
         return [], True
     evidence: list[AnalyzerReference] = []
     truncated = False
-    messages = client.notifications("dart/textDocument/publishFlutterOutline", uri=uri)
+    messages = client.notifications(_DART_FLUTTER_OUTLINE_NOTIFICATION_METHOD, uri=uri)
     for message in messages[-1:]:
         params = message.get("params")
         outline = params.get("outline") if isinstance(params, dict) else None
@@ -933,7 +938,7 @@ def _latest_diagnostic_metadata(
         return [], True
     evidence: list[AnalyzerReference] = []
     truncated = False
-    messages = client.notifications("textDocument/publishDiagnostics", uri=uri)
+    messages = client.notifications(_DART_DIAGNOSTICS_NOTIFICATION_METHOD, uri=uri)
     for message in messages[-1:]:
         params = message.get("params")
         diagnostics = params.get("diagnostics") if isinstance(params, dict) else None

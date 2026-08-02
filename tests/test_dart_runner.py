@@ -877,6 +877,77 @@ def test_dart_analyzer_reports_dropped_lsp_notifications_as_partial(
     assert any("dropped 7 LSP notification" in warning for warning in result.warnings)
 
 
+@pytest.mark.parametrize("flutter_outline", [False, True])
+def test_dart_analyzer_retains_notification_snapshots_only_for_changed_sources(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    flutter_outline: bool,
+) -> None:
+    source = tmp_path / "lib" / "resource.dart"
+    anchor = tmp_path / "packages" / "consumer" / "lib" / "consumer.dart"
+    source.parent.mkdir(parents=True)
+    anchor.parent.mkdir(parents=True)
+    source.write_text("class ResourceScreen {}\n", encoding="utf-8")
+    anchor.write_text("class ResourceConsumer {}\n", encoding="utf-8")
+
+    class SnapshotPolicyClient(_FakeDartLspClient):
+        def initialize(
+            self,
+            root_uri: str,
+            flutter_outline: bool = False,
+            **_kwargs: object,
+        ) -> dict[str, object]:
+            assert root_uri.startswith("file:")
+            assert flutter_outline is expected_flutter_outline
+            self.server_capabilities = {
+                "documentSymbolProvider": True,
+                "callHierarchyProvider": True,
+                "typeHierarchyProvider": True,
+                "experimental": {"workspaceAnalysisComplete": True},
+            }
+            return {"capabilities": self.server_capabilities}
+
+        def did_open(self, uri: str, text: str, **_kwargs: object) -> None:
+            del text
+            self.opened.append(uri)
+            if not self.source_uri:
+                self.source_uri = uri
+
+    expected_flutter_outline = flutter_outline
+    fake_class = SnapshotPolicyClient
+    fake_class.instances.clear()
+    monkeypatch.setattr("apex_ray.analyzers.dart.runner.DartLspClient", fake_class)
+    monkeypatch.setattr(
+        "apex_ray.analyzers.dart.runner.resolve_dart_toolchain",
+        lambda *_args, **_kwargs: DartToolchainResolution(command=["dart"], source="path"),
+    )
+    monkeypatch.setattr(
+        "apex_ray.analyzers.dart.runner._flutter_outline_enabled",
+        lambda *_args, **_kwargs: flutter_outline,
+    )
+    monkeypatch.setattr(
+        "apex_ray.analyzers.dart.runner.reverse_dependency_anchors",
+        lambda *_args, **_kwargs: [Path("packages/consumer/lib/consumer.dart")],
+    )
+
+    result = run_dart_analyzer(
+        tmp_path,
+        [_dart_file("lib/resource.dart")],
+        AnalyzerConfig(index_cache_enabled=False),
+        project_files=[Path("lib/resource.dart"), Path("packages/consumer/lib/consumer.dart")],
+    )
+
+    assert result is not None
+    assert result.partial is False
+    client = fake_class.instances[0]
+    assert client.opened == [source.as_uri(), anchor.as_uri()]
+    expected_keys = {("textDocument/publishDiagnostics", source.as_uri())}
+    if flutter_outline:
+        expected_keys.add(("dart/textDocument/publishFlutterOutline", source.as_uri()))
+    assert client.kwargs["notification_snapshot_keys"] == frozenset(expected_keys)
+    assert all(uri != anchor.as_uri() for _method, uri in client.kwargs["notification_snapshot_keys"])
+
+
 def test_dart_diagnostics_use_latest_publish_state() -> None:
     uri = "file:///repo/lib/resource.dart"
 

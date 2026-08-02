@@ -99,6 +99,14 @@ def _run_normal(stdin: BinaryIO, stdout: BinaryIO, *, shutdown_error: bool = Fal
                 stdout,
                 {
                     "jsonrpc": "2.0",
+                    "method": "test/initializeParams",
+                    "params": message.get("params"),
+                },
+            )
+            _write_message(
+                stdout,
+                {
+                    "jsonrpc": "2.0",
                     "id": request_id,
                     "result": {
                         "capabilities": {
@@ -170,6 +178,59 @@ def _run_normal(stdin: BinaryIO, stdout: BinaryIO, *, shutdown_error: bool = Fal
                     },
                 )
             _write_message(stdout, {"jsonrpc": "2.0", "id": request_id, "result": count})
+            continue
+
+        if method == "test/floodNotificationSnapshots":
+            assert isinstance(message.get("params"), dict)
+            params = message["params"]
+            assert isinstance(params, dict)
+            count = params.get("count")
+            allowed_uri = params.get("allowedUri")
+            assert isinstance(count, int)
+            assert isinstance(allowed_uri, str)
+            for sequence in range(count):
+                _write_message(
+                    stdout,
+                    {
+                        "jsonrpc": "2.0",
+                        "method": "dart/textDocument/publishOutline",
+                        "params": {"uri": allowed_uri, "outline": {"sequence": sequence}},
+                    },
+                )
+                _write_message(
+                    stdout,
+                    {
+                        "jsonrpc": "2.0",
+                        "method": "textDocument/publishDiagnostics",
+                        "params": {
+                            "uri": f"file:///foreign/{sequence}.dart",
+                            "diagnostics": [{"message": f"foreign-{sequence}"}],
+                        },
+                    },
+                )
+                _write_message(
+                    stdout,
+                    {
+                        "jsonrpc": "2.0",
+                        "method": "textDocument/publishDiagnostics",
+                        "params": {
+                            "uri": allowed_uri,
+                            "diagnostics": [{"message": f"diagnostic-{sequence}"}],
+                        },
+                    },
+                )
+                _write_message(
+                    stdout,
+                    {
+                        "jsonrpc": "2.0",
+                        "method": "dart/textDocument/publishFlutterOutline",
+                        "params": {
+                            "uri": allowed_uri,
+                            "outline": {"kind": "DART_ELEMENT", "label": f"outline-{sequence}"},
+                        },
+                    },
+                )
+            _write_message(stdout, {"jsonrpc": "2.0", "id": request_id, "result": count * 4})
             continue
 
         if method == "$/cancelRequest":

@@ -8,7 +8,7 @@ import subprocess
 import threading
 import time
 from collections import deque
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from contextlib import suppress
 from pathlib import Path
 from queue import Empty, Full, Queue
@@ -80,6 +80,9 @@ class DartLspClient:
 
     ``deadline`` is an absolute ``time.monotonic()`` value for the whole analyzer
     run. Each request is additionally constrained by its own timeout/deadline.
+    When ``notification_snapshot_keys`` is provided, only those exact
+    ``(method, URI)`` pairs are retained and newer full-state snapshots replace
+    older snapshots with the same key.
     """
 
     def __init__(
@@ -97,6 +100,7 @@ class DartLspClient:
         max_message_bytes: int = DEFAULT_MAX_CONTENT_BYTES,
         env: Mapping[str, str] | None = None,
         workspace_configuration: Mapping[str, object] | None = None,
+        notification_snapshot_keys: Collection[tuple[str, str]] | None = None,
     ) -> None:
         if not command or not all(command):
             raise ValueError("Dart LSP command must contain at least one non-empty argument")
@@ -117,6 +121,16 @@ class DartLspClient:
             or max_message_bytes <= 0
         ):
             raise ValueError("Dart LSP buffer limits must be positive")
+        normalized_snapshot_keys: list[tuple[str, str]] = []
+        if notification_snapshot_keys is not None:
+            for key in notification_snapshot_keys:
+                if (
+                    not isinstance(key, tuple)
+                    or len(key) != 2
+                    or not all(isinstance(component, str) and component for component in key)
+                ):
+                    raise ValueError("Dart LSP notification snapshot keys must be non-empty (method, URI) pairs")
+                normalized_snapshot_keys.append(key)
 
         self.command = [str(argument) for argument in command]
         self.cwd = Path(cwd)
@@ -128,6 +142,9 @@ class DartLspClient:
         self.max_message_bytes = max_message_bytes
         self._extra_env = dict(env or {})
         self._workspace_configuration = dict(workspace_configuration or {})
+        self._notification_snapshot_keys = (
+            frozenset(normalized_snapshot_keys) if notification_snapshot_keys is not None else None
+        )
 
         self._process: subprocess.Popen[bytes] | None = None
         self._inbound: Queue[_Inbound] = Queue(maxsize=_INBOUND_QUEUE_LIMIT)
@@ -256,7 +273,7 @@ class DartLspClient:
             raise DartLspError("Dart language server is already initialized")
         options: dict[str, object] = {
             "onlyAnalyzeProjectsWithOpenFiles": True,
-            "outline": True,
+            "outline": False,
             "flutterOutline": flutter_outline,
         }
         options.update(initialization_options or {})
@@ -734,8 +751,25 @@ class DartLspClient:
         return current
 
     def _record_notification(self, message: dict[str, object]) -> None:
+        snapshot_key: tuple[str, str] | None = None
+        if self._notification_snapshot_keys is not None:
+            method = message.get("method")
+            uri = _notification_uri(message)
+            if not isinstance(method, str) or uri is None:
+                return
+            snapshot_key = (method, uri)
+            if snapshot_key not in self._notification_snapshot_keys:
+                return
         size = len(encode_lsp_message(message))
         with self._notification_condition:
+            if snapshot_key is not None:
+                for index in range(len(self._notifications) - 1, -1, -1):
+                    retained = self._notifications[index]
+                    if (retained.get("method"), _notification_uri(retained)) != snapshot_key:
+                        continue
+                    del self._notifications[index]
+                    self._notification_bytes -= self._notification_sizes[index]
+                    del self._notification_sizes[index]
             if size > self.notification_bytes_limit:
                 self._dropped_notifications += 1
                 self._notification_condition.notify_all()
