@@ -35,7 +35,27 @@ Apex Ray can review git diffs through a language-neutral pipeline. Enhanced anal
 - an API key environment variable only when the selected LLM provider is a direct or custom API
 - GitHub CLI only for historical PR replay commands
 
-Run `apex-ray doctor` from the repository you want to review. It checks git discovery, detected languages, the built-in Python analyzer, Go, Dart/FVM/Flutter SDK selection, Node.js, and the bundled TypeScript analyzer. See [Dart And Flutter](dart-flutter.md) for SDK resolution, dependency setup, generated-code policy, and troubleshooting.
+Run `apex-ray doctor` from the repository you want to review. It checks git discovery, detected languages, the built-in Python analyzer, Go, Dart/FVM/Flutter SDK selection, Node.js, and the bundled TypeScript analyzer.
+
+### Dart and Flutter setup
+
+Apex Ray uses the project-compatible Dart SDK selected by the repository. It
+does not bundle an SDK, resolve packages, or run code generation. Before the
+first review:
+
+1. Select the same Dart or Flutter SDK version used to build the project. Use
+   the checked-in FVM selection when the team uses FVM.
+2. When the repository uses FVM, run `fvm flutter pub get`; otherwise run
+   `flutter pub get` for Flutter or `dart pub get` for pure Dart. For an
+   application with a committed lockfile in CI, add `--enforce-lockfile` to
+   the matching command.
+3. Run `apex-ray doctor` and confirm that `Dart analyzer available` is `true`.
+
+Dependency resolution creates `.dart_tool/package_config.json`, which the
+Analysis Server uses for `package:` imports. Resolve once at the root of a Pub
+workspace. In an older repository of independent packages, resolve each
+changed package that owns a `pubspec.yaml`. See [Configuration](configuration.md#dart-and-flutter-analyzer)
+for SDK selection and analyzer limits.
 
 ## Initialize A Project
 
@@ -139,6 +159,5 @@ apex-ray review \
 - Configure shared review policy in [Configuration](configuration.md).
 - Configure a local CLI, direct API, or custom compatible endpoint in [LLM Providers](providers.md).
 - Run focused reviewer matrices on pull requests with [GitHub Actions](github-actions.md).
-- Configure semantic mobile review with [Dart And Flutter](dart-flutter.md).
 - Learn how to read reports and choose review targets in [Review Workflow](review-workflow.md).
 - Add project-specific rules and memory in [Rules And Memory](memory.md).

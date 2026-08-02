@@ -89,7 +89,7 @@ For Dart/Flutter, do not broadly ignore `*.g.dart`, `*.freezed.dart`, router,
 DI, mock, or generated-client files. Apex Ray keeps recognized Dart outputs
 index-only and removes their raw snippets automatically, preserving useful
 handwritten-to-generated relationships without spending prompt budget. See
-[Dart And Flutter](dart-flutter.md#generated-code).
+[Dart analyzer configuration](configuration.md#dart-and-flutter-analyzer).
 
 Keep the TypeScript index cache and adaptive sharding enabled:
 

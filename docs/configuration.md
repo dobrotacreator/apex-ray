@@ -181,22 +181,36 @@ review:
       max_dependency_package_anchors: 16
 ```
 
-`command` must be an argument list; it is never parsed by a shell. Leave it
-empty to use project-local FVM, `dart` on `PATH`, FVM on `PATH`, or the Dart
-binary next to Flutter, in that order. `flutter` accepts `auto`, `enabled`, or
-`disabled`. `plugins` defaults to `true` for compatibility with trusted local
-project analysis; set it to `false` when analyzing an untrusted checkout with
-an SDK that supports disabling analyzer plugins. The semantic limits cap graph
-fan-out;
-`max_dependency_package_anchors` additionally bounds the reverse-dependent
-local packages opened to discover cross-package consumers. The global
-analyzer timeout bounds the server and all requests.
+`command` must be an argument list; it is never parsed by a shell. When it is
+empty, Apex Ray selects the SDK in this order:
+
+1. project-local `.fvm/flutter_sdk/bin/dart`;
+2. `dart` on `PATH`;
+3. `fvm dart` when FVM is on `PATH`;
+4. the Dart executable next to an unambiguous `flutter` executable.
+
+Use an explicit argument list such as `command: [/opt/flutter/bin/dart]` for a
+custom SDK wrapper or fixed CI installation. `flutter` accepts `auto`,
+`enabled`, or `disabled`. `plugins` defaults to `true` for compatibility with
+trusted local project analysis; set it to `false` when analyzing an untrusted
+checkout with an SDK that supports disabling analyzer plugins. The semantic
+limits cap graph fan-out. `max_dependency_package_anchors` additionally bounds
+the reverse-dependent local packages opened to discover cross-package
+consumers. The global analyzer timeout bounds the server and all requests.
 
 Apex Ray does not install an SDK, run `pub get`, or invoke code generation.
 Resolve dependencies with the selected SDK before review. Common generated
-Dart files remain available for symbol resolution but are excluded from
-review targets and raw context snippets. See [Dart And Flutter](dart-flutter.md)
-for full setup, semantics, cache behavior, and safe fallback details.
+Dart outputs such as `*.g.dart`, `*.freezed.dart`, `*.config.dart`,
+`*.mocks.dart`, `*.gr.dart`, and `*.chopper.dart` remain available for symbol
+resolution but are excluded from review targets and raw context snippets. Do
+not broadly ignore them: keeping them in the analyzer inventory preserves
+handwritten-to-generated relationships without spending prompt budget.
+
+An unavailable SDK, server failure, timeout, or per-file error produces an
+analyzer warning and diff-only context for the affected Dart files without
+discarding successful results from other languages. Complete results use the
+analyzer cache; use `--refresh-analyzer-cache` only while diagnosing stale SDK
+or package state.
 
 ## Rules
 

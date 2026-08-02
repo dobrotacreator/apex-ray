@@ -92,7 +92,6 @@ See [Quick Start](quickstart.md) for the full first-run sequence.
 - [Configuration](configuration.md): shared config, local overrides, coverage, reports, and pre-push gate policy.
 - [LLM Providers](providers.md): local CLIs, direct and custom APIs, profiles, routing, effort, usage, and privacy boundaries.
 - [GitHub Actions](github-actions.md): secure pull-request configuration, API secrets, focused reviewer matrices, artifacts, SARIF, and quality gates.
-- [Dart And Flutter](dart-flutter.md): SDK/FVM selection, semantic coverage, generated-code policy, performance, CI, and troubleshooting.
 - [Rules And Memory](memory.md): project-specific review rules and curated repo memory.
 - [Telemetry](telemetry.md): local JSONL metrics for cost, latency, routing, and coverage tuning.
 - [Tuning](tuning.md): TypeScript-oriented presets and an evidence-driven loop for risk, reviewer, route, and budget calibration.

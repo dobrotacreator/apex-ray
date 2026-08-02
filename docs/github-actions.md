@@ -191,10 +191,10 @@ cannot enforce that mode, the action disables Dart semantics and keeps
 diff-only Dart coverage instead of executing a less restricted server, and
 emits an `Apex Ray analyzer fallback` workflow warning so reduced coverage is
 visible on the job.
-Local trusted runs may use project-local FVM and analyzer plugins. Generated Dart remains
-available to semantic resolution, while generated review targets and raw
-snippets are suppressed. See [Dart And Flutter](dart-flutter.md) for the
-complete configuration and fallback policy.
+Local trusted runs may use project-local FVM and analyzer plugins. Generated
+Dart remains available to semantic resolution, while generated review targets
+and raw snippets are suppressed. See [Dart analyzer configuration](configuration.md#dart-and-flutter-analyzer)
+for the local configuration and fallback policy.
 
 The Flutter project maintains the [stable SDK
 archive](https://docs.flutter.dev/install/archive), and Dart documents why

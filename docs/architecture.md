@@ -122,6 +122,14 @@ framework adapters, but not a Dart or Flutter SDK.
 - request limits, a global deadline, process-group cleanup, and a
   content-addressed result cache bound runtime and repeated work.
 
+Flutter enrichment connects Widget/State and lifecycle relationships, async
+`BuildContext` use, common state-management boundaries, routing/navigation,
+serialization, storage/networking, and exact literal platform-channel
+contracts when the selected server and repository evidence expose them.
+Dynamic routes or channel names, custom wrappers, and relationships hidden
+behind unresolved dependencies can remain unknown; Apex Ray reports partial
+coverage instead of inventing links.
+
 Trusted local runs preserve the selected project's analyzer-plugin behavior.
 Restricted pull-request CI instead pins an SDK executable outside the reviewed
 checkout and disables analyzer plugins; an older SDK that cannot enforce this

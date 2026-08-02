@@ -207,7 +207,11 @@ Typical issues:
 - `TypeScript analyzer built: false`: reinstall the published package, or in a source checkout run the TypeScript analyzer build from [Development](development.md).
 - `Dart analyzer available: false`: select the project's Dart/Flutter SDK,
   activate FVM, or configure `review.analyzer.dart.command`; then resolve
-  dependencies with the same SDK. See [Dart And Flutter](dart-flutter.md).
+  dependencies with the same SDK. See [Dart analyzer configuration](configuration.md#dart-and-flutter-analyzer).
+- Dart package imports are unresolved: run `flutter pub get` or `dart pub get`
+  in the relevant workspace or package using the SDK shown by `doctor`.
+- Dart results remain stale after an SDK or package metadata change: run one
+  review with `--refresh-analyzer-cache`, then return to normal cached reviews.
 - Provider command not found: for a CLI provider, install the configured Codex CLI or Claude Code CLI, or override its executable path in `.apex-ray/config.local.yml`.
 - API credential or endpoint rejected: check the selected environment-variable names and, in CI, `APEX_RAY_API_ALLOWED_HOSTS` plus the role-specific `APEX_RAY_API_ALLOWED_BASE_URL_ENV_VARS`, `APEX_RAY_API_ALLOWED_API_KEY_ENV_VARS`, and `APEX_RAY_API_ALLOWED_HEADER_ENV_VARS` policies. For a custom CI orchestrator, set trusted job variable `APEX_RAY_CI=true`.
 - Hook cannot find `apex-ray`: install Apex Ray on the user `PATH` used by git hooks, or update the hook environment.

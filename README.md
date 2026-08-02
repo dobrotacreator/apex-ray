@@ -137,7 +137,6 @@ Apex Ray does not replace CI, tests, linters, typecheck, dependency scanners, SA
 - [Review Workflow](https://dobrotacreator.github.io/apex-ray/review-workflow/)
 - [Configuration](https://dobrotacreator.github.io/apex-ray/configuration/)
 - [LLM Providers](https://dobrotacreator.github.io/apex-ray/providers/)
-- [Dart And Flutter](https://dobrotacreator.github.io/apex-ray/dart-flutter/)
 - [Rules And Memory](https://dobrotacreator.github.io/apex-ray/memory/)
 - [Telemetry](https://dobrotacreator.github.io/apex-ray/telemetry/)
 - [Historical PR Replay Evals](https://dobrotacreator.github.io/apex-ray/pr-eval/)
