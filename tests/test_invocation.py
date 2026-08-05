@@ -1,6 +1,8 @@
+import shlex
+from dataclasses import fields
 from pathlib import Path
 
-from apex_ray.invocation import ReviewOverrides, apply_review_overrides
+from apex_ray.invocation import ReviewOverrides, apply_review_overrides, render_shell_command
 from apex_ray.llm import review_config_for_pack
 from apex_ray.models import (
     ContextPack,
@@ -13,6 +15,64 @@ from apex_ray.models import (
     ReviewerConfig,
 )
 from apex_ray.reviewers import llm_config_for_reviewer
+
+
+def test_render_shell_command_round_trips_posix_arguments() -> None:
+    args = [
+        "apex-ray",
+        "review",
+        "--json",
+        "/tmp/review output/a&b.json",
+        "--only-pack",
+        "src/app.py#run:1",
+    ]
+
+    rendered = render_shell_command(args, platform_name="posix")
+
+    assert shlex.split(rendered) == args
+
+
+def test_render_shell_command_uses_powershell_safe_windows_arguments() -> None:
+    args = [
+        "apex-ray",
+        "review",
+        "--json",
+        "C:\\Work Dir\\reports&more\\review.json",
+        "--only-pack",
+        "src/app.dart#it's-ready:1",
+    ]
+
+    rendered = render_shell_command(args, platform_name="nt")
+
+    assert rendered == (
+        "& 'apex-ray' 'review' '--json' 'C:\\Work Dir\\reports&more\\review.json' "
+        "'--only-pack' 'src/app.dart#it''s-ready:1'"
+    )
+
+
+def test_review_overrides_appends_new_fields_after_the_legacy_positional_contract() -> None:
+    names = [field.name for field in fields(ReviewOverrides)]
+
+    assert names == [
+        "llm_enabled",
+        "provider",
+        "model",
+        "clear_routing_on_model",
+        "verify",
+        "cache_allowed",
+        "refresh_cache",
+        "cache_dir",
+        "default_cache_dir",
+        "llm_jobs",
+        "coverage_mode",
+        "max_deep_packs",
+        "max_input_tokens",
+        "analyzer_cache_allowed",
+        "refresh_analyzer_cache",
+        "analyzer_cache_dir",
+        "analyzer_timeout_seconds",
+        "max_packs",
+    ]
 
 
 def test_apply_review_overrides_sets_review_options(tmp_path: Path) -> None:
@@ -30,6 +90,7 @@ def test_apply_review_overrides_sets_review_options(tmp_path: Path) -> None:
             cache_dir=tmp_path / "llm-cache",
             llm_jobs=3,
             coverage_mode=LLMCoverageMode.EXHAUSTIVE,
+            max_packs=9,
             max_deep_packs=7,
             max_input_tokens=50_000,
         ),
@@ -45,6 +106,7 @@ def test_apply_review_overrides_sets_review_options(tmp_path: Path) -> None:
     assert effective.llm.cache_dir == str(tmp_path / "llm-cache")
     assert effective.llm.jobs == 3
     assert effective.llm.coverage_mode == LLMCoverageMode.EXHAUSTIVE
+    assert effective.llm.max_packs == 9
     assert effective.llm.max_deep_packs == 7
     assert effective.llm.max_input_tokens == 50_000
 
@@ -56,6 +118,7 @@ def test_explicit_llm_overrides_remain_final_after_reviewer_resolution() -> None
         verify_profile="specialist",
         verify=True,
         coverage_mode=LLMCoverageMode.EXHAUSTIVE,
+        max_packs=80,
         max_deep_packs=40,
         max_input_tokens=200_000,
     )
@@ -77,6 +140,7 @@ def test_explicit_llm_overrides_remain_final_after_reviewer_resolution() -> None
             model="forced-model",
             verify=False,
             coverage_mode=LLMCoverageMode.FAST,
+            max_packs=5,
             max_deep_packs=3,
             max_input_tokens=10_000,
         ),
@@ -91,10 +155,12 @@ def test_explicit_llm_overrides_remain_final_after_reviewer_resolution() -> None
     assert resolved.model == "forced-model"
     assert resolved.verify is False
     assert resolved.coverage_mode == LLMCoverageMode.FAST
+    assert resolved.max_packs == 5
     assert resolved.max_deep_packs == 3
     assert resolved.max_input_tokens == 10_000
     assert effective.reviewers[0].profile is None
     assert effective.reviewers[0].verify_profile is None
+    assert effective.reviewers[0].max_packs == 5
 
 
 def test_same_provider_override_preserves_custom_api_profile_endpoint() -> None:

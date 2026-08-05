@@ -208,11 +208,17 @@ def is_git_repo(cwd: Path, *, timeout: float | None = None) -> bool:
 
 
 def diff_base(cwd: Path, base: str) -> str:
-    return run_git(["diff", "--find-renames", "--find-copies", f"{base}...HEAD"], cwd=cwd).stdout
+    return run_git(
+        ["diff", "--find-renames", "--find-copies", "--end-of-options", f"{base}...HEAD"],
+        cwd=cwd,
+    ).stdout
 
 
 def diff_range(cwd: Path, old_ref: str, new_ref: str = "HEAD") -> str:
-    return run_git(["diff", "--find-renames", "--find-copies", old_ref, new_ref], cwd=cwd).stdout
+    return run_git(
+        ["diff", "--find-renames", "--find-copies", "--end-of-options", old_ref, new_ref],
+        cwd=cwd,
+    ).stdout
 
 
 def diff_staged(cwd: Path) -> str:
@@ -252,14 +258,75 @@ def untracked_files(cwd: Path) -> list[str]:
     return [line for line in proc.stdout.splitlines() if line]
 
 
+def worktree_output_path_is_stable(cwd: Path, path: Path, *, directory: bool = False) -> bool:
+    """Return whether writing path cannot change the worktree review target."""
+
+    root = cwd.resolve()
+    lexical = Path(os.path.abspath(path if path.is_absolute() else cwd / path))
+    if lexical.is_symlink():
+        return False
+    if directory and lexical.exists() and not lexical.is_dir():
+        return False
+    resolved = lexical.resolve(strict=False)
+    git_common_dir = common_dir(cwd)
+    if git_common_dir is not None:
+        git_relative = _relative_path_by_filesystem_identity(resolved, git_common_dir)
+        if git_relative is not None:
+            # Keep Git metadata immutable while allowing the one namespace that
+            # resolve_local_data_root reserves for Apex Ray runtime artifacts.
+            return bool(git_relative.parts) and git_relative.parts[0].casefold() == "apex-ray"
+    relative_path = _relative_path_by_filesystem_identity(resolved, root)
+    if relative_path is None:
+        return True
+    relative = relative_path.as_posix()
+    if relative in {"", "."}:
+        return False
+    tracked = run_git(
+        ["ls-files", "--error-unmatch", "--", f":(icase,literal){relative}"],
+        cwd=cwd,
+        check=False,
+    )
+    if tracked.returncode == 0:
+        return False
+    ignore_target = f"{relative}/" if directory else relative
+    ignored = run_git(["check-ignore", "-q", "--no-index", "--", ignore_target], cwd=cwd, check=False)
+    if ignored.returncode not in {0, 1}:
+        raise GitError(
+            ["check-ignore", "-q", "--no-index", "--", ignore_target],
+            ignored.stderr,
+            ignored.returncode,
+        )
+    return ignored.returncode == 0
+
+
+def _relative_path_by_filesystem_identity(path: Path, directory: Path) -> Path | None:
+    """Return a relative suffix even when aliases differ by symlink or case."""
+
+    directory = directory.resolve()
+    cursor = path
+    suffix: list[str] = []
+    while True:
+        if cursor.exists():
+            try:
+                if os.path.samefile(cursor, directory):
+                    return Path(*reversed(suffix)) if suffix else Path(".")
+            except OSError:
+                pass
+        parent = cursor.parent
+        if parent == cursor:
+            return None
+        suffix.append(cursor.name)
+        cursor = parent
+
+
 def rev_parse(cwd: Path, ref: str) -> str:
-    return run_git(["rev-parse", "--verify", ref], cwd=cwd).stdout.strip()
+    return run_git(["rev-parse", "--verify", "--end-of-options", ref], cwd=cwd).stdout.strip()
 
 
 def merge_base(cwd: Path, base: str, head: str = "HEAD") -> str:
-    return run_git(["merge-base", base, head], cwd=cwd).stdout.strip()
+    return run_git(["merge-base", "--end-of-options", base, head], cwd=cwd).stdout.strip()
 
 
 def object_exists(cwd: Path, ref: str) -> bool:
-    proc = run_git(["cat-file", "-e", f"{ref}^{{commit}}"], cwd=cwd, check=False)
+    proc = run_git(["cat-file", "-e", "--end-of-options", f"{ref}^{{commit}}"], cwd=cwd, check=False)
     return proc.returncode == 0

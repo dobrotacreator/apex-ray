@@ -16,6 +16,17 @@ def render_html(report: ReviewReport) -> str:
     for analyzer_result in report.analyzer_results:
         warnings.extend(analyzer_result.warnings)
     coverage = report.llm_coverage
+    completion = report.coverage_completion
+    completion_scope = ", ".join(completion.reviewer_ids) if completion and completion.reviewer_ids else "global"
+    bounded_completion_html = (
+        (
+            f"<li>Bounded completion: <code>{escape(completion.status)}</code>; "
+            f"scope <code>{escape(completion_scope)}</code>; {completion.batches} batch(es); "
+            f"stop reason <code>{escape(completion.stop_reason)}</code></li>"
+        )
+        if completion is not None
+        else ""
+    )
     memory = report.memory_summary
     findings_html = "\n".join(_finding_html(finding) for finding in report.findings) or "<p>No findings.</p>"
     verifications_html = _verifications_html(report)
@@ -118,6 +129,7 @@ def render_html(report: ReviewReport) -> str:
     <div class="metric"><span>Deep / shallow packs</span><strong>{coverage.deep_reviewed_context_packs}/{coverage.shallow_reviewed_context_packs}</strong></div>
     <div class="metric"><span>Memory cards</span><strong>{memory.applied_cards}/{memory.loaded_cards}</strong></div>
     <div class="metric"><span>Coverage gate</span><strong>{escape(coverage.quality_gate_status)}</strong></div>
+    <div class="metric"><span>Review completion</span><strong>{escape(coverage.completion_status)}</strong></div>
     <div class="metric"><span>Estimated input tokens</span><strong>~{coverage.estimated_input_tokens}</strong></div>
     <div class="metric"><span>Actual LLM tokens</span><strong>{coverage.actual_total_tokens}</strong></div>
     <div class="metric"><span>LLM duration</span><strong>{coverage.total_duration_ms}ms</strong></div>
@@ -132,6 +144,8 @@ def render_html(report: ReviewReport) -> str:
   <h2>LLM Coverage</h2>
   <ul>
     <li>Enabled: <code>{str(coverage.enabled).lower()}</code></li>
+    <li>Report completion status: <code>{escape(coverage.completion_status)}</code></li>
+    {bounded_completion_html}
     <li>Coverage mode: <code>{escape(str(coverage.coverage_mode))}</code></li>
     <li>Review runs: <code>{coverage.review_runs}</code>; verifier runs: <code>{coverage.verify_runs}</code></li>
     <li>Source changed-line coverage: <code>{coverage.source_changed_line_coverage_ratio:.1%}</code></li>

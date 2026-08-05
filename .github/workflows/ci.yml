@@ -100,6 +100,7 @@ jobs:
           git config user.email "apex@example.test"
           git config user.name "Apex Test"
           mkdir -p src
+          printf 'review.md\nreview.json\n' > .gitignore
           printf '{"compilerOptions":{"target":"ES2022"},"include":["src/**/*.ts"]}\n' > tsconfig.json
           printf 'export function total(price: number, quantity: number): number {\n  return price * quantity;\n}\n' > src/cart.ts
           git add .
@@ -132,6 +133,7 @@ jobs:
           git config user.email "apex@example.test"
           git config user.name "Apex Test"
           mkdir -p src
+          printf 'python-review.md\npython-review.json\n' > .gitignore
           cat > src/adapter.py <<'PYCODE'
           class ResourceClient:
               def __init__(self, client):
@@ -189,6 +191,7 @@ jobs:
           git config user.email "apex@example.test"
           git config user.name "Apex Test"
           mkdir -p internal/auth internal/api
+          printf 'go-review.md\ngo-review.json\n' > .gitignore
           cat > go.mod <<'GOMOD'
           module example.com/review
 
@@ -286,7 +289,7 @@ jobs:
           git config user.email "apex@example.test"
           git config user.name "Apex Test"
           mkdir -p .apex-ray lib test packages/counter_core/lib/src
-          printf '.dart_tool/\nbuild/\n' > .gitignore
+          printf '.dart_tool/\nbuild/\ndart-review.md\ndart-review.json\n' > .gitignore
           cat > .apex-ray/config.yml <<'YAML'
           review:
             analyzer:

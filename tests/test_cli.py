@@ -1,15 +1,20 @@
+import hashlib
 import json
+import os
 import re
 import shlex
+import stat
 import subprocess
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from typer.testing import CliRunner
 
 from apex_ray import __version__
 from apex_ray.cli import app
+from apex_ray.cli.common import atomic_write_text
 from apex_ray.diff import parse_unified_diff
 from apex_ray.discovery import DiscoveryError, DiscoveryTimeoutError
 from apex_ray.findings import finding_fingerprint
@@ -29,17 +34,70 @@ from apex_ray.models import (
     FindingSeverity,
     FindingVerification,
     LLMCoverageTodo,
+    LLMReviewerCoverageSummary,
     LLMRun,
     ProjectProfile,
     ReviewConfig,
+    ReviewerConfig,
+    ReviewInputSnapshot,
+    ReviewReport,
     TargetMode,
 )
+from apex_ray.pipeline.snapshot import capture_review_input_snapshot, validate_review_input_snapshot
 from apex_ray.report import build_report
 
 runner = CliRunner()
 FIXTURE_DIR = Path(__file__).parent / "fixtures"
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 _RICH_FRAME_CHARS = str.maketrans({ord(char): " " for char in "\u2500\u2502\u256d\u256e\u2570\u256f"})
+_GATE_HEAD_1 = "1" * 40
+_GATE_HEAD_2 = "2" * 40
+_GATE_MERGE_BASE = "a" * 40
+
+
+def test_atomic_write_removes_partial_temporary_file_when_write_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = tmp_path / "review.json"
+    output.write_text("old report\n", encoding="utf-8")
+    original_write_text = Path.write_text
+
+    def failing_write_text(path: Path, _content: str, *, encoding: str) -> int:
+        original_write_text(path, "partial", encoding=encoding)
+        raise OSError("simulated write failure")
+
+    monkeypatch.setattr(Path, "write_text", failing_write_text)
+
+    with pytest.raises(OSError, match="simulated write failure"):
+        atomic_write_text(output, "new report\n")
+
+    assert output.read_text(encoding="utf-8") == "old report\n"
+    assert not list(tmp_path.glob(".review.json.*.tmp"))
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX file-mode semantics")
+def test_atomic_write_preserves_existing_output_permissions(tmp_path: Path) -> None:
+    output = tmp_path / "review.json"
+    output.write_text("old report\n", encoding="utf-8")
+    output.chmod(0o664)
+
+    atomic_write_text(output, "new report\n")
+
+    assert output.read_text(encoding="utf-8") == "new report\n"
+    assert stat.S_IMODE(output.stat().st_mode) == 0o664
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX umask semantics")
+def test_atomic_write_new_output_honors_process_umask(tmp_path: Path) -> None:
+    output = tmp_path / "review.json"
+    previous_umask = os.umask(0o027)
+    try:
+        atomic_write_text(output, "new report\n")
+    finally:
+        os.umask(previous_umask)
+
+    assert stat.S_IMODE(output.stat().st_mode) == 0o640
 
 
 def _plain_cli_output(output: str) -> str:
@@ -79,7 +137,7 @@ def test_init_creates_config(tmp_path: Path, monkeypatch) -> None:
     assert "max_deep_packs: 16" in config_text
     assert "max_input_tokens: 180000" in config_text
     assert "jobs: 2" in config_text
-    assert "auto_followup_p0_max_pack_reviews: 16" in config_text
+    assert "auto_followup_max_pack_reviews: 16" in config_text
     assert "progress: auto" in config_text
     assert "Next: inspect and commit Apex Ray setup files" in result.stdout
 
@@ -397,7 +455,11 @@ def test_review_warns_for_outdated_agent_artifacts(tmp_path: Path, monkeypatch) 
     patch = tmp_path / "sample.diff"
     patch.write_text((FIXTURE_DIR / "sample.diff").read_text(encoding="utf-8"), encoding="utf-8")
 
-    result = runner.invoke(app, ["review", "--diff", str(patch)], catch_exceptions=False)
+    result = runner.invoke(
+        app,
+        ["review", "--diff", str(patch)],
+        catch_exceptions=False,
+    )
 
     assert result.exit_code == 0
     assert "Wrote" in result.stdout
@@ -507,6 +569,7 @@ def test_review_worktree_uses_git_common_local_data_for_telemetry_and_archives(t
         "    archive_dir: ${local_data}/reports/runs\n",
         encoding="utf-8",
     )
+    (config.parent / ".gitignore").write_text("reports/\n", encoding="utf-8")
     (repo / "app.py").write_text("value = 1\n", encoding="utf-8")
     subprocess.run(["git", "add", "."], cwd=repo, check=True)
     subprocess.run(["git", "commit", "-m", "initial"], cwd=repo, check=True, capture_output=True)
@@ -520,6 +583,19 @@ def test_review_worktree_uses_git_common_local_data_for_telemetry_and_archives(t
     assert result.exit_code == 0
     assert (worktree / ".apex-ray" / "reports" / "review.md").exists()
     assert (worktree / ".apex-ray" / "reports" / "review.json").exists()
+    persisted = ReviewReport.model_validate_json(
+        (worktree / ".apex-ray" / "reports" / "review.json").read_text(encoding="utf-8")
+    )
+    assert persisted.input_snapshot is not None
+    assert (
+        validate_review_input_snapshot(
+            persisted.input_snapshot,
+            worktree,
+            expected_target_mode=persisted.diff.target_mode,
+            expected_base_ref=persisted.diff.base,
+        )
+        == "current"
+    )
     assert (shared_root / "telemetry" / "review-runs.jsonl").exists()
     archive_dirs = list((shared_root / "reports" / "runs").iterdir())
     assert len(archive_dirs) == 1
@@ -1254,6 +1330,297 @@ review:
     }
 
 
+def test_gate_pre_push_legacy_auto_followup_only_attempts_critical_partial(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    config = tmp_path / ".apex-ray" / "config.yml"
+    config.parent.mkdir(parents=True)
+    config.write_text(
+        """
+review:
+  gates:
+    pre_push:
+      auto_followup_p0: true
+      fail_on_partial_severity: major
+""".lstrip(),
+        encoding="utf-8",
+    )
+    continuation_calls = 0
+
+    def fake_run_review_pipeline(root, _diff_text, _target_mode, review_config, **_kwargs):
+        report = build_report(
+            ProjectProfile(root=str(root), is_git_repo=True),
+            review_config,
+            DiffSummary(target_mode=TargetMode.BASE, stats=DiffStats(files_changed=1)),
+        )
+        report.llm_coverage.enabled = True
+        report.llm_coverage.partial_severity = "major"
+        report.llm_coverage.partial_reasons = ["A P0 verifier retry remains."]
+        return report
+
+    def fake_continue(report, **_kwargs):
+        nonlocal continuation_calls
+        continuation_calls += 1
+        return report, []
+
+    monkeypatch.setattr("apex_ray.cli.gate.git.repo_root", lambda _cwd, **_kwargs: tmp_path)
+    monkeypatch.setattr("apex_ray.cli.gate.git.is_git_repo", lambda _root: True)
+    monkeypatch.setattr(
+        "apex_ray.cli.gate.git.diff_base",
+        lambda _root, _base: _diff_for("src/auth.ts", "old", "new"),
+    )
+    monkeypatch.setattr("apex_ray.cli.gate.run_review_pipeline", fake_run_review_pipeline)
+    monkeypatch.setattr("apex_ray.cli.gate.continue_review_from_report", fake_continue)
+
+    result = runner.invoke(app, ["gate", "pre-push"], catch_exceptions=False)
+
+    assert result.exit_code == 1
+    assert continuation_calls == 0
+
+
+def test_gate_pre_push_generalized_followup_upgrades_shallow_high_risk_pack(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    config = tmp_path / ".apex-ray" / "config.yml"
+    config.parent.mkdir(parents=True)
+    config.write_text(
+        """
+review:
+  gates:
+    pre_push:
+      auto_followup: true
+      auto_followup_max_pack_reviews: 5
+      fail_on_partial_severity: major
+""".lstrip(),
+        encoding="utf-8",
+    )
+    pack_id = "src/payments.ts#capture:1"
+    seen: dict[str, object] = {}
+
+    def fake_run_review_pipeline(root, _diff_text, _target_mode, review_config, **_kwargs):
+        report = build_report(
+            ProjectProfile(root=str(root), is_git_repo=True),
+            review_config,
+            DiffSummary(target_mode=TargetMode.BASE, stats=DiffStats(files_changed=1)),
+        )
+        report.llm_coverage.partial_severity = "major"
+        report.llm_coverage.shallow_only_high_risk_context_pack_ids = [pack_id]
+        return report
+
+    def fake_continue(report, **kwargs):
+        seen.update(kwargs)
+        report.llm_runs.append(
+            LLMRun(
+                provider="fake",
+                context_pack_id=pack_id,
+                status="ok",
+                duration_ms=1,
+            )
+        )
+        report.llm_coverage.partial_severity = "none"
+        return report, [object()]
+
+    monkeypatch.setattr("apex_ray.cli.gate.git.repo_root", lambda _cwd, **_kwargs: tmp_path)
+    monkeypatch.setattr("apex_ray.cli.gate.git.is_git_repo", lambda _root: True)
+    monkeypatch.setattr(
+        "apex_ray.cli.gate.git.diff_base",
+        lambda _root, _base: _diff_for("src/payments.ts", "old", "new"),
+    )
+    monkeypatch.setattr("apex_ray.cli.gate.run_review_pipeline", fake_run_review_pipeline)
+    monkeypatch.setattr("apex_ray.cli.gate.continue_review_from_report", fake_continue)
+
+    result = runner.invoke(app, ["gate", "pre-push"], catch_exceptions=False)
+
+    assert result.exit_code == 0
+    assert seen["residual_priorities"] == {"p0", "p1"}
+    assert seen["pack_ids"] == {pack_id}
+    assert seen["only_unreviewed"] is True
+    assert seen["force_review_pack_ids"] == {pack_id}
+    assert seen["review_depth"] == "deep"
+    assert seen["max_pack_reviews"] == 5
+
+
+def test_gate_pre_push_generalized_verifier_retry_does_not_force_primary_review(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    config = tmp_path / ".apex-ray" / "config.yml"
+    config.parent.mkdir(parents=True)
+    config.write_text(
+        """
+review:
+  llm:
+    enabled: true
+    provider: fake
+  reviewers:
+    - id: security
+      required: true
+      verify: true
+  gates:
+    pre_push:
+      auto_followup: true
+      fail_on_partial_severity: none
+""".lstrip(),
+        encoding="utf-8",
+    )
+    pack = ContextPack(id="src/auth.ts#authorize:1", file="src/auth.ts", file_kind=FileKind.SOURCE)
+    seen: dict[str, object] = {}
+
+    def fake_run_review_pipeline(root, _diff_text, _target_mode, review_config, **_kwargs):
+        report = build_report(
+            ProjectProfile(root=str(root), is_git_repo=True),
+            review_config,
+            DiffSummary(target_mode=TargetMode.BASE, stats=DiffStats(files_changed=1)),
+            context_packs=[pack],
+        )
+        report.llm_coverage.quality_gate_status = "fail"
+        report.llm_coverage.quality_gate_reasons = ["Required verifier failed."]
+        report.llm_coverage.partial_severity = "critical"
+        report.llm_coverage.reviewers[0].status = "fail"
+        report.llm_coverage.coverage_todos = [
+            LLMCoverageTodo(
+                context_pack_id=pack.id,
+                file=pack.file,
+                file_kind=pack.file_kind,
+                reviewer_id="security",
+                priority="p0",
+                reason="Reviewer security has an active failed verification run.",
+            )
+        ]
+        return report
+
+    def fake_continue(report, **kwargs):
+        seen.update(kwargs)
+        report.llm_runs.append(
+            LLMRun(
+                kind="verify",
+                provider="fake",
+                reviewer_id="security",
+                context_pack_id=pack.id,
+                status="ok",
+                duration_ms=1,
+            )
+        )
+        report.llm_coverage.quality_gate_status = "pass"
+        report.llm_coverage.quality_gate_reasons = []
+        report.llm_coverage.partial_severity = "none"
+        report.llm_coverage.reviewers[0].status = "pass"
+        report.llm_coverage.coverage_todos = []
+        return report, []
+
+    monkeypatch.setattr("apex_ray.cli.gate.git.repo_root", lambda _cwd, **_kwargs: tmp_path)
+    monkeypatch.setattr("apex_ray.cli.gate.git.is_git_repo", lambda _root: True)
+    monkeypatch.setattr(
+        "apex_ray.cli.gate.git.diff_base",
+        lambda _root, _base: _diff_for(pack.file, "old", "new"),
+    )
+    monkeypatch.setattr("apex_ray.cli.gate.run_review_pipeline", fake_run_review_pipeline)
+    monkeypatch.setattr("apex_ray.cli.gate.continue_review_from_report", fake_continue)
+
+    result = runner.invoke(app, ["gate", "pre-push"], catch_exceptions=False)
+
+    assert result.exit_code == 0
+    assert seen["pack_ids"] == {pack.id}
+    assert seen["force_review_pack_ids"] == set()
+    assert seen["reviewer_ids"] == ["security"]
+
+
+def test_gate_pre_push_generalized_followup_reports_actionable_no_eligible_debt(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    config = tmp_path / ".apex-ray" / "config.yml"
+    config.parent.mkdir(parents=True)
+    config.write_text(
+        """
+review:
+  gates:
+    pre_push:
+      auto_followup: true
+      fail_on_partial_severity: major
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    def fake_run_review_pipeline(root, _diff_text, _target_mode, review_config, **_kwargs):
+        report = build_report(
+            ProjectProfile(root=str(root), is_git_repo=True),
+            review_config,
+            DiffSummary(target_mode=TargetMode.BASE, stats=DiffStats(files_changed=1)),
+        )
+        report.llm_coverage.partial_severity = "major"
+        report.llm_coverage.partial_reasons = ["legacy report lacks structured coverage debt"]
+        return report
+
+    monkeypatch.setattr("apex_ray.cli.gate.git.repo_root", lambda _cwd, **_kwargs: tmp_path)
+    monkeypatch.setattr("apex_ray.cli.gate.git.is_git_repo", lambda _root: True)
+    monkeypatch.setattr(
+        "apex_ray.cli.gate.git.diff_base",
+        lambda _root, _base: _diff_for("src/payments.ts", "old", "new"),
+    )
+    monkeypatch.setattr("apex_ray.cli.gate.run_review_pipeline", fake_run_review_pipeline)
+    monkeypatch.setattr(
+        "apex_ray.cli.gate.continue_review_from_report",
+        lambda report, **_kwargs: (report, []),
+    )
+
+    result = runner.invoke(app, ["gate", "pre-push"], catch_exceptions=False)
+
+    assert result.exit_code == 1
+    assert "Auto-followup made no progress" in result.stdout
+    assert "suggested_command" in result.stdout
+
+
+def test_gate_pre_push_rejects_head_mutation_during_review_before_publishing(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.email", "cli@example.invalid"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "CLI Test"], cwd=tmp_path, check=True)
+    app_path = tmp_path / "app.py"
+    app_path.write_text("value = 1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "app.py"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "initial"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "branch", "-M", "main"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "checkout", "-qb", "feature"], cwd=tmp_path, check=True)
+    app_path.write_text("value = 2\n", encoding="utf-8")
+    subprocess.run(["git", "add", "app.py"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "feature"], cwd=tmp_path, check=True)
+    monkeypatch.chdir(tmp_path)
+
+    def fake_pipeline(root, diff_text, target_mode, config, **kwargs):
+        report = build_report(
+            ProjectProfile(root=str(root), is_git_repo=True),
+            config,
+            DiffSummary(target_mode=target_mode, base=kwargs["base"]),
+            input_snapshot=capture_review_input_snapshot(
+                root,
+                diff_text,
+                target_mode,
+                base_ref=kwargs["base"],
+            ),
+        )
+        app_path.write_text("value = 3\n", encoding="utf-8")
+        subprocess.run(["git", "add", "app.py"], cwd=tmp_path, check=True)
+        subprocess.run(["git", "commit", "-qm", "concurrent change"], cwd=tmp_path, check=True)
+        return report
+
+    monkeypatch.setattr("apex_ray.cli.gate.run_review_pipeline", fake_pipeline)
+
+    result = runner.invoke(app, ["gate", "pre-push", "--base", "main"], catch_exceptions=False)
+
+    assert result.exit_code == 2
+    assert "HEAD changed" in _plain_cli_output(result.output)
+    assert not (tmp_path / ".apex-ray" / "reports" / "pre-push.json").exists()
+
+
 def test_gate_pre_push_manual_continuation_clears_incremental_coverage_debt(
     tmp_path: Path,
     monkeypatch,
@@ -1296,7 +1663,7 @@ review:
     pipeline_calls = 0
     continuation_calls = 0
 
-    def fake_run_review_pipeline(root, _diff_text, _target_mode, config, **_kwargs):
+    def fake_run_review_pipeline(root, diff_text, target_mode, config, **_kwargs):
         nonlocal pipeline_calls
         pipeline_calls += 1
         report = build_report(
@@ -1308,6 +1675,13 @@ review:
                 stats=DiffStats(files_changed=1),
             ),
             context_packs=packs,
+            input_snapshot=_gate_input_snapshot(
+                diff_text,
+                target_mode,
+                base_ref="main",
+                head_sha=_GATE_HEAD_1,
+                merge_base_sha=_GATE_MERGE_BASE,
+            ),
         )
         report.llm_coverage.enabled = True
         report.llm_coverage.partial_severity = "critical"
@@ -1364,8 +1738,8 @@ review:
 
     monkeypatch.setattr("apex_ray.cli.gate.git.repo_root", lambda _cwd, **_kwargs: tmp_path)
     monkeypatch.setattr("apex_ray.cli.gate.git.is_git_repo", lambda _root: True)
-    monkeypatch.setattr("apex_ray.cli.gate.git.rev_parse", lambda _root, _ref: "head-1")
-    monkeypatch.setattr("apex_ray.cli.gate.git.merge_base", lambda _root, _base, _head: "base-1")
+    monkeypatch.setattr("apex_ray.cli.gate.git.rev_parse", lambda _root, _ref: _GATE_HEAD_1)
+    monkeypatch.setattr("apex_ray.cli.gate.git.merge_base", lambda _root, _base, _head: _GATE_MERGE_BASE)
     monkeypatch.setattr("apex_ray.cli.gate.git.object_exists", lambda _root, _ref: True)
     monkeypatch.setattr(
         "apex_ray.cli.gate.git.diff_base",
@@ -1432,14 +1806,15 @@ review:
         file="src/payments/ledger.ts",
         file_kind=FileKind.SOURCE,
     )
-    heads = iter(["head-1", "head-2", "head-2"])
+    heads = iter([_GATE_HEAD_1, _GATE_HEAD_2, _GATE_HEAD_2])
     pipeline_calls = 0
     continuation_calls = 0
     range_calls: list[tuple[str, str]] = []
 
-    def fake_run_review_pipeline(root, _diff_text, target_mode, config, **kwargs):
+    def fake_run_review_pipeline(root, diff_text, target_mode, config, **kwargs):
         nonlocal pipeline_calls
         pipeline_calls += 1
+        report_head = _GATE_HEAD_1 if pipeline_calls == 1 else _GATE_HEAD_2
         report = build_report(
             ProjectProfile(root=str(root), is_git_repo=True),
             config,
@@ -1449,6 +1824,14 @@ review:
                 stats=DiffStats(files_changed=1),
             ),
             context_packs=[pack] if pipeline_calls == 1 else [],
+            input_snapshot=_gate_input_snapshot(
+                diff_text,
+                target_mode,
+                base_ref=kwargs.get("base"),
+                head_sha=report_head,
+                merge_base_sha=_GATE_MERGE_BASE if target_mode == TargetMode.BASE else None,
+                range_start_sha=_GATE_HEAD_1 if target_mode == TargetMode.PATCH else None,
+            ),
         )
         if pipeline_calls == 1:
             report.llm_coverage.enabled = True
@@ -1486,7 +1869,7 @@ review:
     monkeypatch.setattr("apex_ray.cli.gate.git.repo_root", lambda _cwd, **_kwargs: tmp_path)
     monkeypatch.setattr("apex_ray.cli.gate.git.is_git_repo", lambda _root: True)
     monkeypatch.setattr("apex_ray.cli.gate.git.rev_parse", lambda _root, _ref: next(heads))
-    monkeypatch.setattr("apex_ray.cli.gate.git.merge_base", lambda _root, _base, _head: "base-1")
+    monkeypatch.setattr("apex_ray.cli.gate.git.merge_base", lambda _root, _base, _head: _GATE_MERGE_BASE)
     monkeypatch.setattr("apex_ray.cli.gate.git.object_exists", lambda _root, _ref: True)
     monkeypatch.setattr(
         "apex_ray.cli.gate.git.diff_base",
@@ -1495,9 +1878,11 @@ review:
     monkeypatch.setattr("apex_ray.cli.gate.git.diff_range", fake_diff_range)
     monkeypatch.setattr("apex_ray.cli.gate.run_review_pipeline", fake_run_review_pipeline)
     monkeypatch.setattr("apex_ray.cli.gate.continue_review_from_report", fake_continue)
+    monkeypatch.setattr("apex_ray.cli.gate.validate_review_input_snapshot", lambda *_args, **_kwargs: "current")
 
     first = runner.invoke(app, ["gate", "pre-push"], catch_exceptions=False)
     second = runner.invoke(app, ["gate", "pre-push"], catch_exceptions=False)
+    pipeline_calls_after_resume = pipeline_calls
     state_after_resume = json.loads(
         (tmp_path / ".apex-ray" / "reports" / "pre-push-state.json").read_text(encoding="utf-8")
     )
@@ -1506,11 +1891,136 @@ review:
     assert [first.exit_code, second.exit_code, third.exit_code] == [1, 1, 0]
     assert "Mode: coverage-resume" in second.stdout
     assert "New commits are pending review" in second.stdout
-    assert state_after_resume["head_sha"] == "head-1"
+    assert pipeline_calls_after_resume == 1
+    assert state_after_resume["head_sha"] == _GATE_HEAD_1
     assert state_after_resume["coverage_debt"]["partial_blocked"] is False
     assert pipeline_calls == 2
     assert continuation_calls == 2
-    assert range_calls == [("head-1", "HEAD")]
+    assert range_calls == [(_GATE_HEAD_1, "HEAD")]
+
+
+@pytest.mark.parametrize(
+    ("auto_followup_p0", "auto_followup", "expected_continuation_calls"),
+    [(True, False, 2), (False, False, 0), (False, True, 2)],
+)
+def test_gate_pre_push_no_progress_coverage_resume_refreshes_pending_head(
+    tmp_path: Path,
+    monkeypatch,
+    auto_followup_p0: bool,
+    auto_followup: bool,
+    expected_continuation_calls: int,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    config_path = tmp_path / ".apex-ray" / "config.yml"
+    config_path.parent.mkdir(parents=True)
+    auto_followup_config = (
+        "      auto_followup: true\n      auto_followup_max_pack_reviews: 1\n" if auto_followup else ""
+    )
+    config_path.write_text(
+        f"""
+review:
+  llm:
+    enabled: true
+    provider: fake
+  gates:
+    pre_push:
+      auto_followup_p0: {str(auto_followup_p0).lower()}
+      auto_followup_p0_max_pack_reviews: 1
+{auto_followup_config}      incremental_retry:
+        enabled: true
+""".lstrip(),
+        encoding="utf-8",
+    )
+    p1_pack = ContextPack(
+        id="src/service.ts#run:1",
+        file="src/service.ts",
+        file_kind=FileKind.SOURCE,
+    )
+    heads = iter([_GATE_HEAD_1, _GATE_HEAD_2])
+    pipeline_calls = 0
+    continuation_calls = 0
+    base_diff_calls = 0
+
+    def fake_run_review_pipeline(root, diff_text, target_mode, config, **kwargs):
+        nonlocal pipeline_calls
+        pipeline_calls += 1
+        report_head = _GATE_HEAD_1 if pipeline_calls == 1 else _GATE_HEAD_2
+        report = build_report(
+            ProjectProfile(root=str(root), is_git_repo=True),
+            config,
+            DiffSummary(
+                target_mode=target_mode,
+                base=kwargs.get("base"),
+                stats=DiffStats(files_changed=1),
+            ),
+            context_packs=[p1_pack] if pipeline_calls == 1 else [],
+            input_snapshot=_gate_input_snapshot(
+                diff_text,
+                target_mode,
+                base_ref=kwargs.get("base"),
+                head_sha=report_head,
+                merge_base_sha=_GATE_MERGE_BASE,
+            ),
+        )
+        if pipeline_calls == 1:
+            report.llm_coverage.enabled = True
+            report.llm_coverage.quality_gate_status = "fail"
+            report.llm_coverage.quality_gate_reasons = ["required P1 reviewer assignment remains"]
+            report.llm_coverage.partial_severity = "critical"
+            report.llm_coverage.partial_reasons = ["required P1 reviewer assignment remains"]
+            report.llm_coverage.residual_risk_p1_context_pack_ids = [p1_pack.id]
+            report.llm_coverage.unreviewed_context_pack_ids = [p1_pack.id]
+            report.llm_coverage.coverage_todos = [
+                LLMCoverageTodo(
+                    context_pack_id=p1_pack.id,
+                    file=p1_pack.file,
+                    priority="p1",
+                )
+            ]
+        return report
+
+    def fake_continue(report, **_kwargs):
+        nonlocal continuation_calls
+        continuation_calls += 1
+        return report, []
+
+    def fake_diff_base(_root, _base):
+        nonlocal base_diff_calls
+        base_diff_calls += 1
+        return _diff_for(p1_pack.file, "old", "new")
+
+    monkeypatch.setattr("apex_ray.cli.gate.git.repo_root", lambda _cwd, **_kwargs: tmp_path)
+    monkeypatch.setattr("apex_ray.cli.gate.git.is_git_repo", lambda _root: True)
+    monkeypatch.setattr("apex_ray.cli.gate.git.rev_parse", lambda _root, _ref: next(heads))
+    monkeypatch.setattr("apex_ray.cli.gate.git.merge_base", lambda _root, _base, _head: _GATE_MERGE_BASE)
+    monkeypatch.setattr("apex_ray.cli.gate.git.object_exists", lambda _root, _ref: True)
+    monkeypatch.setattr("apex_ray.cli.gate.git.diff_base", fake_diff_base)
+    monkeypatch.setattr(
+        "apex_ray.cli.gate.git.diff_range",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("a no-progress coverage retry must refresh the full current range")
+        ),
+    )
+    monkeypatch.setattr("apex_ray.cli.gate.run_review_pipeline", fake_run_review_pipeline)
+    monkeypatch.setattr("apex_ray.cli.gate.continue_review_from_report", fake_continue)
+    monkeypatch.setattr("apex_ray.cli.gate.validate_review_input_snapshot", lambda *_args, **_kwargs: "current")
+
+    first = runner.invoke(app, ["gate", "pre-push"], catch_exceptions=False)
+    second = runner.invoke(app, ["gate", "pre-push"], catch_exceptions=False)
+    state = json.loads((tmp_path / ".apex-ray" / "reports" / "pre-push-state.json").read_text(encoding="utf-8"))
+    refreshed_report = json.loads((tmp_path / ".apex-ray" / "reports" / "pre-push.json").read_text(encoding="utf-8"))
+
+    assert [first.exit_code, second.exit_code] == [1, 0]
+    assert pipeline_calls == 2
+    assert continuation_calls == expected_continuation_calls
+    assert base_diff_calls == 2
+    assert "New commits are pending review" not in second.stdout
+    assert "coverage retry made no progress while newer commits were pending" in second.stdout
+    assert "Auto-followup made no progress" not in second.stdout
+    assert state["head_sha"] == _GATE_HEAD_2
+    assert state["coverage_debt"]["quality_gate_failed"] is False
+    assert state["coverage_debt"]["partial_blocked"] is False
+    assert refreshed_report["input_snapshot"]["head_sha"] == _GATE_HEAD_2
 
 
 def test_gate_pre_push_coverage_resume_keeps_older_carried_blocker(
@@ -1529,7 +2039,7 @@ def test_gate_pre_push_coverage_resume_keeps_older_carried_blocker(
         file="src/other.ts",
         file_kind=FileKind.SOURCE,
     )
-    heads = iter(["head-1", "head-2", "head-2"])
+    heads = iter([_GATE_HEAD_1, _GATE_HEAD_2, _GATE_HEAD_2])
     pipeline_calls = 0
     continuation_calls = 0
 
@@ -1563,6 +2073,13 @@ def test_gate_pre_push_coverage_resume_keeps_older_carried_blocker(
             None,
             [delta_pack],
         )
+        report.input_snapshot = _gate_input_snapshot(
+            diff_text,
+            target_mode,
+            base_ref=kwargs.get("base"),
+            head_sha=_GATE_HEAD_2,
+            range_start_sha=_GATE_HEAD_1,
+        )
         report.llm_coverage.partial_severity = "critical"
         report.llm_coverage.partial_reasons = ["1 residual P0 assignment remains"]
         report.llm_coverage.residual_risk_p0_context_pack_ids = [delta_pack.id]
@@ -1592,7 +2109,7 @@ def test_gate_pre_push_coverage_resume_keeps_older_carried_blocker(
     monkeypatch.setattr("apex_ray.cli.gate.git.repo_root", lambda _cwd, **_kwargs: tmp_path)
     monkeypatch.setattr("apex_ray.cli.gate.git.is_git_repo", lambda _root: True)
     monkeypatch.setattr("apex_ray.cli.gate.git.rev_parse", lambda _root, _ref: next(heads))
-    monkeypatch.setattr("apex_ray.cli.gate.git.merge_base", lambda _root, _base, _head: "base-1")
+    monkeypatch.setattr("apex_ray.cli.gate.git.merge_base", lambda _root, _base, _head: _GATE_MERGE_BASE)
     monkeypatch.setattr("apex_ray.cli.gate.git.object_exists", lambda _root, _ref: True)
     monkeypatch.setattr(
         "apex_ray.cli.gate.git.diff_base",
@@ -1604,6 +2121,7 @@ def test_gate_pre_push_coverage_resume_keeps_older_carried_blocker(
     )
     monkeypatch.setattr("apex_ray.cli.gate.run_review_pipeline", fake_run_review_pipeline)
     monkeypatch.setattr("apex_ray.cli.gate.continue_review_from_report", fake_continue)
+    monkeypatch.setattr("apex_ray.cli.gate.validate_review_input_snapshot", lambda *_args, **_kwargs: "current")
 
     first = runner.invoke(app, ["gate", "pre-push"], catch_exceptions=False)
     second = runner.invoke(app, ["gate", "pre-push"], catch_exceptions=False)
@@ -1641,7 +2159,7 @@ review:
     pack = ContextPack(id="src/service.ts#run:1", file="src/service.ts")
     pipeline_calls = 0
 
-    def fake_run_review_pipeline(root, _diff_text, _target_mode, config, **_kwargs):
+    def fake_run_review_pipeline(root, diff_text, target_mode, config, **_kwargs):
         nonlocal pipeline_calls
         pipeline_calls += 1
         report = build_report(
@@ -1653,6 +2171,13 @@ review:
                 stats=DiffStats(files_changed=1),
             ),
             context_packs=[pack],
+            input_snapshot=_gate_input_snapshot(
+                diff_text,
+                target_mode,
+                base_ref="main",
+                head_sha=_GATE_HEAD_1,
+                merge_base_sha=_GATE_MERGE_BASE,
+            ),
         )
         report.llm_coverage.quality_gate_status = "fail"
         report.llm_coverage.quality_gate_reasons = ["required reviewer failed"]
@@ -1669,8 +2194,8 @@ review:
 
     monkeypatch.setattr("apex_ray.cli.gate.git.repo_root", lambda _cwd, **_kwargs: tmp_path)
     monkeypatch.setattr("apex_ray.cli.gate.git.is_git_repo", lambda _root: True)
-    monkeypatch.setattr("apex_ray.cli.gate.git.rev_parse", lambda _root, _ref: "head-1")
-    monkeypatch.setattr("apex_ray.cli.gate.git.merge_base", lambda _root, _base, _head: "base-1")
+    monkeypatch.setattr("apex_ray.cli.gate.git.rev_parse", lambda _root, _ref: _GATE_HEAD_1)
+    monkeypatch.setattr("apex_ray.cli.gate.git.merge_base", lambda _root, _base, _head: _GATE_MERGE_BASE)
     monkeypatch.setattr("apex_ray.cli.gate.git.object_exists", lambda _root, _ref: True)
     monkeypatch.setattr(
         "apex_ray.cli.gate.git.diff_base",
@@ -2153,6 +2678,25 @@ def _diff_for(path: str, old_value: str, new_value: str) -> str:
     return f"diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n@@ -1 +1 @@\n-{old_value}\n+{new_value}\n"
 
 
+def _gate_input_snapshot(
+    diff_text: str,
+    target_mode: TargetMode,
+    *,
+    base_ref: str | None,
+    head_sha: str,
+    merge_base_sha: str | None = None,
+    range_start_sha: str | None = None,
+) -> ReviewInputSnapshot:
+    return ReviewInputSnapshot(
+        target_mode=target_mode,
+        base_ref=base_ref,
+        head_sha=head_sha,
+        merge_base_sha=merge_base_sha,
+        range_start_sha=range_start_sha,
+        diff_sha256=hashlib.sha256(diff_text.encode("utf-8")).hexdigest(),
+    )
+
+
 def _blocking_finding() -> Finding:
     return Finding(
         title="Missing tenant predicate",
@@ -2537,6 +3081,1265 @@ def test_review_continue_from_can_enable_llm_explicitly(tmp_path: Path, monkeypa
 
     assert result.exit_code == 0
     assert seen["llm_enabled"] is True
+
+
+def test_review_continue_from_honors_effective_reviewer_pack_cap(tmp_path: Path, monkeypatch) -> None:
+    config = ReviewConfig(
+        reviewers=[
+            ReviewerConfig(id="correctness", max_packs=7),
+            ReviewerConfig(id="security", max_packs=3),
+        ]
+    )
+    report = build_report(
+        ProjectProfile(root=str(tmp_path), is_git_repo=True),
+        config,
+        DiffSummary(target_mode=TargetMode.PATCH, stats=DiffStats(files_changed=1)),
+    )
+    report_path = tmp_path / "review.json"
+    output = tmp_path / "continued.md"
+    json_output = tmp_path / "continued.json"
+    report_path.write_text(report.model_dump_json(indent=2), encoding="utf-8")
+    seen: dict[str, object] = {}
+
+    def fake_continue(*args, **kwargs):
+        seen["max_pack_reviews"] = kwargs.get("max_pack_reviews")
+        seen["respect_config_budgets"] = kwargs.get("respect_config_budgets")
+        return report, [object()]
+
+    monkeypatch.setattr("apex_ray.cli.main.continue_review_from_report", fake_continue)
+
+    result = runner.invoke(
+        app,
+        [
+            "review",
+            "--continue-from",
+            str(report_path),
+            "--llm",
+            "--reviewer",
+            "correctness",
+            "--llm-max-packs",
+            "2",
+            "--output",
+            str(output),
+            "--json",
+            str(json_output),
+        ],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert seen == {"max_pack_reviews": 2, "respect_config_budgets": True}
+
+
+def test_review_continue_from_handles_config_with_no_enabled_reviewers(tmp_path: Path, monkeypatch) -> None:
+    config = ReviewConfig(reviewers=[ReviewerConfig(id="disabled", enabled=False)])
+    report = build_report(
+        ProjectProfile(root=str(tmp_path), is_git_repo=True),
+        config,
+        DiffSummary(target_mode=TargetMode.PATCH),
+    )
+    report_path = tmp_path / "review.json"
+    output = tmp_path / "continued.md"
+    json_output = tmp_path / "continued.json"
+    report_path.write_text(report.model_dump_json(indent=2), encoding="utf-8")
+    seen: dict[str, object] = {}
+
+    def fake_continue(*args, **kwargs):
+        seen["max_pack_reviews"] = kwargs.get("max_pack_reviews")
+        return report, []
+
+    monkeypatch.setattr("apex_ray.cli.main.continue_review_from_report", fake_continue)
+
+    result = runner.invoke(
+        app,
+        [
+            "review",
+            "--continue-from",
+            str(report_path),
+            "--llm",
+            "--output",
+            str(output),
+            "--json",
+            str(json_output),
+        ],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert seen == {"max_pack_reviews": None}
+
+
+def test_review_rejects_stale_base_snapshot_before_continuation(tmp_path: Path, monkeypatch) -> None:
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.email", "cli@example.invalid"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "CLI Test"], cwd=tmp_path, check=True)
+    (tmp_path / "app.py").write_text("value = 1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "app.py"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "initial"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "branch", "-M", "main"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "checkout", "-qb", "feature"], cwd=tmp_path, check=True)
+    (tmp_path / "app.py").write_text("value = 2\n", encoding="utf-8")
+    subprocess.run(["git", "add", "app.py"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "feature"], cwd=tmp_path, check=True)
+    diff_text = subprocess.run(
+        ["git", "diff", "main...HEAD"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    report = build_report(
+        ProjectProfile(root=str(tmp_path), is_git_repo=True),
+        ReviewConfig(),
+        DiffSummary(target_mode=TargetMode.BASE, base="main"),
+        input_snapshot=capture_review_input_snapshot(
+            tmp_path,
+            diff_text,
+            TargetMode.BASE,
+            base_ref="main",
+        ),
+    )
+    report_path = tmp_path / "review.json"
+    report_path.write_text(report.model_dump_json(indent=2), encoding="utf-8")
+    original = report_path.read_text(encoding="utf-8")
+    (tmp_path / "app.py").write_text("value = 3\n", encoding="utf-8")
+    subprocess.run(["git", "add", "app.py"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "new head"], cwd=tmp_path, check=True)
+    monkeypatch.setattr(
+        "apex_ray.cli.main.continue_review_from_report",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("stale report must not run")),
+    )
+
+    result = runner.invoke(
+        app,
+        ["review", "--continue-from", str(report_path), "--llm", "--json", str(report_path)],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 2
+    assert "HEAD changed" in _plain_cli_output(result.output)
+    assert report_path.read_text(encoding="utf-8") == original
+
+
+def test_review_rejects_worktree_mutation_during_pipeline_before_publishing(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.email", "cli@example.invalid"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "CLI Test"], cwd=tmp_path, check=True)
+    app_path = tmp_path / "app.py"
+    app_path.write_text("value = 1\n", encoding="utf-8")
+    apex_dir = tmp_path / ".apex-ray"
+    apex_dir.mkdir()
+    (apex_dir / ".gitignore").write_text("reports/\n", encoding="utf-8")
+    subprocess.run(["git", "add", "app.py", ".apex-ray/.gitignore"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "initial"], cwd=tmp_path, check=True)
+    app_path.write_text("value = 2\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    def fake_pipeline(root, diff_text, target_mode, config, **_kwargs):
+        report = build_report(
+            ProjectProfile(root=str(root), is_git_repo=True),
+            config,
+            DiffSummary(target_mode=target_mode),
+            input_snapshot=capture_review_input_snapshot(root, diff_text, target_mode),
+        )
+        app_path.write_text("value = 3\n", encoding="utf-8")
+        return report
+
+    monkeypatch.setattr("apex_ray.cli.main.run_review_pipeline", fake_pipeline)
+
+    result = runner.invoke(
+        app,
+        ["review", "--worktree", "--no-llm", "--no-analyzer-cache"],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 2
+    assert "worktree diff changed" in _plain_cli_output(result.output)
+    assert not (tmp_path / ".apex-ray" / "reports" / "review.json").exists()
+
+
+def test_review_worktree_requires_prepared_ignored_outputs_without_mutating_target(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.email", "cli@example.invalid"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "CLI Test"], cwd=tmp_path, check=True)
+    app_path = tmp_path / "app.py"
+    app_path.write_text("value = 1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "app.py"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "initial"], cwd=tmp_path, check=True)
+    app_path.write_text("value = 2\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        "apex_ray.cli.main.run_review_pipeline",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("unsafe output must fail preflight")),
+    )
+
+    result = runner.invoke(
+        app,
+        ["review", "--worktree", "--no-llm", "--no-analyzer-cache"],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 2
+    assert "run apex-ray init and commit .apex-ray/.gitignore" in _plain_cli_output(result.output)
+    assert not (tmp_path / ".apex-ray").exists()
+
+
+def test_review_worktree_rejects_unignored_in_repo_output_before_pipeline(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.email", "cli@example.invalid"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "CLI Test"], cwd=tmp_path, check=True)
+    app_path = tmp_path / "app.py"
+    app_path.write_text("value = 1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "app.py"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "initial"], cwd=tmp_path, check=True)
+    app_path.write_text("value = 2\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        "apex_ray.cli.main.run_review_pipeline",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("unsafe output must fail preflight")),
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "review",
+            "--worktree",
+            "--no-llm",
+            "--output",
+            str(tmp_path / "review.md"),
+            "--json",
+            str(tmp_path / "review.json"),
+        ],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 2
+    assert "must be outside the repository or Git-ignored" in _plain_cli_output(result.output)
+
+
+def test_review_worktree_rejects_git_index_output_without_mutating_it(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.email", "cli@example.invalid"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "CLI Test"], cwd=tmp_path, check=True)
+    app_path = tmp_path / "app.py"
+    app_path.write_text("value = 1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "app.py"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "initial"], cwd=tmp_path, check=True)
+    app_path.write_text("value = 2\n", encoding="utf-8")
+    index_path = tmp_path / ".git" / "index"
+    original_index = index_path.read_bytes()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        "apex_ray.cli.main.run_review_pipeline",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("Git metadata output must fail preflight")),
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "review",
+            "--worktree",
+            "--no-llm",
+            "--no-analyzer-cache",
+            "--output",
+            str(tmp_path.parent / f"{tmp_path.name}-review.md"),
+            "--json",
+            str(index_path),
+        ],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 2
+    assert "must be outside the repository or Git-ignored" in _plain_cli_output(result.output)
+    assert index_path.read_bytes() == original_index
+
+
+@pytest.mark.parametrize(
+    ("config_body", "unsafe_path"),
+    [
+        (
+            "  reports:\n    archive: true\n    archive_dir: unsafe-archive\n",
+            "unsafe-archive",
+        ),
+        (
+            "  telemetry:\n    enabled: true\n    path: unsafe-telemetry/review-runs.jsonl\n",
+            "unsafe-telemetry/review-runs.jsonl",
+        ),
+    ],
+)
+def test_review_worktree_rejects_unignored_archive_and_telemetry_before_pipeline(
+    tmp_path: Path,
+    monkeypatch,
+    config_body: str,
+    unsafe_path: str,
+) -> None:
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.email", "cli@example.invalid"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "CLI Test"], cwd=tmp_path, check=True)
+    apex_dir = tmp_path / ".apex-ray"
+    apex_dir.mkdir()
+    (apex_dir / "config.yml").write_text(
+        f"review:\n  llm:\n    enabled: false\n{config_body}",
+        encoding="utf-8",
+    )
+    (apex_dir / ".gitignore").write_text("reports/\n", encoding="utf-8")
+    app_path = tmp_path / "app.py"
+    app_path.write_text("value = 1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "initial"], cwd=tmp_path, check=True)
+    app_path.write_text("value = 2\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        "apex_ray.cli.main.run_review_pipeline",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("unsafe side effect must fail preflight")),
+    )
+
+    result = runner.invoke(
+        app,
+        ["review", "--worktree", "--no-llm", "--no-analyzer-cache"],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 2
+    plain_output = _plain_cli_output(result.output)
+    assert unsafe_path in plain_output
+    assert "must be outside the repository or Git-ignored" in plain_output
+
+
+@pytest.mark.parametrize(
+    ("arguments", "environment", "unsafe_path"),
+    [
+        (
+            ["--llm", "--llm-provider", "fake", "--cache-dir", "unsafe-llm-cache"],
+            {},
+            "unsafe-llm-cache",
+        ),
+        (
+            ["--no-llm", "--analyzer-cache-dir", "unsafe-analyzer-cache"],
+            {},
+            "unsafe-analyzer-cache",
+        ),
+        (
+            ["--no-llm"],
+            {"APEX_RAY_CACHE_HOME": "unsafe-env-cache"},
+            "unsafe-env-cache",
+        ),
+        (
+            ["--no-llm"],
+            {"XDG_CACHE_HOME": "unsafe-xdg-cache"},
+            "unsafe-xdg-cache",
+        ),
+    ],
+)
+def test_review_worktree_rejects_unignored_cache_side_effects_before_pipeline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    arguments: list[str],
+    environment: dict[str, str],
+    unsafe_path: str,
+) -> None:
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.email", "cli@example.invalid"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "CLI Test"], cwd=tmp_path, check=True)
+    app_path = tmp_path / "app.py"
+    app_path.write_text("value = 1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "app.py"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "initial"], cwd=tmp_path, check=True)
+    app_path.write_text("value = 2\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    for name in ("APEX_RAY_CACHE_HOME", "XDG_CACHE_HOME"):
+        monkeypatch.delenv(name, raising=False)
+    for name, value in environment.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setattr(
+        "apex_ray.cli.main.run_review_pipeline",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("unsafe cache must fail preflight")),
+    )
+    external_root = tmp_path.parent / f"{tmp_path.name}-reports"
+
+    result = runner.invoke(
+        app,
+        [
+            "review",
+            "--worktree",
+            *arguments,
+            "--output",
+            str(external_root / "review.md"),
+            "--json",
+            str(external_root / "review.json"),
+        ],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 2
+    plain_output = _plain_cli_output(result.output)
+    assert unsafe_path in plain_output
+    assert "must be outside the repository or Git-ignored" in plain_output
+    assert not (tmp_path / unsafe_path).exists()
+
+
+def test_review_worktree_accepts_uncreated_directory_only_ignored_cache_roots(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.email", "cli@example.invalid"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "CLI Test"], cwd=tmp_path, check=True)
+    (tmp_path / ".gitignore").write_text(
+        "/ignored-llm/\n/ignored-analyzer/\n/ignored-archive/\n",
+        encoding="utf-8",
+    )
+    apex_dir = tmp_path / ".apex-ray"
+    apex_dir.mkdir()
+    (apex_dir / "config.yml").write_text(
+        "review:\n  reports:\n    archive: true\n    archive_dir: ignored-archive\n",
+        encoding="utf-8",
+    )
+    app_path = tmp_path / "app.ts"
+    app_path.write_text("export const value = 1;\n", encoding="utf-8")
+    subprocess.run(["git", "add", ".gitignore", ".apex-ray/config.yml", "app.ts"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "initial"], cwd=tmp_path, check=True)
+    app_path.write_text("export const value = 2;\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    called = False
+
+    def fake_pipeline(root, diff_text, target_mode, config, **_kwargs):
+        nonlocal called
+        called = True
+        return build_report(
+            ProjectProfile(root=str(root), is_git_repo=True),
+            config,
+            DiffSummary(target_mode=target_mode),
+            input_snapshot=capture_review_input_snapshot(root, diff_text, target_mode),
+        )
+
+    monkeypatch.setattr("apex_ray.cli.main.run_review_pipeline", fake_pipeline)
+    external_root = tmp_path.parent / f"{tmp_path.name}-reports"
+
+    result = runner.invoke(
+        app,
+        [
+            "review",
+            "--worktree",
+            "--llm",
+            "--llm-provider",
+            "fake",
+            "--cache-dir",
+            "ignored-llm",
+            "--analyzer-cache-dir",
+            "ignored-analyzer",
+            "--output",
+            str(external_root / "review.md"),
+            "--json",
+            str(external_root / "review.json"),
+        ],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert called is True
+
+
+def test_review_worktree_accepts_ignored_default_analyzer_leaf_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.email", "cli@example.invalid"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "CLI Test"], cwd=tmp_path, check=True)
+    (tmp_path / ".gitignore").write_text("/ignored-cache/repos/\n", encoding="utf-8")
+    app_path = tmp_path / "app.ts"
+    app_path.write_text("export const value = 1;\n", encoding="utf-8")
+    subprocess.run(["git", "add", ".gitignore", "app.ts"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "initial"], cwd=tmp_path, check=True)
+    app_path.write_text("export const value = 2;\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("APEX_RAY_CACHE_HOME", "ignored-cache")
+    monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
+    called = False
+
+    def fake_pipeline(root, diff_text, target_mode, config, **_kwargs):
+        nonlocal called
+        called = True
+        return build_report(
+            ProjectProfile(root=str(root), is_git_repo=True),
+            config,
+            DiffSummary(target_mode=target_mode),
+            input_snapshot=capture_review_input_snapshot(root, diff_text, target_mode),
+        )
+
+    monkeypatch.setattr("apex_ray.cli.main.run_review_pipeline", fake_pipeline)
+    external_root = tmp_path.parent / f"{tmp_path.name}-reports"
+
+    result = runner.invoke(
+        app,
+        [
+            "review",
+            "--worktree",
+            "--no-llm",
+            "--output",
+            str(external_root / "review.md"),
+            "--json",
+            str(external_root / "review.json"),
+        ],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert called is True
+
+
+def test_review_worktree_preserves_analyzer_specific_relative_cache_roots(
+    tmp_path: Path,
+    tmp_path_factory: pytest.TempPathFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.email", "cli@example.invalid"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "CLI Test"], cwd=tmp_path, check=True)
+    repo_hash = hashlib.sha256(str(tmp_path.resolve()).encode()).hexdigest()[:16]
+    (tmp_path / ".gitignore").write_text(
+        (f"/rel-cache/repos/{repo_hash}/typescript/\n/nested/rel-cache/repos/{repo_hash}/dart/\n"),
+        encoding="utf-8",
+    )
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    (nested / ".keep").write_text("\n", encoding="utf-8")
+    app_path = tmp_path / "app.ts"
+    app_path.write_text("export const value = 1;\n", encoding="utf-8")
+    subprocess.run(["git", "add", ".gitignore", "nested/.keep", "app.ts"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "initial"], cwd=tmp_path, check=True)
+    app_path.write_text("export const value = 2;\n", encoding="utf-8")
+    monkeypatch.chdir(nested)
+    monkeypatch.setenv("APEX_RAY_CACHE_HOME", "rel-cache")
+    monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
+    called = False
+
+    def fake_pipeline(root, diff_text, target_mode, config, **_kwargs):
+        nonlocal called
+        called = True
+        return build_report(
+            ProjectProfile(root=str(root), is_git_repo=True),
+            config,
+            DiffSummary(target_mode=target_mode),
+            input_snapshot=capture_review_input_snapshot(root, diff_text, target_mode),
+        )
+
+    monkeypatch.setattr("apex_ray.cli.main.run_review_pipeline", fake_pipeline)
+    external_reports = tmp_path_factory.mktemp("external-reports")
+
+    result = runner.invoke(
+        app,
+        [
+            "review",
+            "--worktree",
+            "--no-llm",
+            "--output",
+            str(external_reports / "review.md"),
+            "--json",
+            str(external_reports / "review.json"),
+        ],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert called is True
+
+
+def test_review_worktree_preflights_node_temp_cache_fallback(
+    tmp_path: Path,
+    tmp_path_factory: pytest.TempPathFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.email", "cli@example.invalid"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "CLI Test"], cwd=tmp_path, check=True)
+    app_path = tmp_path / "app.ts"
+    app_path.write_text("export const value = 1;\n", encoding="utf-8")
+    subprocess.run(["git", "add", "app.ts"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "initial"], cwd=tmp_path, check=True)
+    app_path.write_text("export const value = 2;\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("APEX_RAY_CACHE_HOME", raising=False)
+    monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
+    monkeypatch.setenv("HOME", "")
+    monkeypatch.setenv("TMPDIR", "unsafe-tmp")
+    called = False
+
+    def fake_pipeline(root, diff_text, target_mode, config, **_kwargs):
+        nonlocal called
+        called = True
+        return build_report(
+            ProjectProfile(root=str(root), is_git_repo=True),
+            config,
+            DiffSummary(target_mode=target_mode),
+            input_snapshot=capture_review_input_snapshot(root, diff_text, target_mode),
+        )
+
+    monkeypatch.setattr("apex_ray.cli.main.run_review_pipeline", fake_pipeline)
+    external_reports = tmp_path_factory.mktemp("external-reports")
+
+    result = runner.invoke(
+        app,
+        [
+            "review",
+            "--worktree",
+            "--no-llm",
+            "--output",
+            str(external_reports / "review.md"),
+            "--json",
+            str(external_reports / "review.json"),
+        ],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 2
+    assert called is False
+    assert "unsafe-tmp" in _plain_cli_output(result.output)
+
+
+def test_review_worktree_rejects_external_analyzer_leaf_symlink_into_worktree(
+    tmp_path: Path,
+    tmp_path_factory: pytest.TempPathFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.email", "cli@example.invalid"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "CLI Test"], cwd=tmp_path, check=True)
+    app_path = tmp_path / "app.ts"
+    app_path.write_text("export const value = 1;\n", encoding="utf-8")
+    subprocess.run(["git", "add", "app.ts"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "initial"], cwd=tmp_path, check=True)
+    app_path.write_text("export const value = 2;\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    external_cache_home = tmp_path_factory.mktemp("external-analyzer-cache")
+    repo_hash = hashlib.sha256(str(tmp_path.resolve()).encode()).hexdigest()[:16]
+    cache_parent = external_cache_home / "repos" / repo_hash
+    cache_parent.mkdir(parents=True)
+    unsafe_target = tmp_path / "unsafe-cache-target"
+    unsafe_target.mkdir()
+    (cache_parent / "typescript").symlink_to(unsafe_target, target_is_directory=True)
+    monkeypatch.setenv("APEX_RAY_CACHE_HOME", str(external_cache_home))
+    monkeypatch.setattr(
+        "apex_ray.cli.main.run_review_pipeline",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("unsafe cache must fail preflight")),
+    )
+    external_reports = tmp_path_factory.mktemp("external-reports")
+
+    result = runner.invoke(
+        app,
+        [
+            "review",
+            "--worktree",
+            "--no-llm",
+            "--output",
+            str(external_reports / "review.md"),
+            "--json",
+            str(external_reports / "review.json"),
+        ],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 2
+    assert "must be outside the repository or Git-ignored" in _plain_cli_output(result.output)
+    assert list(unsafe_target.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    ("arguments", "environment"),
+    [
+        (["--llm", "--llm-provider", "fake", "--no-analyzer-cache"], {}),
+        (
+            [
+                "--llm",
+                "--llm-provider",
+                "fake",
+                "--cache-dir",
+                "unsafe-llm-cache",
+                "--no-cache",
+                "--no-analyzer-cache",
+            ],
+            {},
+        ),
+        (["--no-llm", "--no-analyzer-cache"], {"APEX_RAY_CACHE_HOME": "unsafe-analyzer-cache"}),
+    ],
+)
+def test_review_worktree_does_not_preflight_disabled_cache_side_effects(
+    tmp_path: Path,
+    tmp_path_factory: pytest.TempPathFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    arguments: list[str],
+    environment: dict[str, str],
+) -> None:
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.email", "cli@example.invalid"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "CLI Test"], cwd=tmp_path, check=True)
+    app_path = tmp_path / "app.ts"
+    app_path.write_text("export const value = 1;\n", encoding="utf-8")
+    subprocess.run(["git", "add", "app.ts"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "initial"], cwd=tmp_path, check=True)
+    app_path.write_text("export const value = 2;\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    for name in ("APEX_RAY_CACHE_HOME", "XDG_CACHE_HOME"):
+        monkeypatch.delenv(name, raising=False)
+    for name, value in environment.items():
+        monkeypatch.setenv(name, value)
+    called = False
+
+    def fake_pipeline(root, diff_text, target_mode, config, **_kwargs):
+        nonlocal called
+        called = True
+        return build_report(
+            ProjectProfile(root=str(root), is_git_repo=True),
+            config,
+            DiffSummary(target_mode=target_mode),
+            input_snapshot=capture_review_input_snapshot(root, diff_text, target_mode),
+        )
+
+    monkeypatch.setattr("apex_ray.cli.main.run_review_pipeline", fake_pipeline)
+    external_reports = tmp_path_factory.mktemp("external-reports")
+
+    result = runner.invoke(
+        app,
+        [
+            "review",
+            "--worktree",
+            *arguments,
+            "--output",
+            str(external_reports / "review.md"),
+            "--json",
+            str(external_reports / "review.json"),
+        ],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert called is True
+
+
+def test_review_continuation_does_not_preflight_unused_analyzer_cache(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.email", "cli@example.invalid"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "CLI Test"], cwd=tmp_path, check=True)
+    (tmp_path / ".gitignore").write_text("/reports/\n", encoding="utf-8")
+    app_path = tmp_path / "app.py"
+    app_path.write_text("value = 1\n", encoding="utf-8")
+    subprocess.run(["git", "add", ".gitignore", "app.py"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "initial"], cwd=tmp_path, check=True)
+    app_path.write_text("value = 2\n", encoding="utf-8")
+    diff_text = subprocess.run(
+        ["git", "diff", "HEAD"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    reports = tmp_path / "reports"
+    reports.mkdir()
+    report = build_report(
+        ProjectProfile(root=str(tmp_path), is_git_repo=True),
+        ReviewConfig(),
+        DiffSummary(target_mode=TargetMode.WORKTREE),
+        input_snapshot=capture_review_input_snapshot(tmp_path, diff_text, TargetMode.WORKTREE),
+    )
+    report_path = reports / "prior.json"
+    report_path.write_text(report.model_dump_json(indent=2), encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("APEX_RAY_CACHE_HOME", "unsafe-analyzer-cache")
+    called = False
+
+    def fake_continue(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        return report, [object()]
+
+    monkeypatch.setattr("apex_ray.cli.main.continue_review_from_report", fake_continue)
+
+    result = runner.invoke(
+        app,
+        [
+            "review",
+            "--continue-from",
+            str(report_path),
+            "--llm",
+            "--no-cache",
+            "--output",
+            str(reports / "continued.md"),
+            "--json",
+            str(reports / "continued.json"),
+        ],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert called is True
+
+
+def test_review_completion_rejects_legacy_report_without_snapshot(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    report = build_report(
+        ProjectProfile(root=str(tmp_path), is_git_repo=True),
+        ReviewConfig(),
+        DiffSummary(target_mode=TargetMode.PATCH),
+    )
+    report_path = tmp_path / "legacy.json"
+    report_path.write_text(report.model_dump_json(indent=2), encoding="utf-8")
+    monkeypatch.setattr(
+        "apex_ray.cli.main.continue_review_until_complete",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("legacy report must not drain")),
+    )
+
+    result = runner.invoke(
+        app,
+        ["review", "--continue-from", str(report_path), "--llm", "--until-complete"],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 2
+    assert "requires a report with a review-input snapshot" in _plain_cli_output(result.output)
+
+
+def test_review_llm_max_packs_overrides_root_and_every_reviewer(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    patch = tmp_path / "sample.diff"
+    patch.write_text((FIXTURE_DIR / "sample.diff").read_text(encoding="utf-8"), encoding="utf-8")
+    config_path = tmp_path / "config.yml"
+    config_path.write_text(
+        """
+review:
+  reviewers:
+    - id: correctness
+      max_packs: 80
+    - id: security
+      max_packs: 12
+""".lstrip(),
+        encoding="utf-8",
+    )
+    seen: dict[str, object] = {}
+
+    def fake_pipeline(root, _diff, _mode, config, **_kwargs):
+        seen["root"] = config.llm.max_packs
+        seen["reviewers"] = [reviewer.max_packs for reviewer in config.reviewers]
+        return build_report(
+            ProjectProfile(root=str(root), is_git_repo=False),
+            config,
+            DiffSummary(target_mode=TargetMode.PATCH),
+        )
+
+    monkeypatch.setattr("apex_ray.cli.main.run_review_pipeline", fake_pipeline)
+
+    result = runner.invoke(
+        app,
+        [
+            "review",
+            "--diff",
+            str(patch),
+            "--config",
+            str(config_path),
+            "--llm-max-packs",
+            "5",
+        ],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert seen == {"root": 5, "reviewers": [5, 5]}
+
+
+def test_review_partial_summary_is_explicit_without_changing_default_exit_code(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    patch = tmp_path / "sample.diff"
+    patch.write_text((FIXTURE_DIR / "sample.diff").read_text(encoding="utf-8"), encoding="utf-8")
+    config_path = tmp_path / "config.yml"
+    config_path.write_text(
+        """
+review:
+  reviewers:
+    - id: correctness
+    - id: security
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    def fake_pipeline(root, _diff, _mode, config, **_kwargs):
+        report = build_report(
+            ProjectProfile(root=str(root), is_git_repo=False),
+            config,
+            DiffSummary(target_mode=TargetMode.PATCH),
+        )
+        report.llm_coverage.enabled = True
+        report.llm_coverage.total_context_packs = 10
+        report.llm_coverage.reviewed_context_packs = 4
+        report.llm_coverage.unreviewed_context_packs = 6
+        report.llm_coverage.partial_severity = "minor"
+        return report
+
+    monkeypatch.setattr("apex_ray.cli.main.run_review_pipeline", fake_pipeline)
+    markdown_output = tmp_path / "custom-review.md"
+    json_output = tmp_path / "custom-review.json"
+    html_output = tmp_path / "custom-review.html"
+    sarif_output = tmp_path / "custom-review.sarif"
+
+    result = runner.invoke(
+        app,
+        [
+            "review",
+            "--diff",
+            str(patch),
+            "--config",
+            str(config_path),
+            "--output",
+            str(markdown_output),
+            "--json",
+            str(json_output),
+            "--html",
+            str(html_output),
+            "--sarif",
+            str(sarif_output),
+        ],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert "APEX RAY REVIEW: PARTIAL COVERAGE" in result.stdout
+    assert "Review coverage: PARTIAL - 4/10 unique context packs (40.0%)" in result.stdout
+    assert "Findings: 0 in reviewed scope" in result.stdout
+    assert "Continue reviewer correctness:" in result.stdout
+    assert "--reviewer correctness" in result.stdout
+    assert "Continue reviewer security:" in result.stdout
+    assert "--reviewer security" in result.stdout
+    assert f"--output {markdown_output}" in result.stdout
+    assert f"--json {json_output}" in result.stdout
+    assert f"--html {html_output}" in result.stdout
+    assert f"--sarif {sarif_output}" in result.stdout
+
+
+def test_review_partial_summary_targets_the_reviewer_that_owns_assignment_debt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    patch = tmp_path / "sample.diff"
+    patch.write_text((FIXTURE_DIR / "sample.diff").read_text(encoding="utf-8"), encoding="utf-8")
+    config_path = tmp_path / "config.yml"
+    config_path.write_text(
+        """
+review:
+  reviewers:
+    - id: correctness
+      required: true
+    - id: security
+""".lstrip(),
+        encoding="utf-8",
+    )
+    pack_id = "src/auth.ts#authorize:1"
+
+    def fake_pipeline(root, _diff, _mode, config, **_kwargs):
+        report = build_report(
+            ProjectProfile(root=str(root), is_git_repo=False),
+            config,
+            DiffSummary(target_mode=TargetMode.PATCH),
+        )
+        report.llm_coverage.enabled = True
+        report.llm_coverage.total_context_packs = 1
+        report.llm_coverage.reviewed_context_packs = 1
+        report.llm_coverage.reviewers = [
+            LLMReviewerCoverageSummary(
+                reviewer_id="correctness",
+                required=True,
+                status="pass",
+                matching_context_packs=1,
+                reviewed_context_packs=1,
+                matching_context_pack_ids=[pack_id],
+                reviewed_context_pack_ids=[pack_id],
+            ),
+            LLMReviewerCoverageSummary(
+                reviewer_id="security",
+                status="warn",
+                matching_context_packs=1,
+                reviewed_context_packs=0,
+                matching_context_pack_ids=[pack_id],
+            ),
+        ]
+        report.llm_coverage.coverage_todos = [
+            LLMCoverageTodo(
+                context_pack_id=pack_id,
+                file="src/auth.ts",
+                reviewer_id="security",
+                priority="p0",
+            )
+        ]
+        return report
+
+    monkeypatch.setattr("apex_ray.cli.main.run_review_pipeline", fake_pipeline)
+
+    result = runner.invoke(
+        app,
+        ["review", "--diff", str(patch), "--config", str(config_path)],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert "APEX RAY REVIEW: PARTIAL COVERAGE" in result.stdout
+    assert "Continue reviewer security:" in result.stdout
+    assert "--reviewer security" in result.stdout
+    assert "Continue reviewer correctness:" not in result.stdout
+
+
+def test_review_partial_summary_routes_depth_debt_to_a_matching_reviewer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    patch = tmp_path / "sample.diff"
+    patch.write_text((FIXTURE_DIR / "sample.diff").read_text(encoding="utf-8"), encoding="utf-8")
+    config_path = tmp_path / "config.yml"
+    config_path.write_text(
+        """
+review:
+  reviewers:
+    - id: baseline
+      required: true
+    - id: security
+""".lstrip(),
+        encoding="utf-8",
+    )
+    pack_id = "src/auth.ts#authorize:1"
+
+    def fake_pipeline(root, _diff, _mode, config, **_kwargs):
+        report = build_report(
+            ProjectProfile(root=str(root), is_git_repo=False),
+            config,
+            DiffSummary(target_mode=TargetMode.PATCH),
+        )
+        report.llm_coverage.enabled = True
+        report.llm_coverage.total_context_packs = 1
+        report.llm_coverage.reviewed_context_packs = 1
+        report.llm_coverage.partial_severity = "major"
+        report.llm_coverage.shallow_only_high_risk_context_pack_ids = [pack_id]
+        report.llm_coverage.reviewers = [
+            LLMReviewerCoverageSummary(reviewer_id="baseline", required=True, status="not_applicable"),
+            LLMReviewerCoverageSummary(
+                reviewer_id="security",
+                status="pass",
+                matching_context_packs=1,
+                reviewed_context_packs=1,
+                matching_context_pack_ids=[pack_id],
+                reviewed_context_pack_ids=[pack_id],
+            ),
+        ]
+        return report
+
+    monkeypatch.setattr("apex_ray.cli.main.run_review_pipeline", fake_pipeline)
+
+    result = runner.invoke(
+        app,
+        ["review", "--diff", str(patch), "--config", str(config_path)],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert "Continue reviewer security:" in result.stdout
+    assert "--reviewer security" in result.stdout
+    assert "Continue reviewer baseline:" not in result.stdout
+
+
+def test_review_until_complete_rejects_configured_disabled_llm_before_pipeline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    patch = tmp_path / "sample.diff"
+    patch.write_text((FIXTURE_DIR / "sample.diff").read_text(encoding="utf-8"), encoding="utf-8")
+    config_path = tmp_path / "config.yml"
+    config_path.write_text(
+        "review:\n  llm:\n    enabled: false\n",
+        encoding="utf-8",
+    )
+
+    def unexpected_pipeline(*_args, **_kwargs):
+        pytest.fail("completion with disabled LLM must fail before the review pipeline")
+
+    monkeypatch.setattr("apex_ray.cli.main.run_review_pipeline", unexpected_pipeline)
+
+    result = runner.invoke(
+        app,
+        [
+            "review",
+            "--diff",
+            str(patch),
+            "--config",
+            str(config_path),
+            "--until-complete",
+        ],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 2
+    assert "Coverage completion requires --llm or review.llm.enabled: true." in _plain_cli_output(result.output)
+
+
+def test_review_until_complete_uses_the_single_required_reviewer_and_writes_reports(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    patch = tmp_path / "sample.diff"
+    patch.write_text((FIXTURE_DIR / "sample.diff").read_text(encoding="utf-8"), encoding="utf-8")
+    config_path = tmp_path / "config.yml"
+    config_path.write_text(
+        """
+review:
+  llm:
+    enabled: true
+    provider: fake
+  reviewers:
+    - id: correctness
+      required: true
+    - id: security
+""".lstrip(),
+        encoding="utf-8",
+    )
+    seen: dict[str, object] = {}
+
+    def fake_pipeline(root, _diff, _mode, config, **_kwargs):
+        seen["initial_reviewer_ids"] = _kwargs["reviewer_ids"]
+        report = build_report(
+            ProjectProfile(root=str(root), is_git_repo=False),
+            config,
+            DiffSummary(target_mode=TargetMode.PATCH),
+        )
+        report.llm_coverage.enabled = True
+        report.llm_coverage.total_context_packs = 2
+        report.llm_coverage.unreviewed_context_packs = 2
+        report.llm_coverage.partial_severity = "minor"
+        return report
+
+    def fake_drain(report, **kwargs):
+        seen.update(kwargs)
+        kwargs["on_batch"](report, 1)
+        seen["intermediate_json_exists"] = json_output.exists()
+        seen["intermediate_completion"] = ReviewReport.model_validate_json(
+            json_output.read_text(encoding="utf-8")
+        ).llm_coverage.completion_status
+        report.llm_coverage.reviewed_context_packs = 2
+        report.llm_coverage.unreviewed_context_packs = 0
+        report.llm_coverage.partial_severity = "none"
+        return SimpleNamespace(report=report, complete=True, batches=2, stop_reason="complete")
+
+    monkeypatch.setattr("apex_ray.cli.main.run_review_pipeline", fake_pipeline)
+    monkeypatch.setattr("apex_ray.cli.main.continue_review_until_complete", fake_drain)
+    json_output = tmp_path / "review.json"
+
+    result = runner.invoke(
+        app,
+        [
+            "review",
+            "--diff",
+            str(patch),
+            "--config",
+            str(config_path),
+            "--until-complete",
+            "--strict-coverage",
+            "--followup-max-pack-reviews",
+            "3",
+            "--max-followup-passes",
+            "4",
+            "--json",
+            str(json_output),
+        ],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert seen["initial_reviewer_ids"] == ["correctness"]
+    assert seen["reviewer_ids"] == ["correctness"]
+    assert seen["batch_size"] == 3
+    assert seen["max_batches"] == 4
+    assert seen["intermediate_json_exists"] is True
+    assert seen["intermediate_completion"] == "partial"
+    assert json_output.exists()
+    persisted = ReviewReport.model_validate_json(json_output.read_text(encoding="utf-8"))
+    assert persisted.coverage_completion is not None
+    assert persisted.coverage_completion.status == "complete"
+    assert persisted.coverage_completion.reviewer_ids == ["correctness"]
+    assert persisted.coverage_completion.batches == 2
+    assert "Coverage completion: COMPLETE after 2 follow-up batch(es)." in result.stdout
+
+
+def test_review_strict_coverage_fails_only_after_writing_incomplete_report(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    patch = tmp_path / "sample.diff"
+    patch.write_text((FIXTURE_DIR / "sample.diff").read_text(encoding="utf-8"), encoding="utf-8")
+
+    def fake_pipeline(root, _diff, _mode, config, **_kwargs):
+        report = build_report(
+            ProjectProfile(root=str(root), is_git_repo=False),
+            config,
+            DiffSummary(target_mode=TargetMode.PATCH),
+        )
+        report.llm_coverage.enabled = True
+        report.llm_coverage.total_context_packs = 1
+        report.llm_coverage.unreviewed_context_packs = 1
+        report.llm_coverage.partial_severity = "minor"
+        return report
+
+    monkeypatch.setattr("apex_ray.cli.main.run_review_pipeline", fake_pipeline)
+    monkeypatch.setattr(
+        "apex_ray.cli.main.continue_review_until_complete",
+        lambda report, **_kwargs: SimpleNamespace(
+            report=report,
+            complete=False,
+            batches=1,
+            stop_reason="no_progress",
+        ),
+    )
+    json_output = tmp_path / "review.json"
+
+    result = runner.invoke(
+        app,
+        [
+            "review",
+            "--diff",
+            str(patch),
+            "--llm",
+            "--strict-coverage",
+            "--json",
+            str(json_output),
+        ],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 1
+    assert json_output.exists()
+    persisted = ReviewReport.model_validate_json(json_output.read_text(encoding="utf-8"))
+    assert persisted.coverage_completion is not None
+    assert persisted.coverage_completion.status == "incomplete"
+    assert persisted.coverage_completion.stop_reason == "no_progress"
+    assert "Coverage completion: INCOMPLETE (no_progress)." in result.stdout
 
 
 def test_review_continue_from_preserves_explicit_config_and_repeatable_reviewers(

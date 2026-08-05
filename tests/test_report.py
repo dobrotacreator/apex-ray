@@ -12,6 +12,10 @@ from apex_ray.models import (
     FindingSeverity,
     FindingVerification,
     LLMContextSelection,
+    LLMCoverageMode,
+    LLMCoverageSummary,
+    LLMCoverageTodo,
+    LLMReviewerCoverageSummary,
     LLMRun,
     MemoryCard,
     MemoryKind,
@@ -19,20 +23,22 @@ from apex_ray.models import (
     MemoryOmission,
     ProjectProfile,
     ReviewConfig,
+    ReviewCoverageCompletion,
     ReviewerConfig,
     RiskSeverity,
     RiskSignal,
     TargetMode,
 )
 from apex_ray.report import build_report, render_markdown
+from apex_ray.report.coverage import render_coverage_summary_lines
 from apex_ray.report.coverage_breakdown import pack_residual_priority
 
 
 def test_render_markdown_explains_project_risk_and_focused_reviewers() -> None:
     config = ReviewConfig(
         reviewers=[
-            ReviewerConfig(id="security", name="Security", focus="Authorization boundaries."),
-            ReviewerConfig(id="finance", name="Finance", focus="Money movement."),
+            ReviewerConfig(id="security", name="Security", focus="Authorization boundaries.", verify=False),
+            ReviewerConfig(id="finance", name="Finance", focus="Money movement.", verify=False),
         ]
     )
     config.llm.enabled = True
@@ -115,6 +121,12 @@ def test_render_markdown_explains_project_risk_and_focused_reviewers() -> None:
             ),
         },
     )
+    report.coverage_completion = ReviewCoverageCompletion(
+        status="complete",
+        reviewer_ids=["security"],
+        batches=2,
+        stop_reason="complete",
+    )
 
     markdown = render_markdown(report)
 
@@ -127,6 +139,12 @@ def test_render_markdown_explains_project_risk_and_focused_reviewers() -> None:
     assert "## Focused Reviewers" in markdown
     assert "`security` (Security)" in markdown
     assert "`finance` (Finance)" in markdown
+    assert "- Completion status: `complete`" in markdown
+    assert "- Bounded completion: `complete`" in markdown
+    assert "- Completion scope: `security`" in markdown
+    assert "- Completion batches: `2`" in markdown
+    assert "- Completion stop reason: `complete`" in markdown
+    assert "- Reviewer assignments: `2` of `2`" in markdown
 
 
 def test_render_markdown_counts_empty_reviewer_ids_as_general() -> None:
@@ -295,6 +313,55 @@ def test_render_markdown_filters_configured_reviewers_by_explicit_scope_when_sel
     assert "`ux` (UX) - User-facing behavior." in markdown
     assert "`security`" not in markdown
     assert [reviewer.reviewer_id for reviewer in report.llm_coverage.reviewers] == ["ux"]
+
+
+def test_reviewer_coverage_exposes_effective_independent_limits() -> None:
+    pack_id = "src/auth.ts#authorize:1"
+    config = ReviewConfig(
+        reviewers=[
+            ReviewerConfig(
+                id="security",
+                coverage_mode=LLMCoverageMode.FAST,
+                review_depth="deep",
+                max_packs=7,
+                max_deep_packs=5,
+                max_input_tokens=42_000,
+                verify=False,
+            )
+        ]
+    )
+    config.llm.enabled = True
+    selection = LLMContextSelection(
+        total_context_pack_ids=[pack_id],
+        selected_context_pack_ids=[pack_id],
+        deep_selected_context_pack_ids=[pack_id],
+    )
+    report = build_report(
+        ProjectProfile(root="/repo", is_git_repo=True),
+        config,
+        DiffSummary(target_mode=TargetMode.PATCH),
+        context_packs=[ContextPack(id=pack_id, file="src/auth.ts")],
+        reviewer_selections={"security": selection},
+        llm_runs=[
+            LLMRun(
+                provider="fake",
+                reviewer_id="security",
+                context_pack_id=pack_id,
+                status="ok",
+                duration_ms=1,
+            )
+        ],
+    )
+
+    reviewer = report.llm_coverage.reviewers[0]
+    markdown = render_markdown(report)
+
+    assert reviewer.coverage_mode == "fast"
+    assert reviewer.review_depth == "deep"
+    assert reviewer.max_packs == 7
+    assert reviewer.max_deep_packs == 5
+    assert reviewer.max_input_tokens == 42_000
+    assert "Effective limits: mode `fast`, depth `deep`, packs `7`, deep `5`, input `~42000` tokens" in markdown
 
 
 def test_render_markdown_includes_missing_required_reviewer_when_other_selection_exists() -> None:
@@ -633,6 +700,7 @@ def test_disabled_llm_keeps_configured_required_reviewers_not_applicable() -> No
     assert report.llm_coverage.reviewers[0].status == "not_applicable"
     assert report.llm_coverage.reviewers[0].reasons == []
     assert all(todo.reviewer_id != "security" for todo in report.llm_coverage.coverage_todos)
+    assert "- Completion status: `disabled`" in render_markdown(report)
 
 
 def test_required_reviewer_failure_fails_union_coverage_gate() -> None:
@@ -682,6 +750,192 @@ def test_required_reviewer_failure_fails_union_coverage_gate() -> None:
     reviewer_coverage = {reviewer.reviewer_id: reviewer for reviewer in report.llm_coverage.reviewers}
     assert reviewer_coverage["security"].status == "fail"
     assert reviewer_coverage["ux"].status == "pass"
+
+
+def test_reviewer_assignment_debt_is_not_hidden_by_union_pack_coverage() -> None:
+    first_pack_id = "src/auth.ts#authorize:1"
+    second_pack_id = "src/session.ts#refresh:1"
+    config = ReviewConfig(
+        reviewers=[
+            ReviewerConfig(id="security", paths=["src/**"], required=True),
+            ReviewerConfig(id="ux", paths=["src/**"]),
+        ]
+    )
+    config.llm.enabled = True
+    security_selection = LLMContextSelection(
+        total_context_pack_ids=[first_pack_id, second_pack_id],
+        selected_context_pack_ids=[first_pack_id],
+        deep_selected_context_pack_ids=[first_pack_id],
+        unselected_context_pack_ids=[second_pack_id],
+        skipped_context_pack_reasons={second_pack_id: "not selected by reviewer pack cap"},
+    )
+    ux_selection = LLMContextSelection(
+        total_context_pack_ids=[first_pack_id, second_pack_id],
+        selected_context_pack_ids=[second_pack_id],
+        deep_selected_context_pack_ids=[second_pack_id],
+        unselected_context_pack_ids=[first_pack_id],
+        skipped_context_pack_reasons={first_pack_id: "not selected by reviewer pack cap"},
+    )
+
+    report = build_report(
+        ProjectProfile(root="/repo", is_git_repo=True),
+        config,
+        DiffSummary(target_mode=TargetMode.PATCH),
+        context_packs=[
+            ContextPack(id=first_pack_id, file="src/auth.ts", file_kind=FileKind.SOURCE),
+            ContextPack(id=second_pack_id, file="src/session.ts", file_kind=FileKind.SOURCE),
+        ],
+        llm_runs=[
+            LLMRun(
+                provider="fake",
+                reviewer_id="security",
+                context_pack_id=first_pack_id,
+                status="ok",
+                duration_ms=1,
+            ),
+            LLMRun(
+                provider="fake",
+                reviewer_id="ux",
+                context_pack_id=second_pack_id,
+                status="ok",
+                duration_ms=1,
+            ),
+        ],
+        reviewer_selections={"security": security_selection, "ux": ux_selection},
+    )
+
+    reviewer_coverage = {reviewer.reviewer_id: reviewer for reviewer in report.llm_coverage.reviewers}
+    assert report.llm_coverage.coverage_ratio == 1.0
+    assert reviewer_coverage["security"].status == "pass"
+    assert reviewer_coverage["security"].reviewed_context_pack_ids == [first_pack_id]
+    assert reviewer_coverage["ux"].status == "pass"
+    assert reviewer_coverage["ux"].reviewed_context_pack_ids == [second_pack_id]
+    assert report.llm_coverage.completion_status == "partial"
+    assert report.llm_coverage.quality_gate_status == "pass"
+    assert {(todo.reviewer_id, todo.context_pack_id) for todo in report.llm_coverage.coverage_todos} == {
+        ("security", second_pack_id),
+        ("ux", first_pack_id),
+    }
+
+
+def test_applicable_required_reviewer_with_zero_selected_packs_fails_closed() -> None:
+    pack_id = "src/auth.ts#authorize:1"
+    config = ReviewConfig(reviewers=[ReviewerConfig(id="security", paths=["src/**"], required=True)])
+    config.llm.enabled = True
+    selection = LLMContextSelection(
+        total_context_pack_ids=[pack_id],
+        selected_context_pack_ids=[],
+        unselected_context_pack_ids=[pack_id],
+        skipped_context_pack_reasons={pack_id: "not selected by reviewer token budget"},
+    )
+
+    report = build_report(
+        ProjectProfile(root="/repo", is_git_repo=True),
+        config,
+        DiffSummary(target_mode=TargetMode.PATCH),
+        context_packs=[ContextPack(id=pack_id, file="src/auth.ts", file_kind=FileKind.SOURCE)],
+        reviewer_selections={"security": selection},
+    )
+
+    reviewer = report.llm_coverage.reviewers[0]
+    assert reviewer.status == "fail"
+    assert any("selected no context packs" in reason for reason in reviewer.reasons)
+    assert report.llm_coverage.quality_gate_status == "fail"
+    assert report.llm_coverage.completion_status == "incomplete"
+    assert any(
+        todo.reviewer_id == "security" and todo.context_pack_id == pack_id
+        for todo in report.llm_coverage.coverage_todos
+    )
+
+
+def test_console_coverage_summary_separates_assignment_and_high_risk_depth_debt() -> None:
+    coverage = LLMCoverageSummary(
+        enabled=True,
+        total_context_packs=1,
+        reviewed_context_packs=1,
+        high_risk_context_packs=1,
+        reviewed_high_risk_context_packs=1,
+        shallow_only_high_risk_context_pack_ids=["src/auth.ts#authorize:1"],
+        reviewers=[
+            LLMReviewerCoverageSummary(
+                reviewer_id="correctness",
+                matching_context_packs=2,
+                reviewed_context_packs=1,
+            )
+        ],
+        coverage_todos=[
+            LLMCoverageTodo(
+                context_pack_id="src/auth.ts#authorize:1",
+                file="src/auth.ts",
+                reviewer_id="correctness",
+                priority="p1",
+            )
+        ],
+    )
+
+    lines = render_coverage_summary_lines(coverage)
+
+    assert "High-risk coverage: PARTIAL - 1/1; depth debt: 1 shallow-only" in lines
+    assert "Remaining: P0 0, P1 0, P2 0 globally unreviewed" in lines
+    assert "Reviewer assignment debt: P0 0, P1 1, P2 0" in lines
+
+
+def test_shallow_only_high_risk_pack_has_an_actionable_deep_continuation_todo() -> None:
+    pack_id = "src/auth.ts#authorize:1"
+    config = ReviewConfig(
+        reviewers=[
+            ReviewerConfig(id="baseline", paths=["docs/**"], required=True, verify=False),
+            ReviewerConfig(id="security", risk=["auth"], verify=False),
+        ]
+    )
+    config.llm.enabled = True
+    pack = ContextPack(
+        id=pack_id,
+        file="src/auth.ts",
+        file_kind=FileKind.SOURCE,
+        risk_signals=[
+            RiskSignal(
+                kind="auth",
+                severity=RiskSeverity.HIGH,
+                reason="Authorization boundary changed.",
+                file="src/auth.ts",
+            )
+        ],
+    )
+    selection = LLMContextSelection(
+        total_context_pack_ids=[pack_id],
+        selected_context_pack_ids=[pack_id],
+        shallow_selected_context_pack_ids=[pack_id],
+    )
+
+    report = build_report(
+        ProjectProfile(root="/repo", is_git_repo=True),
+        config,
+        DiffSummary(target_mode=TargetMode.PATCH),
+        context_packs=[pack],
+        llm_runs=[
+            LLMRun(
+                kind="review_shallow",
+                provider="fake",
+                reviewer_id="security",
+                context_pack_id=pack_id,
+                status="ok",
+                duration_ms=1,
+            )
+        ],
+        reviewer_selections={"security": selection},
+    )
+
+    assert report.llm_coverage.shallow_only_high_risk_context_pack_ids == [pack_id]
+    assert [(todo.context_pack_id, todo.reviewer_id) for todo in report.llm_coverage.coverage_todos] == [
+        (pack_id, "security")
+    ]
+    todo = report.llm_coverage.coverage_todos[0]
+    assert "reviewed only shallowly" in todo.reason
+    assert "--only-pack" in todo.suggested_command
+    assert "--reviewer security" in todo.suggested_command
+    assert "--include-reviewed --continue-review-depth deep" in todo.suggested_command
+    assert "Reviewer assignment debt: P0 0, P1 0, P2 0" in render_coverage_summary_lines(report.llm_coverage)
 
 
 def test_successful_reviewer_retry_clears_prior_review_and_verification_failures() -> None:
@@ -742,6 +996,7 @@ def test_successful_reviewer_retry_clears_prior_review_and_verification_failures
     assert reviewer.failed_verify_runs == 0
     assert report.llm_coverage.quality_gate_status == "pass"
     assert report.llm_coverage.partial_severity == "none"
+    assert report.llm_coverage.completion_status == "complete"
 
 
 def test_reviewer_usage_excludes_superseded_disabled_verify_and_out_of_scope_runs() -> None:
@@ -881,6 +1136,7 @@ def test_unselected_pack_verifier_failure_does_not_fail_reviewer_coverage() -> N
     assert reviewer.actual_total_tokens == 0
     assert all("failed verification run" not in reason for reason in reviewer.reasons)
     assert report.llm_coverage.partial_severity == "minor"
+    assert report.llm_coverage.completion_status == "partial"
     assert all("verifier run" not in reason for reason in report.llm_coverage.partial_reasons)
 
 
@@ -1369,7 +1625,9 @@ def test_unresolved_general_verification_debt_blocks_the_default_quality_gate() 
     assert report.llm_coverage.reviewers[0].status == "warn"
     assert report.llm_coverage.quality_gate_status == "fail"
     assert report.llm_coverage.partial_severity == "critical"
+    assert report.llm_coverage.completion_status == "partial"
     assert "unresolved verification subjects" in " ".join(report.llm_coverage.quality_gate_reasons)
+    assert "Reviewer assignment debt: P0 0, P1 0, P2 0" in render_coverage_summary_lines(report.llm_coverage)
     assert evaluate_pre_push_gate(report, config.gates.pre_push).blocked is True
     markdown = render_markdown(report)
     assert "- Unresolved verification decisions: `1`" in markdown
@@ -1391,6 +1649,7 @@ def test_unresolved_general_verification_debt_blocks_the_default_quality_gate() 
     assert disabled.llm_coverage.reviewers[0].status == "pass"
     assert disabled.llm_coverage.quality_gate_status == "pass"
     assert disabled.llm_coverage.partial_severity == "none"
+    assert disabled.llm_coverage.completion_status == "complete"
     assert evaluate_pre_push_gate(disabled, disabled_config.gates.pre_push).blocked is False
 
     llm_disabled_config = config.model_copy(deep=True)
@@ -1442,6 +1701,7 @@ def test_render_markdown_summarizes_llm_pack_selection() -> None:
     assert "- Review context packs: `1` of `2`" in markdown
     assert "- Skipped context packs: `1`" in markdown
     assert "## LLM Coverage" in markdown
+    assert "- Completion status: `partial`" in markdown
     assert "effort: `low`" in markdown
     assert "- Unreviewed context packs: `1`" in markdown
     assert "- Slice coverage:" in markdown

@@ -85,6 +85,29 @@ apex-ray review --continue-from .apex-ray/reports/review.json --residual-priorit
 apex-ray review --continue-from .apex-ray/reports/review.json --only-pack '<pack-id>' --llm
 ```
 
+Findings describe the reviewed scope, not necessarily the whole diff. A
+`PARTIAL COVERAGE` or `INCOMPLETE REVIEW` result can therefore have zero
+findings while work remains. To drain a configured baseline reviewer in
+bounded batches and fail if it cannot finish:
+
+```bash
+apex-ray review \
+  --continue-from .apex-ray/reports/review.json \
+  --reviewer correctness \
+  --until-complete \
+  --strict-coverage \
+  --llm
+```
+
+Use an existing reviewer id; when a project has several reviewers, selecting
+the intended baseline explicitly also keeps cost and completion semantics
+predictable. Completion covers only context packs matching that reviewer, so a
+narrow specialist can finish while unrelated global debt remains. The saved
+report must contain a review-input snapshot, and any live target must still
+validate. Ordinary non-completion continuation of an older snapshot-less
+report remains available with a warning, but completion fails closed and
+requires a fresh review.
+
 Run the same gate that `apex-ray init` wires into pre-push:
 
 ```bash

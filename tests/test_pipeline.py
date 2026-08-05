@@ -921,6 +921,70 @@ def test_continue_review_updates_modern_default_general_reviewer_selection(
     ]
 
 
+def test_continue_review_can_force_deep_upgrade_of_shallow_reviewed_pack(
+    tmp_path: Path,
+) -> None:
+    pack = ContextPack(
+        id="src/payments.ts#capture:1",
+        file="src/payments.ts",
+        file_kind=FileKind.SOURCE,
+        risk_signals=[
+            RiskSignal(
+                kind="financial",
+                severity=RiskSeverity.HIGH,
+                reason="Payment capture behavior changed.",
+                file="src/payments.ts",
+            )
+        ],
+    )
+    config = ReviewConfig()
+    config.llm.enabled = True
+    config.llm.provider = LLMProviderName.FAKE
+    config.llm.verify = False
+    config.llm.cache_enabled = False
+    selection = LLMContextSelection(
+        total_context_pack_ids=[pack.id],
+        selected_context_pack_ids=[pack.id],
+        shallow_selected_context_pack_ids=[pack.id],
+    )
+    initial = build_report(
+        ProjectProfile(root=str(tmp_path), is_git_repo=True),
+        config,
+        DiffSummary(target_mode=TargetMode.PATCH),
+        context_packs=[pack],
+        llm_runs=[
+            LLMRun(
+                kind="review_shallow",
+                provider="fake",
+                reviewer_id="general",
+                context_pack_id=pack.id,
+                status="ok",
+                duration_ms=1,
+            )
+        ],
+        llm_selection=selection,
+        reviewer_selections={"general": selection},
+    )
+
+    assert initial.llm_coverage.shallow_only_high_risk_context_pack_ids == [pack.id]
+
+    continued, selected = continue_review_from_report(
+        initial,
+        repo_root=tmp_path,
+        only_unreviewed=True,
+        force_review_pack_ids={pack.id},
+        review_depth="deep",
+        provider=FakeLLMProvider([]),
+    )
+
+    assert [candidate.id for candidate in selected] == [pack.id]
+    assert [run.kind for run in continued.llm_runs if run.context_pack_id == pack.id] == [
+        "review_shallow",
+        "review",
+    ]
+    assert continued.llm_coverage.shallow_only_high_risk_context_pack_ids == []
+
+
 def test_continue_review_uses_all_configured_reviewers_when_not_explicitly_scoped(
     tmp_path: Path,
 ) -> None:
@@ -1130,6 +1194,207 @@ def test_continue_review_caps_reviewer_pack_assignments_fairly(
             ("finance", packs[2].id),
         }
     )
+
+
+def test_continue_review_can_apply_reviewer_pack_and_deep_budgets(
+    tmp_path: Path,
+) -> None:
+    packs = [
+        ContextPack(
+            id=f"src/service-{index}.ts#run:1",
+            file=f"src/service-{index}.ts",
+            file_kind=FileKind.SOURCE,
+        )
+        for index in range(3)
+    ]
+    config = ReviewConfig(
+        reviewers=[
+            ReviewerConfig(
+                id="correctness",
+                max_packs=3,
+                max_deep_packs=1,
+                verify=False,
+            )
+        ]
+    )
+    config.llm.enabled = True
+    config.llm.provider = LLMProviderName.FAKE
+    config.llm.cache_enabled = False
+    initial = build_report(
+        ProjectProfile(root=str(tmp_path), is_git_repo=True),
+        config,
+        DiffSummary(
+            target_mode=TargetMode.PATCH,
+            files=[ChangedFile(old_path=pack.file, new_path=pack.file) for pack in packs],
+        ),
+        context_packs=packs,
+    )
+
+    continued, selected = continue_review_from_report(
+        initial,
+        repo_root=tmp_path,
+        reviewer_ids=["correctness"],
+        respect_config_budgets=True,
+        provider=FakeLLMProvider([]),
+    )
+
+    primary_runs = [run for run in continued.llm_runs if run.kind in {"review", "review_shallow"}]
+    assert len(selected) == 1
+    assert [(run.reviewer_id, run.context_pack_id) for run in primary_runs] == [("correctness", selected[0].id)]
+
+
+def test_continue_review_applies_config_budgets_per_reviewer_without_redistribution(
+    tmp_path: Path,
+) -> None:
+    focused_pack = ContextPack(
+        id="src/focused/only.ts#run:1",
+        file="src/focused/only.ts",
+        file_kind=FileKind.SOURCE,
+    )
+    bulk_packs = [
+        ContextPack(
+            id=f"src/bulk/service-{index}.ts#run:1",
+            file=f"src/bulk/service-{index}.ts",
+            file_kind=FileKind.SOURCE,
+        )
+        for index in range(5)
+    ]
+    packs = [focused_pack, *bulk_packs]
+    config = ReviewConfig(
+        reviewers=[
+            ReviewerConfig(
+                id="focused",
+                paths=["src/focused/**"],
+                max_packs=4,
+                max_deep_packs=4,
+                verify=False,
+            ),
+            ReviewerConfig(
+                id="bulk",
+                paths=["src/bulk/**"],
+                max_packs=4,
+                max_deep_packs=4,
+                verify=False,
+            ),
+        ]
+    )
+    config.llm.enabled = True
+    config.llm.provider = LLMProviderName.FAKE
+    config.llm.cache_enabled = False
+    initial = build_report(
+        ProjectProfile(root=str(tmp_path), is_git_repo=True),
+        config,
+        DiffSummary(
+            target_mode=TargetMode.PATCH,
+            files=[ChangedFile(old_path=pack.file, new_path=pack.file) for pack in packs],
+        ),
+        context_packs=packs,
+    )
+
+    continued, selected = continue_review_from_report(
+        initial,
+        repo_root=tmp_path,
+        reviewer_ids=["focused", "bulk"],
+        max_pack_reviews=8,
+        respect_config_budgets=True,
+        provider=FakeLLMProvider([]),
+    )
+
+    primary_runs = [run for run in continued.llm_runs if run.kind in {"review", "review_shallow"}]
+    assignments = [(run.reviewer_id, run.context_pack_id) for run in primary_runs]
+    assert assignments.count(("focused", focused_pack.id)) == 1
+    assert [reviewer_id for reviewer_id, _pack_id in assignments].count("focused") == 1
+    assert [reviewer_id for reviewer_id, _pack_id in assignments].count("bulk") == 4
+    assert len(selected) == 5
+
+
+def test_continue_review_can_apply_reviewer_token_budget(
+    tmp_path: Path,
+) -> None:
+    pack = ContextPack(
+        id="src/service.ts#run:1",
+        file="src/service.ts",
+        file_kind=FileKind.SOURCE,
+    )
+    config = ReviewConfig(
+        reviewers=[
+            ReviewerConfig(
+                id="correctness",
+                max_packs=1,
+                max_deep_packs=1,
+                max_input_tokens=1,
+                verify=False,
+            )
+        ]
+    )
+    config.llm.enabled = True
+    config.llm.provider = LLMProviderName.FAKE
+    config.llm.cache_enabled = False
+    initial = build_report(
+        ProjectProfile(root=str(tmp_path), is_git_repo=True),
+        config,
+        DiffSummary(
+            target_mode=TargetMode.PATCH,
+            files=[ChangedFile(old_path=pack.file, new_path=pack.file)],
+        ),
+        context_packs=[pack],
+    )
+
+    continued, selected = continue_review_from_report(
+        initial,
+        repo_root=tmp_path,
+        reviewer_ids=["correctness"],
+        respect_config_budgets=True,
+        provider=FakeLLMProvider([]),
+    )
+
+    assert selected == []
+    assert [run for run in continued.llm_runs if run.kind in {"review", "review_shallow"}] == []
+
+
+def test_continue_review_config_budget_preserves_archived_residual_priority(
+    tmp_path: Path,
+) -> None:
+    ordinary = ContextPack(id="src/ordinary.ts#run:1", file="src/ordinary.ts", file_kind=FileKind.SOURCE)
+    archived_p0 = ContextPack(id="src/critical.ts#run:1", file="src/critical.ts", file_kind=FileKind.SOURCE)
+    config = ReviewConfig(
+        reviewers=[
+            ReviewerConfig(
+                id="correctness",
+                max_packs=1,
+                max_deep_packs=1,
+                verify=False,
+            )
+        ]
+    )
+    config.llm.enabled = True
+    config.llm.provider = LLMProviderName.FAKE
+    config.llm.cache_enabled = False
+    initial = build_report(
+        ProjectProfile(root=str(tmp_path), is_git_repo=True),
+        config,
+        DiffSummary(
+            target_mode=TargetMode.PATCH,
+            files=[
+                ChangedFile(old_path=ordinary.file, new_path=ordinary.file),
+                ChangedFile(old_path=archived_p0.file, new_path=archived_p0.file),
+            ],
+        ),
+        context_packs=[ordinary, archived_p0],
+    )
+    statuses = {status.context_pack_id: status for status in initial.llm_coverage.pack_statuses}
+    statuses[ordinary.id].priority = "p2"
+    statuses[archived_p0.id].priority = "p0"
+
+    _continued, selected = continue_review_from_report(
+        initial,
+        repo_root=tmp_path,
+        reviewer_ids=["correctness"],
+        respect_config_budgets=True,
+        provider=FakeLLMProvider([]),
+    )
+
+    assert [pack.id for pack in selected] == [archived_p0.id]
 
 
 def test_continue_review_cap_allocation_is_independent_of_reviewer_order(

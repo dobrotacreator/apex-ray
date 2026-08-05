@@ -176,6 +176,9 @@ def _plan_options(
         artifact_name="apex-ray-security",
         sarif_category="apex-ray-security",
         fail_on_quality_gate=True,
+        coverage_policy="configured",
+        followup_max_pack_reviews=16,
+        max_followup_passes=8,
     )
 
 
@@ -202,10 +205,14 @@ def test_action_uses_pinned_dependencies_and_has_no_secret_inputs() -> None:
     assert checkout["with"]["persist-credentials"] is False
 
     assert action["inputs"]["fail-on-quality-gate"]["default"] == "true"
+    assert action["inputs"]["coverage-policy"]["default"] == "configured"
+    assert action["inputs"]["followup-max-pack-reviews"]["default"] == "16"
+    assert action["inputs"]["max-followup-passes"]["default"] == "8"
     assert action["outputs"]["quality-gate-status"]["value"] == "${{ steps.finalize.outputs.quality-gate-status }}"
     assert action["outputs"]["gate-outcome"]["value"] == "${{ steps.finalize.outputs.gate-outcome }}"
     assert action["outputs"]["findings-count"]["value"] == "${{ steps.finalize.outputs.findings-count }}"
     assert action["outputs"]["partial-coverage"]["value"] == "${{ steps.finalize.outputs.partial-coverage }}"
+    assert action["outputs"]["coverage-status"]["value"] == "${{ steps.finalize.outputs.coverage-status }}"
     assert action["outputs"]["reviewer-statuses"]["value"] == "${{ steps.finalize.outputs.reviewer-statuses }}"
     assert action["outputs"]["repository-path"]["value"] == "${{ steps.prepare.outputs.repository-path }}"
     assert action["outputs"]["markdown-path"]["value"] == "${{ steps.prepare.outputs.markdown-path }}"
@@ -421,6 +428,9 @@ def test_plan_environment_uses_the_isolated_repository_checkout(
         "INPUT_REVIEWERS": "",
         "INPUT_LLM": "false",
         "INPUT_FAIL_ON_QUALITY_GATE": "true",
+        "INPUT_COVERAGE_POLICY": "configured",
+        "INPUT_FOLLOWUP_MAX_PACK_REVIEWS": "16",
+        "INPUT_MAX_FOLLOWUP_PASSES": "8",
         "INPUT_BASE": "",
         "INPUT_TRUST_PR_CONFIG": "false",
         "INPUT_MARKDOWN_OUTPUT": ".apex-ray/ci/review.md",
@@ -440,6 +450,56 @@ def test_plan_environment_uses_the_isolated_repository_checkout(
     outputs = github_output.read_text(encoding="utf-8")
     assert f"repository-path={repository.resolve()}\n" in outputs
     assert f"markdown-path={repository / '.apex-ray' / 'ci' / 'review.md'}\n" in outputs
+
+
+def test_complete_coverage_policy_adds_bounded_completion_arguments(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    helper = _load_helper()
+    workspace = tmp_path / "repo"
+    runner_temp = tmp_path / "runner"
+    workspace.mkdir()
+    _init_repository(workspace)
+    monkeypatch.setattr(helper, "_action_root", lambda: tmp_path / "remote-action")
+    options = _plan_options(
+        helper,
+        workspace=workspace,
+        runner_temp=runner_temp,
+        event={},
+    )._replace(
+        coverage_policy="complete",
+        followup_max_pack_reviews=5,
+        max_followup_passes=6,
+    )
+
+    plan = helper.create_plan(options)
+
+    assert plan["coverage_policy"] == "complete"
+    assert "--until-complete" in plan["args"]
+    assert plan["args"][plan["args"].index("--followup-max-pack-reviews") + 1] == "5"
+    assert plan["args"][plan["args"].index("--max-followup-passes") + 1] == "6"
+
+
+def test_complete_coverage_policy_rejects_explicitly_disabled_llm(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    helper = _load_helper()
+    workspace = tmp_path / "repo"
+    runner_temp = tmp_path / "runner"
+    workspace.mkdir()
+    _init_repository(workspace)
+    monkeypatch.setattr(helper, "_action_root", lambda: tmp_path / "remote-action")
+    options = _plan_options(
+        helper,
+        workspace=workspace,
+        runner_temp=runner_temp,
+        event={},
+    )._replace(coverage_policy="complete", llm="false")
+
+    with pytest.raises(ValueError, match="requires LLM review"):
+        helper.create_plan(options)
 
 
 def test_plan_notices_emit_escaped_workflow_warnings(
@@ -1347,9 +1407,23 @@ def _write_finalization_plan(
     quality_gate_status: str,
     fail_on_quality_gate: bool,
     include_critical_finding: bool = False,
+    coverage_policy: str = "configured",
+    reviewed_context_packs: int = 1,
+    total_context_packs: int = 1,
+    reviewer_coverage: list[dict[str, Any]] | None = None,
+    coverage_completion: dict[str, Any] | None = None,
+    plan_reviewers: list[str] | None = None,
+    report_config: dict[str, Any] | None = None,
 ) -> Path:
     json_path = root / "review.json"
     sarif_path = root / "review.sarif"
+    effective_plan_reviewers = ["security"] if plan_reviewers is None else plan_reviewers
+    if report_config is None:
+        report_config = (
+            {"reviewers": [{"id": reviewer_id} for reviewer_id in effective_plan_reviewers]}
+            if effective_plan_reviewers
+            else {}
+        )
     findings: list[dict[str, Any]] = []
     if include_critical_finding:
         findings.append(
@@ -1365,26 +1439,31 @@ def _write_finalization_plan(
                 "suggested_test": "Retry the same transaction.",
             }
         )
+    report_payload = {
+        "project": {"root": str(root), "is_git_repo": True},
+        "config": report_config,
+        "diff": {"target_mode": "patch"},
+        "summary": {},
+        "llm_coverage": {
+            "enabled": True,
+            "quality_gate_status": quality_gate_status,
+            "quality_gate_reasons": (
+                ["Required reviewer security did not complete."] if quality_gate_status == "fail" else []
+            ),
+            "partial_severity": "none" if reviewed_context_packs == total_context_packs else "minor",
+            "total_context_packs": total_context_packs,
+            "reviewed_context_packs": reviewed_context_packs,
+            "unreviewed_context_packs": total_context_packs - reviewed_context_packs,
+            "reviewers": reviewer_coverage or [],
+        },
+        "findings": findings,
+        "generated_at": "2026-07-26T00:00:00Z",
+        "version": "test",
+    }
+    if coverage_completion is not None:
+        report_payload["coverage_completion"] = coverage_completion
     json_path.write_text(
-        json.dumps(
-            {
-                "project": {"root": str(root), "is_git_repo": True},
-                "config": {},
-                "diff": {"target_mode": "patch"},
-                "summary": {},
-                "llm_coverage": {
-                    "quality_gate_status": quality_gate_status,
-                    "quality_gate_reasons": (
-                        ["Required reviewer security did not complete."] if quality_gate_status == "fail" else []
-                    ),
-                    "total_context_packs": 1,
-                    "reviewed_context_packs": 1,
-                },
-                "findings": findings,
-                "generated_at": "2026-07-26T00:00:00Z",
-                "version": "test",
-            }
-        ),
+        json.dumps(report_payload),
         encoding="utf-8",
     )
     sarif_path.write_text("{}\n", encoding="utf-8")
@@ -1395,11 +1474,12 @@ def _write_finalization_plan(
                 "schema_version": 1,
                 "json_path": str(json_path),
                 "sarif_path": str(sarif_path),
-                "reviewers": ["security"],
+                "reviewers": effective_plan_reviewers,
                 "llm_mode": "configured",
                 "markdown_output": ".apex-ray/ci/review.md",
                 "sarif_output": ".apex-ray/ci/review.sarif",
                 "fail_on_quality_gate": fail_on_quality_gate,
+                "coverage_policy": coverage_policy,
             }
         ),
         encoding="utf-8",
@@ -1444,6 +1524,302 @@ def test_finalize_uses_coverage_quality_gate_as_ci_result(
     assert f"Coverage quality gate: `{quality_gate_status}`" in summary
     if include_critical_finding:
         assert "critical `1`" in summary
+
+
+def test_finalize_complete_policy_fails_partial_coverage_and_exports_status(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    helper = _load_helper()
+    github_output = tmp_path / "github-output"
+    github_summary = tmp_path / "github-summary"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(github_output))
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(github_summary))
+    plan_path = _write_finalization_plan(
+        tmp_path,
+        quality_gate_status="warn",
+        fail_on_quality_gate=True,
+        coverage_policy="complete",
+        reviewed_context_packs=1,
+        total_context_packs=3,
+        coverage_completion={
+            "status": "incomplete",
+            "reviewer_ids": ["security"],
+            "batches": 8,
+            "stop_reason": "max_batches",
+        },
+    )
+
+    assert helper._finalize(plan_path) == 1
+
+    outputs = github_output.read_text(encoding="utf-8")
+    assert "coverage-status=incomplete\n" in outputs
+    assert "gate-outcome=fail\n" in outputs
+    summary = github_summary.read_text(encoding="utf-8")
+    assert "Coverage completion: `incomplete`" in summary
+
+
+def test_finalize_complete_policy_rejects_missing_persisted_completion(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    helper = _load_helper()
+    monkeypatch.setenv("GITHUB_OUTPUT", str(tmp_path / "github-output"))
+    plan_path = _write_finalization_plan(
+        tmp_path,
+        quality_gate_status="pass",
+        fail_on_quality_gate=True,
+        coverage_policy="complete",
+    )
+
+    with pytest.raises(ValueError, match="persisted coverage completion"):
+        helper._finalize(plan_path)
+
+
+def test_finalize_complete_policy_rejects_mismatched_explicit_reviewer_scope(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    helper = _load_helper()
+    monkeypatch.setenv("GITHUB_OUTPUT", str(tmp_path / "github-output"))
+    plan_path = _write_finalization_plan(
+        tmp_path,
+        quality_gate_status="pass",
+        fail_on_quality_gate=True,
+        coverage_policy="complete",
+        reviewer_coverage=[
+            {
+                "reviewer_id": "correctness",
+                "status": "pass",
+                "matching_context_packs": 1,
+                "reviewed_context_packs": 1,
+                "matching_context_pack_ids": ["src/app.ts#run:1"],
+                "reviewed_context_pack_ids": ["src/app.ts#run:1"],
+            }
+        ],
+        coverage_completion={
+            "status": "complete",
+            "reviewer_ids": ["correctness"],
+            "batches": 1,
+            "stop_reason": "complete",
+        },
+        plan_reviewers=["security"],
+    )
+
+    with pytest.raises(ValueError, match="reviewer scope"):
+        helper._finalize(plan_path)
+
+
+def test_finalize_complete_policy_accepts_scoped_completion_with_unrelated_global_debt(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    helper = _load_helper()
+    github_output = tmp_path / "github-output"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(github_output))
+    plan_path = _write_finalization_plan(
+        tmp_path,
+        quality_gate_status="warn",
+        fail_on_quality_gate=True,
+        coverage_policy="complete",
+        reviewed_context_packs=1,
+        total_context_packs=2,
+        reviewer_coverage=[
+            {
+                "reviewer_id": "security",
+                "status": "pass",
+                "matching_context_packs": 1,
+                "reviewed_context_packs": 1,
+                "matching_context_pack_ids": ["src/auth.ts#authorize:1"],
+                "reviewed_context_pack_ids": ["src/auth.ts#authorize:1"],
+            }
+        ],
+        coverage_completion={
+            "status": "complete",
+            "reviewer_ids": ["security"],
+            "batches": 1,
+            "stop_reason": "complete",
+        },
+    )
+
+    assert helper._finalize(plan_path) == 0
+
+    outputs = github_output.read_text(encoding="utf-8")
+    assert "partial-coverage=true\n" in outputs
+    assert "coverage-status=complete\n" in outputs
+    assert "gate-outcome=pass\n" in outputs
+
+
+def test_finalize_complete_policy_accepts_complete_builtin_reviewer_scope(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    helper = _load_helper()
+    github_output = tmp_path / "github-output"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(github_output))
+    plan_path = _write_finalization_plan(
+        tmp_path,
+        quality_gate_status="pass",
+        fail_on_quality_gate=True,
+        coverage_policy="complete",
+        coverage_completion={
+            "status": "complete",
+            "reviewer_ids": [],
+            "batches": 0,
+            "stop_reason": "complete",
+        },
+        plan_reviewers=[],
+    )
+
+    assert helper._finalize(plan_path) == 0
+    assert "coverage-status=complete\n" in github_output.read_text(encoding="utf-8")
+
+
+def test_finalize_complete_policy_rejects_unexpected_implicit_reviewer_scope(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    helper = _load_helper()
+    monkeypatch.setenv("GITHUB_OUTPUT", str(tmp_path / "github-output"))
+    plan_path = _write_finalization_plan(
+        tmp_path,
+        quality_gate_status="pass",
+        fail_on_quality_gate=True,
+        coverage_policy="complete",
+        reviewer_coverage=[
+            {
+                "reviewer_id": "security",
+                "status": "pass",
+                "matching_context_packs": 1,
+                "reviewed_context_packs": 1,
+                "matching_context_pack_ids": ["src/auth.ts#authorize:1"],
+                "reviewed_context_pack_ids": ["src/auth.ts#authorize:1"],
+            }
+        ],
+        coverage_completion={
+            "status": "complete",
+            "reviewer_ids": ["security"],
+            "batches": 1,
+            "stop_reason": "complete",
+        },
+        plan_reviewers=[],
+    )
+
+    with pytest.raises(ValueError, match="reviewer scope"):
+        helper._finalize(plan_path)
+
+
+def test_finalize_complete_policy_accepts_unique_implicit_required_reviewer(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    helper = _load_helper()
+    github_output = tmp_path / "github-output"
+    github_summary = tmp_path / "github-summary"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(github_output))
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(github_summary))
+    plan_path = _write_finalization_plan(
+        tmp_path,
+        quality_gate_status="pass",
+        fail_on_quality_gate=True,
+        coverage_policy="complete",
+        reviewer_coverage=[
+            {
+                "reviewer_id": "correctness",
+                "required": True,
+                "status": "pass",
+                "matching_context_packs": 1,
+                "reviewed_context_packs": 1,
+                "matching_context_pack_ids": ["src/app.ts#run:1"],
+                "reviewed_context_pack_ids": ["src/app.ts#run:1"],
+            }
+        ],
+        coverage_completion={
+            "status": "complete",
+            "reviewer_ids": ["correctness"],
+            "batches": 0,
+            "stop_reason": "complete",
+        },
+        plan_reviewers=[],
+        report_config={
+            "reviewers": [
+                {"id": "correctness", "required": True},
+                {"id": "security"},
+            ]
+        },
+    )
+
+    assert helper._finalize(plan_path) == 0
+    assert "coverage-status=complete\n" in github_output.read_text(encoding="utf-8")
+    assert "- Reviewers: `correctness`" in github_summary.read_text(encoding="utf-8")
+
+
+def test_finalize_complete_policy_rejects_complete_status_without_actual_scoped_completion(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    helper = _load_helper()
+    monkeypatch.setenv("GITHUB_OUTPUT", str(tmp_path / "github-output"))
+    plan_path = _write_finalization_plan(
+        tmp_path,
+        quality_gate_status="warn",
+        fail_on_quality_gate=True,
+        coverage_policy="complete",
+        reviewer_coverage=[
+            {
+                "reviewer_id": "security",
+                "status": "warn",
+                "matching_context_packs": 1,
+                "reviewed_context_packs": 0,
+                "matching_context_pack_ids": ["src/auth.ts#authorize:1"],
+            }
+        ],
+        coverage_completion={
+            "status": "complete",
+            "reviewer_ids": ["security"],
+            "batches": 1,
+            "stop_reason": "complete",
+        },
+    )
+
+    with pytest.raises(ValueError, match="inconsistent with the final review report"):
+        helper._finalize(plan_path)
+
+
+def test_finalize_complete_policy_uses_persisted_reviewer_scoped_outcome(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    helper = _load_helper()
+    github_output = tmp_path / "github-output"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(github_output))
+    plan_path = _write_finalization_plan(
+        tmp_path,
+        quality_gate_status="warn",
+        fail_on_quality_gate=True,
+        coverage_policy="complete",
+        reviewer_coverage=[
+            {
+                "reviewer_id": "security",
+                "status": "warn",
+                "matching_context_packs": 1,
+                "reviewed_context_packs": 0,
+                "matching_context_pack_ids": ["src/auth.ts#authorize:1"],
+            }
+        ],
+        coverage_completion={
+            "status": "incomplete",
+            "reviewer_ids": ["security"],
+            "batches": 2,
+            "stop_reason": "no_progress",
+        },
+    )
+
+    assert helper._finalize(plan_path) == 1
+
+    outputs = github_output.read_text(encoding="utf-8")
+    assert "coverage-status=incomplete\n" in outputs
+    assert "gate-outcome=fail\n" in outputs
 
 
 def test_finalize_emits_escaped_annotations_and_stable_machine_outputs(

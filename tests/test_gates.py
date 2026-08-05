@@ -6,7 +6,12 @@ from typer.testing import CliRunner
 from apex_ray.cli import app
 from apex_ray.cli.gate import (
     _combine_incremental_decision,
+    _coverage_followup_blocking_pack_ids,
+    _coverage_followup_force_pack_ids,
+    _coverage_followup_policy,
+    _coverage_followup_reviewer_ids,
     _resolve_incremental_carried_findings,
+    _retry_coverage_report,
     _retry_resolution_report,
     resolve_carried_findings,
 )
@@ -35,12 +40,18 @@ from apex_ray.models import (
     FindingSeverity,
     FindingVerification,
     LLMAPIConfig,
+    LLMContextSelection,
+    LLMCoverageTodo,
+    LLMPackReviewStatus,
     LLMProfile,
     LLMProviderName,
+    LLMResidualRiskSummary,
+    LLMReviewerCoverageSummary,
     LLMRun,
     ProjectProfile,
     ReviewConfig,
     ReviewerConfig,
+    ReviewInputSnapshot,
     RiskSeverity,
     RiskSignal,
     RuleMatch,
@@ -468,6 +479,722 @@ def test_pre_push_gate_stdout_explains_provider_failures_without_findings(tmp_pa
     assert decision.blocked is True
     assert report.findings == []
     assert "LLM review run failures: failed_provider: 1" in stdout
+
+
+def test_pre_push_gate_stdout_never_labels_partial_review_as_plain_pass(tmp_path: Path) -> None:
+    config = ReviewConfig()
+    config.llm.enabled = True
+    config.gates.pre_push.fail_on_partial_severity = "critical"
+    report = build_report(
+        ProjectProfile(root=str(tmp_path), is_git_repo=True),
+        config,
+        DiffSummary(target_mode=TargetMode.PATCH),
+    )
+    report.llm_coverage.total_context_packs = 10
+    report.llm_coverage.reviewed_context_packs = 4
+    report.llm_coverage.unreviewed_context_packs = 6
+    report.llm_coverage.coverage_ratio = 0.4
+    report.llm_coverage.high_risk_context_packs = 2
+    report.llm_coverage.reviewed_high_risk_context_packs = 2
+    report.llm_coverage.high_risk_coverage_ratio = 1.0
+    report.llm_coverage.partial_severity = "minor"
+    report.llm_coverage.residual_risk_context_packs = [
+        LLMResidualRiskSummary(
+            context_pack_id=f"src/file-{index}.ts#pack:1",
+            file=f"src/file-{index}.ts",
+            priority="p1" if index < 2 else "p2",
+            reason="not selected by LLM pack cap",
+        )
+        for index in range(6)
+    ]
+    report.llm_coverage.reviewers = [
+        LLMReviewerCoverageSummary(
+            reviewer_id="correctness",
+            required=True,
+            matching_context_packs=10,
+            reviewed_context_packs=4,
+        )
+    ]
+    decision = evaluate_pre_push_gate(report, config.gates.pre_push)
+
+    stdout = render_pre_push_gate_stdout(
+        report,
+        decision,
+        markdown_path=tmp_path / "pre-push.md",
+        json_path=tmp_path / "pre-push.json",
+        base="main",
+        config=config.gates.pre_push,
+    )
+
+    assert decision.blocked is False
+    assert stdout.splitlines()[0] == "APEX RAY GATE: PASSED WITH PARTIAL COVERAGE"
+    assert "Push decision: ALLOWED" in stdout
+    assert "Review coverage: PARTIAL - 4/10 unique context packs (40.0%)" in stdout
+    assert "Reviewer assignments: 4/10" in stdout
+    assert "High-risk coverage: COMPLETE - 2/2" in stdout
+    assert "Remaining: P0 0, P1 2, P2 4" in stdout
+    assert "No blocking findings in reviewed scope." in stdout
+
+
+def test_pre_push_gate_stdout_shows_continuations_for_quality_only_coverage_block(tmp_path: Path) -> None:
+    config = ReviewConfig()
+    config.llm.enabled = True
+    config.gates.pre_push.fail_on_partial_severity = "none"
+    pack = ContextPack(id="src/auth.ts#authorize:1", file="src/auth.ts", file_kind=FileKind.SOURCE)
+    report = build_report(
+        ProjectProfile(root=str(tmp_path), is_git_repo=True),
+        config,
+        DiffSummary(target_mode=TargetMode.PATCH),
+        context_packs=[pack],
+    )
+    report.llm_coverage.quality_gate_status = "fail"
+    report.llm_coverage.quality_gate_reasons = ["Required reviewer coverage remains."]
+    report.llm_coverage.partial_severity = "critical"
+    report.llm_coverage.coverage_todos = [
+        LLMCoverageTodo(
+            context_pack_id=pack.id,
+            file=pack.file,
+            priority="p0",
+            suggested_command="apex-ray review --continue-from report.json --only-pack pack",
+        )
+    ]
+    decision = evaluate_pre_push_gate(report, config.gates.pre_push)
+
+    stdout = render_pre_push_gate_stdout(
+        report,
+        decision,
+        markdown_path=tmp_path / "pre-push.md",
+        json_path=tmp_path / "pre-push.json",
+        base="main",
+        config=config.gates.pre_push,
+    )
+
+    assert decision.quality_gate_failed is True
+    assert decision.partial_blocked is False
+    assert "Coverage continuation commands:" in stdout
+    assert "--only-pack pack" in stdout
+
+
+@pytest.mark.parametrize(
+    ("threshold", "expected_priorities"),
+    [
+        ("critical", {"p0"}),
+        ("major", {"p0", "p1"}),
+        ("minor", {"p0", "p1", "p2"}),
+        ("none", set()),
+        (None, set()),
+    ],
+)
+def test_generalized_followup_priorities_follow_blocking_policy(
+    threshold: str | None,
+    expected_priorities: set[str],
+) -> None:
+    config = ReviewConfig()
+    config.gates.pre_push.auto_followup = True
+    config.gates.pre_push.fail_on_partial_severity = threshold
+
+    enabled, priorities, max_pack_reviews = _coverage_followup_policy(
+        config.gates.pre_push,
+        report=None,
+    )
+
+    assert enabled is bool(expected_priorities)
+    assert priorities == expected_priorities
+    assert max_pack_reviews == 16
+
+
+def test_legacy_p0_followup_keeps_its_original_scope() -> None:
+    config = ReviewConfig()
+    config.gates.pre_push.auto_followup = None
+    config.gates.pre_push.auto_followup_p0 = True
+    config.gates.pre_push.fail_on_partial_severity = "minor"
+
+    enabled, priorities, max_pack_reviews = _coverage_followup_policy(
+        config.gates.pre_push,
+        report=None,
+    )
+
+    assert enabled is True
+    assert priorities == {"p0"}
+    assert max_pack_reviews == config.gates.pre_push.auto_followup_p0_max_pack_reviews
+
+
+def test_generalized_followup_retries_failed_p2_pack_that_blocks_partial_policy(
+    tmp_path: Path,
+) -> None:
+    config = ReviewConfig()
+    config.llm.enabled = True
+    config.gates.pre_push.auto_followup = True
+    config.gates.pre_push.fail_on_partial_severity = "major"
+    pack = ContextPack(id="docs/runbook.md#file:1", file="docs/runbook.md", file_kind=FileKind.DOCS)
+    report = build_report(
+        ProjectProfile(root=str(tmp_path), is_git_repo=True),
+        config,
+        DiffSummary(target_mode=TargetMode.PATCH),
+        context_packs=[pack],
+    )
+    report.llm_coverage.partial_severity = "major"
+    report.llm_coverage.pack_statuses = [
+        LLMPackReviewStatus(
+            context_pack_id=pack.id,
+            file=pack.file,
+            file_kind=pack.file_kind,
+            status="failed_provider",
+            priority="p2",
+        )
+    ]
+    report.llm_coverage.coverage_todos = [
+        LLMCoverageTodo(
+            context_pack_id=pack.id,
+            file=pack.file,
+            file_kind=pack.file_kind,
+            priority="p2",
+            reason="provider failed",
+        )
+    ]
+
+    enabled, priorities, _max_pack_reviews = _coverage_followup_policy(config.gates.pre_push, report)
+
+    assert enabled is True
+    assert priorities == {"p0", "p1", "p2"}
+    assert _coverage_followup_blocking_pack_ids(config.gates.pre_push, report) == {pack.id}
+    assert _coverage_followup_force_pack_ids(config.gates.pre_push, report) == set()
+
+
+def test_generalized_followup_targets_source_pack_that_failed_quality_threshold(
+    tmp_path: Path,
+) -> None:
+    config = ReviewConfig()
+    config.llm.enabled = True
+    config.llm.min_source_line_coverage = 0.9
+    config.gates.pre_push.auto_followup = True
+    config.gates.pre_push.fail_on_partial_severity = "none"
+    pack = ContextPack(id="src/orders.ts#submit:1", file="src/orders.ts", file_kind=FileKind.SOURCE)
+    report = build_report(
+        ProjectProfile(root=str(tmp_path), is_git_repo=True),
+        config,
+        DiffSummary(target_mode=TargetMode.PATCH),
+        context_packs=[pack],
+    )
+    report.llm_coverage.quality_gate_status = "fail"
+    report.llm_coverage.quality_gate_reasons = ["Source changed-line coverage below threshold"]
+    report.llm_coverage.source_changed_line_coverage_ratio = 0.5
+    report.llm_coverage.partial_severity = "major"
+    report.llm_coverage.coverage_todos = [
+        LLMCoverageTodo(
+            context_pack_id=pack.id,
+            file=pack.file,
+            file_kind=pack.file_kind,
+            priority="p1",
+            slice="source",
+        )
+    ]
+
+    enabled, priorities, _max_pack_reviews = _coverage_followup_policy(config.gates.pre_push, report)
+
+    assert enabled is True
+    assert priorities == {"p1"}
+    assert _coverage_followup_blocking_pack_ids(config.gates.pre_push, report) == {pack.id}
+    assert _coverage_followup_force_pack_ids(config.gates.pre_push, report) == set()
+
+
+def test_generalized_followup_targets_required_reviewer_assignment_debt(
+    tmp_path: Path,
+) -> None:
+    config = ReviewConfig(reviewers=[ReviewerConfig(id="ux", required=True)])
+    config.llm.enabled = True
+    config.gates.pre_push.auto_followup = True
+    config.gates.pre_push.fail_on_partial_severity = "none"
+    pack = ContextPack(id="docs/flow.md#file:1", file="docs/flow.md", file_kind=FileKind.DOCS)
+    report = build_report(
+        ProjectProfile(root=str(tmp_path), is_git_repo=True),
+        config,
+        DiffSummary(target_mode=TargetMode.PATCH),
+        context_packs=[pack],
+    )
+    report.llm_coverage.quality_gate_status = "fail"
+    report.llm_coverage.partial_severity = "critical"
+    report.llm_coverage.reviewers = [LLMReviewerCoverageSummary(reviewer_id="ux", required=True, status="fail")]
+    report.llm_coverage.coverage_todos = [
+        LLMCoverageTodo(
+            context_pack_id=pack.id,
+            file=pack.file,
+            file_kind=pack.file_kind,
+            reviewer_id="ux",
+            priority="p2",
+            reason="required reviewer assignment remains",
+        )
+    ]
+
+    enabled, priorities, _max_pack_reviews = _coverage_followup_policy(config.gates.pre_push, report)
+
+    assert enabled is True
+    assert priorities == {"p2"}
+    blocking_pack_ids = _coverage_followup_blocking_pack_ids(config.gates.pre_push, report)
+    assert blocking_pack_ids == {pack.id}
+    assert _coverage_followup_force_pack_ids(config.gates.pre_push, report) == set()
+    assert _coverage_followup_reviewer_ids(report, blocking_pack_ids) == ["ux"]
+
+
+def test_generalized_followup_excludes_optional_assignment_debt_on_required_blocking_packs(
+    tmp_path: Path,
+) -> None:
+    config = ReviewConfig(
+        reviewers=[
+            ReviewerConfig(id="optional"),
+            ReviewerConfig(id="required", required=True),
+        ]
+    )
+    config.llm.enabled = True
+    config.gates.pre_push.auto_followup = True
+    config.gates.pre_push.fail_on_partial_severity = "none"
+    pack = ContextPack(id="src/orders.ts#submit:1", file="src/orders.ts", file_kind=FileKind.SOURCE)
+    report = build_report(
+        ProjectProfile(root=str(tmp_path), is_git_repo=True),
+        config,
+        DiffSummary(target_mode=TargetMode.PATCH),
+        context_packs=[pack],
+    )
+
+    blocking_pack_ids = _coverage_followup_blocking_pack_ids(config.gates.pre_push, report)
+
+    assert blocking_pack_ids == {pack.id}
+    assert {(todo.reviewer_id, todo.context_pack_id) for todo in report.llm_coverage.coverage_todos} == {
+        ("optional", pack.id),
+        ("required", pack.id),
+    }
+    assert _coverage_followup_reviewer_ids(report, blocking_pack_ids) == ["required"]
+
+
+def test_generalized_followup_targets_optional_active_failure_that_blocks_partial_policy(
+    tmp_path: Path,
+) -> None:
+    config = ReviewConfig(reviewers=[ReviewerConfig(id="first"), ReviewerConfig(id="second")])
+    config.llm.enabled = True
+    config.gates.pre_push.auto_followup = True
+    config.gates.pre_push.fail_on_partial_severity = "major"
+    pack = ContextPack(id="docs/runbook.md#file:1", file="docs/runbook.md", file_kind=FileKind.DOCS)
+    selection = LLMContextSelection(
+        total_context_pack_ids=[pack.id],
+        selected_context_pack_ids=[pack.id],
+        deep_selected_context_pack_ids=[pack.id],
+    )
+    report = build_report(
+        ProjectProfile(root=str(tmp_path), is_git_repo=True),
+        config,
+        DiffSummary(target_mode=TargetMode.PATCH),
+        context_packs=[pack],
+        llm_runs=[
+            LLMRun(
+                provider="fake",
+                reviewer_id="first",
+                context_pack_id=pack.id,
+                status="ok",
+                duration_ms=1,
+            ),
+            LLMRun(
+                provider="fake",
+                reviewer_id="second",
+                context_pack_id=pack.id,
+                status="failed_provider",
+                duration_ms=1,
+            ),
+        ],
+        reviewer_selections={"first": selection, "second": selection},
+    )
+
+    assert report.llm_coverage.partial_severity == "major"
+    assert evaluate_pre_push_gate(report, config.gates.pre_push).partial_blocked is True
+    assert _coverage_followup_blocking_pack_ids(config.gates.pre_push, report) == {pack.id}
+    assert _coverage_followup_policy(config.gates.pre_push, report)[1] == {"p0", "p1", "p2"}
+
+
+def test_generalized_followup_targets_unresolved_general_verification_debt(
+    tmp_path: Path,
+) -> None:
+    config = ReviewConfig()
+    config.llm.enabled = True
+    config.llm.verify = True
+    config.gates.pre_push.auto_followup = True
+    pack = ContextPack(id="docs/runbook.md#file:1", file="docs/runbook.md", file_kind=FileKind.DOCS)
+    finding = Finding(
+        title="Runbook command is unsafe",
+        severity=FindingSeverity.HIGH,
+        confidence=FindingConfidence.HIGH,
+        file=pack.file,
+        line=4,
+        failure_mode="The documented command can overwrite production state.",
+        evidence="The command omits the required environment guard.",
+        suggested_fix="Add the guard before the destructive command.",
+        suggested_test="Validate the guarded example.",
+        context_pack_id=pack.id,
+    )
+    selection = LLMContextSelection(
+        total_context_pack_ids=[pack.id],
+        selected_context_pack_ids=[pack.id],
+        deep_selected_context_pack_ids=[pack.id],
+    )
+    report = build_report(
+        ProjectProfile(root=str(tmp_path), is_git_repo=True),
+        config,
+        DiffSummary(target_mode=TargetMode.PATCH),
+        context_packs=[pack],
+        verifications=[
+            FindingVerification(
+                finding=finding,
+                reviewer_id="general",
+                approved=False,
+                confidence=FindingConfidence.LOW,
+                reason="Verifier result was unavailable.",
+                superseded=True,
+                superseded_reason="Verification did not produce a usable decision.",
+            )
+        ],
+        llm_runs=[
+            LLMRun(
+                provider="fake",
+                reviewer_id="general",
+                context_pack_id=pack.id,
+                status="ok",
+                duration_ms=1,
+                findings_count=1,
+            ),
+            LLMRun(
+                kind="verify",
+                provider="fake",
+                reviewer_id="general",
+                context_pack_id=pack.id,
+                status="ok",
+                duration_ms=1,
+            ),
+        ],
+        llm_selection=selection,
+        reviewer_selections={"general": selection},
+    )
+
+    assert report.llm_coverage.quality_gate_status == "fail"
+    assert report.llm_coverage.coverage_todos[0].priority == "p2"
+    assert _coverage_followup_blocking_pack_ids(config.gates.pre_push, report) == {pack.id}
+    assert _coverage_followup_policy(config.gates.pre_push, report)[1] == {"p0", "p2"}
+
+
+def test_generalized_followup_assigns_overlapping_depth_only_debt_once(
+    tmp_path: Path,
+) -> None:
+    config = ReviewConfig(
+        reviewers=[
+            ReviewerConfig(id="first", review_depth="shallow"),
+            ReviewerConfig(id="second", review_depth="shallow"),
+        ]
+    )
+    config.llm.enabled = True
+    config.gates.pre_push.auto_followup = True
+    config.gates.pre_push.fail_on_partial_severity = "major"
+    pack = ContextPack(
+        id="src/auth.ts#authorize:1",
+        file="src/auth.ts",
+        file_kind=FileKind.SOURCE,
+        risk_signals=[
+            RiskSignal(
+                kind="auth",
+                severity=RiskSeverity.HIGH,
+                reason="Authorization changed.",
+                file="src/auth.ts",
+            )
+        ],
+    )
+    selection = LLMContextSelection(
+        total_context_pack_ids=[pack.id],
+        selected_context_pack_ids=[pack.id],
+        shallow_selected_context_pack_ids=[pack.id],
+    )
+    report = build_report(
+        ProjectProfile(root=str(tmp_path), is_git_repo=True),
+        config,
+        DiffSummary(target_mode=TargetMode.PATCH),
+        context_packs=[pack],
+        llm_runs=[
+            LLMRun(
+                kind="review_shallow",
+                provider="fake",
+                reviewer_id=reviewer_id,
+                context_pack_id=pack.id,
+                status="ok",
+                duration_ms=1,
+            )
+            for reviewer_id in ("first", "second")
+        ],
+        reviewer_selections={"first": selection, "second": selection},
+    )
+    blocking_pack_ids = _coverage_followup_blocking_pack_ids(config.gates.pre_push, report)
+    force_review_pack_ids = _coverage_followup_force_pack_ids(config.gates.pre_push, report)
+
+    assert blocking_pack_ids == {pack.id}
+    assert force_review_pack_ids == {pack.id}
+    assert _coverage_followup_reviewer_ids(
+        report,
+        blocking_pack_ids,
+        force_review_pack_ids=force_review_pack_ids,
+    ) == ["first"]
+
+
+def test_generalized_followup_preserves_required_assignment_amid_depth_debt(
+    tmp_path: Path,
+) -> None:
+    config = ReviewConfig(
+        reviewers=[
+            ReviewerConfig(id="required", required=True),
+            ReviewerConfig(id="optional"),
+        ]
+    )
+    required_pack_id = "src/auth.ts#authorize:1"
+    depth_only_pack_id = "src/payments.ts#charge:1"
+    report = build_report(
+        ProjectProfile(root=str(tmp_path), is_git_repo=True),
+        config,
+        DiffSummary(target_mode=TargetMode.PATCH),
+    )
+    report.llm_coverage.reviewers = [
+        LLMReviewerCoverageSummary(
+            reviewer_id="required",
+            required=True,
+            status="fail",
+            matching_context_pack_ids=[required_pack_id],
+        ),
+        LLMReviewerCoverageSummary(
+            reviewer_id="optional",
+            status="warn",
+            matching_context_pack_ids=[required_pack_id, depth_only_pack_id],
+        ),
+    ]
+    report.llm_coverage.coverage_todos = [
+        LLMCoverageTodo(
+            context_pack_id=required_pack_id,
+            file="src/auth.ts",
+            reviewer_id="required",
+            priority="p1",
+            reason="required reviewer assignment remains",
+        )
+    ]
+    blocking_pack_ids = {required_pack_id, depth_only_pack_id}
+
+    reviewer_ids = _coverage_followup_reviewer_ids(
+        report,
+        blocking_pack_ids,
+        force_review_pack_ids=blocking_pack_ids,
+    )
+
+    assert reviewer_ids is None
+    assert _coverage_followup_reviewer_ids(
+        report,
+        blocking_pack_ids,
+        force_review_pack_ids=blocking_pack_ids,
+        requested_reviewer_ids=["optional"],
+    ) == ["optional"]
+    assert _coverage_followup_reviewer_ids(
+        report,
+        blocking_pack_ids,
+        force_review_pack_ids=blocking_pack_ids,
+        requested_reviewer_ids=["optional", "required"],
+    ) == ["required"]
+
+
+def test_coverage_resume_requires_matching_output_and_saved_input_identity(tmp_path: Path) -> None:
+    config = ReviewConfig()
+    config.llm.enabled = True
+    config.gates.pre_push.incremental_retry.enabled = True
+    pack = ContextPack(id="src/service.ts#run:1", file="src/service.ts", file_kind=FileKind.SOURCE)
+    report = build_report(
+        ProjectProfile(root=str(tmp_path), is_git_repo=True),
+        config,
+        DiffSummary(target_mode=TargetMode.BASE, base="main"),
+        context_packs=[pack],
+        input_snapshot=ReviewInputSnapshot(
+            target_mode=TargetMode.BASE,
+            base_ref="main",
+            head_sha="1" * 40,
+            merge_base_sha="a" * 40,
+            diff_sha256="b" * 64,
+        ),
+    )
+    config_hash = config_fingerprint(config, config.gates.pre_push)
+    json_output = tmp_path / ".apex-ray" / "reports" / "pre-push.json"
+    state = build_pre_push_state(
+        repo_root=tmp_path,
+        base_ref="main",
+        merge_base_sha="a" * 40,
+        head_sha="1" * 40,
+        config_hash=config_hash,
+        report=report,
+        report_path=tmp_path / ".apex-ray" / "reports" / "pre-push.md",
+        json_path=json_output,
+        active_findings=[],
+        coverage_debt=CoverageDebt(partial_blocked=True),
+    )
+
+    assert (
+        _retry_coverage_report(
+            state,
+            report,
+            json_output=json_output,
+            config_hash=config_hash,
+            gate_config=config.gates.pre_push,
+            reviewer_ids=None,
+        )
+        is report
+    )
+    legacy_state = state.model_copy(update={"input_snapshot_fingerprint": ""})
+    assert (
+        _retry_coverage_report(
+            legacy_state,
+            report,
+            json_output=json_output,
+            config_hash=config_hash,
+            gate_config=config.gates.pre_push,
+            reviewer_ids=None,
+        )
+        is None
+    )
+    assert (
+        _retry_coverage_report(
+            state,
+            report,
+            json_output=tmp_path / "other.json",
+            config_hash=config_hash,
+            gate_config=config.gates.pre_push,
+            reviewer_ids=None,
+        )
+        is None
+    )
+
+    mismatched = report.model_copy(deep=True)
+    assert mismatched.input_snapshot is not None
+    mismatched.input_snapshot.head_sha = "2" * 40
+    assert (
+        _retry_coverage_report(
+            state,
+            mismatched,
+            json_output=json_output,
+            config_hash=config_hash,
+            gate_config=config.gates.pre_push,
+            reviewer_ids=None,
+        )
+        is None
+    )
+
+
+def test_coverage_resume_rejects_patch_snapshot_with_different_range_start(tmp_path: Path) -> None:
+    config = ReviewConfig()
+    config.llm.enabled = True
+    config.gates.pre_push.incremental_retry.enabled = True
+    pack = ContextPack(id="src/service.ts#run:1", file="src/service.ts", file_kind=FileKind.SOURCE)
+    range_start = "1" * 40
+    head_sha = "3" * 40
+    report = build_report(
+        ProjectProfile(root=str(tmp_path), is_git_repo=True),
+        config,
+        DiffSummary(target_mode=TargetMode.PATCH, base=f"{range_start}..HEAD"),
+        context_packs=[pack],
+        input_snapshot=ReviewInputSnapshot(
+            target_mode=TargetMode.PATCH,
+            base_ref=f"{range_start}..HEAD",
+            head_sha=head_sha,
+            range_start_sha=range_start,
+            diff_sha256="b" * 64,
+        ),
+    )
+    config_hash = config_fingerprint(config, config.gates.pre_push)
+    json_output = tmp_path / ".apex-ray" / "reports" / "pre-push.json"
+    state = build_pre_push_state(
+        repo_root=tmp_path,
+        base_ref="main",
+        merge_base_sha="a" * 40,
+        head_sha=head_sha,
+        config_hash=config_hash,
+        report=report,
+        report_path=tmp_path / ".apex-ray" / "reports" / "pre-push.md",
+        json_path=json_output,
+        active_findings=[],
+        coverage_debt=CoverageDebt(partial_blocked=True),
+    )
+
+    assert (
+        _retry_coverage_report(
+            state,
+            report,
+            json_output=json_output,
+            config_hash=config_hash,
+            gate_config=config.gates.pre_push,
+            reviewer_ids=None,
+        )
+        is report
+    )
+
+    substituted = report.model_copy(deep=True)
+    substituted_range_start = "2" * 40
+    substituted.diff.base = f"{substituted_range_start}..HEAD"
+    assert substituted.input_snapshot is not None
+    substituted.input_snapshot.base_ref = substituted.diff.base
+    substituted.input_snapshot.range_start_sha = substituted_range_start
+    assert (
+        _retry_coverage_report(
+            state,
+            substituted,
+            json_output=json_output,
+            config_hash=config_hash,
+            gate_config=config.gates.pre_push,
+            reviewer_ids=None,
+        )
+        is None
+    )
+
+
+def test_coverage_resume_accepts_saved_snapshot_while_new_head_is_pending(tmp_path: Path) -> None:
+    config = ReviewConfig()
+    config.llm.enabled = True
+    config.gates.pre_push.incremental_retry.enabled = True
+    pack = ContextPack(id="src/service.ts#run:1", file="src/service.ts", file_kind=FileKind.SOURCE)
+    report = build_report(
+        ProjectProfile(root=str(tmp_path), is_git_repo=True),
+        config,
+        DiffSummary(target_mode=TargetMode.BASE, base="main"),
+        context_packs=[pack],
+        input_snapshot=ReviewInputSnapshot(
+            target_mode=TargetMode.BASE,
+            base_ref="main",
+            head_sha="1" * 40,
+            merge_base_sha="a" * 40,
+            diff_sha256="b" * 64,
+        ),
+    )
+    config_hash = config_fingerprint(config, config.gates.pre_push)
+    json_output = tmp_path / ".apex-ray" / "reports" / "pre-push.json"
+    state = build_pre_push_state(
+        repo_root=tmp_path,
+        base_ref="main",
+        merge_base_sha="a" * 40,
+        head_sha="1" * 40,
+        config_hash=config_hash,
+        report=report,
+        report_path=tmp_path / ".apex-ray" / "reports" / "pre-push.md",
+        json_path=json_output,
+        active_findings=[],
+        coverage_debt=CoverageDebt(partial_blocked=True),
+    )
+
+    # The live HEAD may already be newer. Coverage resume is deliberately bound
+    # to state.head_sha and the caller separately blocks the pending delta.
+    assert (
+        _retry_coverage_report(
+            state,
+            report,
+            json_output=json_output,
+            config_hash=config_hash,
+            gate_config=config.gates.pre_push,
+            reviewer_ids=None,
+        )
+        is report
+    )
 
 
 def test_verified_semantic_duplicate_remains_eligible_for_gate() -> None:

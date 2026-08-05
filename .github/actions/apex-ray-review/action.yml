@@ -18,6 +18,18 @@ inputs:
     description: Fail the job when LLM coverage or a required reviewer reports a failed quality gate.
     required: false
     default: "true"
+  coverage-policy:
+    description: Keep configured bounded coverage or require bounded completion of the selected reviewer scope.
+    required: false
+    default: configured
+  followup-max-pack-reviews:
+    description: Maximum reviewer-pack assignments in each complete-coverage follow-up batch.
+    required: false
+    default: "16"
+  max-followup-passes:
+    description: Maximum follow-up batches when coverage-policy is complete.
+    required: false
+    default: "8"
   base:
     description: Optional analysis base ref override. Base-sourced PR config still uses the event base SHA.
     required: false
@@ -95,7 +107,7 @@ outputs:
     description: Coverage quality gate status from the JSON report.
     value: ${{ steps.finalize.outputs.quality-gate-status }}
   gate-outcome:
-    description: Enforced gate outcome after applying fail-on-quality-gate.
+    description: Enforced outcome after applying quality-gate and complete-coverage policies.
     value: ${{ steps.finalize.outputs.gate-outcome }}
   findings-count:
     description: Total findings in the JSON report.
@@ -115,6 +127,9 @@ outputs:
   partial-coverage:
     description: Whether the report has partial LLM coverage.
     value: ${{ steps.finalize.outputs.partial-coverage }}
+  coverage-status:
+    description: Review completion status for the configured or enforced reviewer scope.
+    value: ${{ steps.finalize.outputs.coverage-status }}
   partial-coverage-severity:
     description: Partial LLM coverage severity.
     value: ${{ steps.finalize.outputs.partial-coverage-severity }}
@@ -232,6 +247,9 @@ runs:
         INPUT_REVIEWERS: ${{ inputs.reviewers }}
         INPUT_LLM: ${{ inputs.llm }}
         INPUT_FAIL_ON_QUALITY_GATE: ${{ inputs.fail-on-quality-gate }}
+        INPUT_COVERAGE_POLICY: ${{ inputs.coverage-policy }}
+        INPUT_FOLLOWUP_MAX_PACK_REVIEWS: ${{ inputs.followup-max-pack-reviews }}
+        INPUT_MAX_FOLLOWUP_PASSES: ${{ inputs.max-followup-passes }}
         INPUT_BASE: ${{ inputs.base }}
         INPUT_TRUST_PR_CONFIG: ${{ inputs.trust-pr-config }}
         INPUT_MARKDOWN_OUTPUT: ${{ inputs.markdown-output }}

@@ -406,6 +406,20 @@ def test_load_config_parses_pre_push_auto_followup_pack_review_cap(tmp_path: Pat
     assert config.gates.pre_push.auto_followup_p0_max_pack_reviews == 3
 
 
+def test_load_config_parses_generalized_pre_push_auto_followup(tmp_path: Path) -> None:
+    path = tmp_path / ".apex-ray" / "config.yml"
+    path.parent.mkdir()
+    path.write_text(
+        "review:\n  gates:\n    pre_push:\n      auto_followup: true\n      auto_followup_max_pack_reviews: 7\n",
+        encoding="utf-8",
+    )
+
+    config, _ = load_config(tmp_path)
+
+    assert config.gates.pre_push.auto_followup is True
+    assert config.gates.pre_push.auto_followup_max_pack_reviews == 7
+
+
 def test_load_config_rejects_zero_pre_push_auto_followup_pack_review_cap(
     tmp_path: Path,
 ) -> None:

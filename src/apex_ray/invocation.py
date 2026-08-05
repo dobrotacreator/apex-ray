@@ -1,3 +1,6 @@
+import os
+import shlex
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -29,6 +32,23 @@ class ReviewOverrides:
     refresh_analyzer_cache: bool = False
     analyzer_cache_dir: Path | None = None
     analyzer_timeout_seconds: int | None = None
+    max_packs: int | None = None
+
+
+def render_shell_command(
+    args: Sequence[str],
+    *,
+    platform_name: str | None = None,
+) -> str:
+    """Render argv for the platform shell used by continuation guidance."""
+
+    if (platform_name or os.name) == "nt":
+        return "& " + " ".join(_quote_powershell_argument(arg) for arg in args)
+    return shlex.join(args)
+
+
+def _quote_powershell_argument(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
 
 
 def apply_review_overrides(config: ReviewConfig, overrides: ReviewOverrides) -> ReviewConfig:
@@ -75,6 +95,10 @@ def apply_review_overrides(config: ReviewConfig, overrides: ReviewOverrides) -> 
         effective.llm.coverage_mode = overrides.coverage_mode
         for reviewer in effective.reviewers:
             reviewer.coverage_mode = overrides.coverage_mode
+    if overrides.max_packs is not None:
+        effective.llm.max_packs = overrides.max_packs
+        for reviewer in effective.reviewers:
+            reviewer.max_packs = overrides.max_packs
     if overrides.max_deep_packs is not None:
         effective.llm.max_deep_packs = overrides.max_deep_packs
         for reviewer in effective.reviewers:
