@@ -244,19 +244,22 @@ The important review decision is context selection. Apex Ray ranks packs by risk
 It creates or updates:
 
 - `.apex-ray/config.yml`: shared project config with conservative defaults.
+- `.apex-ray/version`: the single committed exact package-version lock used to render managed launchers.
 - `.apex-ray/.gitignore`: ignores local cache, telemetry, reports, triage, runs, and local overrides under `.apex-ray`.
 - `.apex-ray/rules/`: committed project review rules.
 - `.apex-ray/memory/`: committed team learning cards.
 - `.apex-ray/reports/`: ignored local report output.
 - `.apex-ray/triage/`: ignored local finding suppressions and lifecycle events when local data is stored under `.apex-ray`.
 - `.apex-ray/eval/`: eval support directories; run outputs are ignored.
-- `lefthook.yml`: optional local hook config with an Apex Ray pre-push gate command.
-- `AGENTS.md` / Claude agent files: short pointers for coding agents.
+- `lefthook.yml`: optional local hook config with an exact `uvx` pre-push gate command.
+- `AGENTS.md` / Claude agent files: short pointers for coding agents with exact `uvx` command examples.
 - `.apex-ray/skills/apex-ray/SKILL.md` for review workflows and `.apex-ray/skills/apex-ray-improve/SKILL.md` for post-merge learning recommendations, plus Codex skill-directory aliases under `.agents/skills/` and Claude aliases under `.claude/skills/` when enabled. Codex aliases are relative directory symlinks where supported and full directory copies otherwise.
 
 The init command is intentionally conservative: shared config is commit-friendly, local provider/model/cost settings go into `.apex-ray/config.local.yml`, generated Apex Ray outputs stay ignored by `.apex-ray/.gitignore`, and the root `.gitignore` is left untouched.
 
-Managed agent blocks and generated skills carry an Apex Ray template version. Review and gate commands only warn when those local artifacts are outdated; they do not rewrite files. `apex-ray init --refresh-agent-artifacts` is the scoped update path for refreshing managed agent guidance without touching config or hooks.
+Managed agent blocks and generated skills carry an Apex Ray template version. Review and gate commands only warn when those local artifacts are outdated; they do not rewrite files. `apex-ray init --refresh-agent-artifacts` is the scoped update path for refreshing managed agent guidance without touching config or hooks. `apex-ray init --refresh-managed-artifacts` additionally synchronizes the exact hook launcher and version lock; `--update-version-lock` is required to adopt the running package version.
+
+Operational CLI commands validate `.apex-ray/version` before config, analyzers, or providers run. `doctor` remains available on mismatch and reports lock, runtime, hooks, `uvx`, and agent artifacts. The lock is data, not a bootstrap script: Apex Ray never shell-expands it and does not auto-reexec. Generated hooks use a validated literal `uvx --python 3.14 apex-ray@<version>` command instead.
 
 ## Pre-Push Gate Flow
 

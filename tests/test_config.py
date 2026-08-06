@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from apex_ray import git
+from apex_ray import __version__, git
 from apex_ray.config import (
     AGENT_ARTIFACT_TEMPLATE_VERSION,
     APEX_RAY_SKILL_TEXT,
@@ -15,8 +15,11 @@ from apex_ray.config import (
     init_config,
     init_project,
     load_config,
+    managed_hook_statuses,
     refresh_agent_artifacts,
+    refresh_managed_artifacts,
 )
+from apex_ray.version_lock import VersionLockError
 
 
 def test_load_config_defaults_when_missing(tmp_path: Path) -> None:
@@ -505,9 +508,11 @@ def test_local_override_errors_report_local_path(tmp_path: Path) -> None:
 
 
 def test_init_project_creates_team_setup_files(tmp_path: Path) -> None:
-    written = init_project(tmp_path)
+    written = init_project(tmp_path, runtime_version="0.1.13")
 
     assert tmp_path / ".apex-ray" / "config.yml" in written
+    assert tmp_path / ".apex-ray" / "version" in written
+    assert (tmp_path / ".apex-ray" / "version").read_text(encoding="utf-8") == "0.1.13\n"
     assert (tmp_path / ".apex-ray" / "rules").is_dir()
     assert (tmp_path / ".apex-ray" / "memory").is_dir()
     assert (tmp_path / ".apex-ray" / "reports").is_dir()
@@ -527,14 +532,17 @@ def test_init_project_creates_team_setup_files(tmp_path: Path) -> None:
     lefthook_text = (tmp_path / "lefthook.yml").read_text(encoding="utf-8")
     assert "no_tty: true" in lefthook_text
     assert "follow: true" in lefthook_text
-    assert "apex-ray gate pre-push" in lefthook_text
+    assert "uvx --python 3.14 apex-ray@0.1.13 gate pre-push" in lefthook_text
     assert "--base" not in lefthook_text
     assert "--no-llm" not in lefthook_text
     agents_text = (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
     assert "APEX_RAY_START" in agents_text
     assert f"apex-ray-agent-artifacts: version={AGENT_ARTIFACT_TEMPLATE_VERSION}" in agents_text
     assert "LLM analysis can be long-running and may appear idle" in agents_text
-    assert "do not proactively run `apex-ray review` or `apex-ray gate pre-push`" in agents_text
+    assert (
+        "do not proactively run `uvx --python 3.14 apex-ray@0.1.13 review` or "
+        "`uvx --python 3.14 apex-ray@0.1.13 gate pre-push`"
+    ) in agents_text
     assert "pre-push incremental retry state remains the source of truth" in agents_text
     assert "Do not bypass the configured pre-push gate by default" in agents_text
     assert "confirmed local false positive" in agents_text
@@ -544,12 +552,15 @@ def test_init_project_creates_team_setup_files(tmp_path: Path) -> None:
     assert "$apex-ray-improve" in agents_text
     skill_text = (tmp_path / ".apex-ray" / "skills" / "apex-ray" / "SKILL.md").read_text(encoding="utf-8")
     assert f"apex_ray_template_version: {AGENT_ARTIFACT_TEMPLATE_VERSION}" in skill_text
-    assert "do not proactively run `apex-ray review` or `apex-ray gate pre-push`" in skill_text
-    assert "apex-ray review --continue-from .apex-ray/reports/review.json" in skill_text
+    assert (
+        "do not proactively run `uvx --python 3.14 apex-ray@0.1.13 review` or "
+        "`uvx --python 3.14 apex-ray@0.1.13 gate pre-push`"
+    ) in skill_text
+    assert "uvx --python 3.14 apex-ray@0.1.13 review --continue-from .apex-ray/reports/review.json" in skill_text
     assert "Do not bypass the configured pre-push gate by default" in skill_text
     assert "Use suppressions sparingly" in skill_text
     assert "Re-check stale findings before suppressing again" in skill_text
-    assert "apex-ray findings suppress apex-ID \\\n" in skill_text
+    assert "uvx --python 3.14 apex-ray@0.1.13 findings suppress apex-ID \\\n" in skill_text
     assert "Use `--no-llm` or `.apex-ray/config.local.yml`" in skill_text
     improve_skill_text = (tmp_path / ".apex-ray" / "skills" / "apex-ray-improve" / "SKILL.md").read_text(
         encoding="utf-8"
@@ -1160,7 +1171,10 @@ def test_init_project_can_skip_agent_skill_files(tmp_path: Path) -> None:
     agents_text = (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
     assert "LLM analysis can be long-running and may appear idle" in agents_text
     assert "For manual Apex Ray runs" in agents_text
-    assert "do not proactively run `apex-ray review` or `apex-ray gate pre-push`" in agents_text
+    assert (
+        f"do not proactively run `uvx --python 3.14 apex-ray@{__version__} review` or "
+        f"`uvx --python 3.14 apex-ray@{__version__} gate pre-push`"
+    ) in agents_text
     assert "$apex-ray" not in agents_text
     assert not (tmp_path / ".apex-ray" / "skills").exists()
     assert not (tmp_path / ".codex").exists()
@@ -1183,9 +1197,35 @@ def test_init_project_can_replace_existing_git_hook_with_force(tmp_path: Path) -
     hook = tmp_path / ".git" / "hooks" / "pre-push"
     hook.write_text("#!/bin/sh\necho existing\n", encoding="utf-8")
 
-    init_project(tmp_path, hooks="git", overwrite=True)
+    init_project(tmp_path, hooks="git", overwrite=True, runtime_version="0.1.13")
 
-    assert "apex-ray gate pre-push" in hook.read_text(encoding="utf-8")
+    assert "uvx --python 3.14 apex-ray@0.1.13 gate pre-push" in hook.read_text(encoding="utf-8")
+
+
+def test_init_project_migrates_the_exact_legacy_git_hook_and_adds_a_managed_marker(tmp_path: Path) -> None:
+    git.run_git(["init"], cwd=tmp_path)
+    hook = tmp_path / ".git" / "hooks" / "pre-push"
+    hook.write_text("#!/bin/sh\nset -eu\napex-ray gate pre-push\n", encoding="utf-8")
+
+    init_project(tmp_path, hooks="git", runtime_version="0.1.13")
+
+    text = hook.read_text(encoding="utf-8")
+    assert "# apex-ray-managed-hook: version=1" in text
+    assert "uvx --python 3.14 apex-ray@0.1.13 gate pre-push" in text
+    assert managed_hook_statuses(tmp_path, runtime_version="0.1.13")[0].status == "current"
+
+
+def test_init_project_rejects_git_hook_path_outside_repository_metadata(tmp_path: Path) -> None:
+    git.run_git(["init"], cwd=tmp_path)
+    shared_hooks = tmp_path.with_name(f"{tmp_path.name}-shared-hooks")
+    shared_hooks.mkdir()
+    git.run_git(["config", "core.hooksPath", str(shared_hooks)], cwd=tmp_path)
+
+    with pytest.raises(ConfigError, match="outside the repository or its Git common directory"):
+        init_project(tmp_path, hooks="git", runtime_version="0.1.13")
+
+    assert not (shared_hooks / "pre-push").exists()
+    assert not (tmp_path / ".apex-ray").exists()
 
 
 def test_init_project_refuses_to_rewrite_existing_lefthook_without_force(tmp_path: Path) -> None:
@@ -1199,6 +1239,248 @@ def test_init_project_refuses_to_rewrite_existing_lefthook_without_force(tmp_pat
 
     assert "run: |\n        npm test" in (tmp_path / "lefthook.yml").read_text(encoding="utf-8")
     assert not (tmp_path / ".apex-ray").exists()
+
+
+def test_init_project_migrates_legacy_managed_lefthook_without_reformatting(tmp_path: Path) -> None:
+    hook = tmp_path / "lefthook.yml"
+    hook.write_text(
+        "# keep this comment\n"
+        "pre-push:\n"
+        "  commands:\n"
+        "    tests:\n"
+        "      run: npm test\n"
+        "    apex-ray-review:\n"
+        "      run: apex-ray gate pre-push # keep inline comment\n",
+        encoding="utf-8",
+    )
+
+    init_project(tmp_path, runtime_version="0.1.13")
+
+    text = hook.read_text(encoding="utf-8")
+    assert "# keep this comment" in text
+    assert "# keep inline comment" in text
+    assert "run: npm test" in text
+    assert 'run: "uvx --python 3.14 apex-ray@0.1.13 gate pre-push"' in text
+    assert managed_hook_statuses(tmp_path, runtime_version="0.1.13")[0].status == "current"
+
+
+def test_init_project_rejects_parallel_custom_apex_lefthook_before_writing(tmp_path: Path) -> None:
+    hook = tmp_path / "lefthook.yml"
+    original = "pre-push:\n  commands:\n    99-apex-ray:\n      run: ./scripts/apex-ray-pre-push.sh\n"
+    hook.write_text(original, encoding="utf-8")
+
+    with pytest.raises(ConfigError, match="already contains another Apex Ray hook"):
+        init_project(tmp_path, runtime_version="0.1.13", overwrite=True)
+
+    assert hook.read_text(encoding="utf-8") == original
+    assert not (tmp_path / ".apex-ray").exists()
+
+
+def test_init_project_rejects_parallel_apex_lefthook_script_before_writing(tmp_path: Path) -> None:
+    hook = tmp_path / "lefthook.yml"
+    original = "pre-push:\n  scripts:\n    apex-ray-pre-push.sh:\n      runner: bash\n"
+    hook.write_text(original, encoding="utf-8")
+
+    statuses = managed_hook_statuses(tmp_path, runtime_version="0.1.13")
+    assert len(statuses) == 1
+    assert statuses[0].status == "unmanaged"
+    assert "scripts.apex-ray-pre-push.sh" in statuses[0].reason
+
+    with pytest.raises(ConfigError, match="already contains another Apex Ray hook"):
+        init_project(tmp_path, runtime_version="0.1.13", overwrite=True)
+
+    assert hook.read_text(encoding="utf-8") == original
+    assert not (tmp_path / ".apex-ray").exists()
+
+
+def test_init_project_rejects_shared_yaml_anchor_before_rewriting_managed_lefthook(tmp_path: Path) -> None:
+    hook = tmp_path / "lefthook.yml"
+    original = (
+        "pre-push:\n  commands:\n    apex-ray-review:\n      run: &gate apex-ray gate pre-push\nshared-command: *gate\n"
+    )
+    hook.write_text(original, encoding="utf-8")
+
+    with pytest.raises(ConfigError, match="YAML anchor/alias"):
+        init_project(tmp_path, runtime_version="0.1.13")
+
+    assert hook.read_text(encoding="utf-8") == original
+    assert not (tmp_path / ".apex-ray").exists()
+
+
+def test_init_project_rejects_duplicate_lefthook_mapping_keys_before_writing(tmp_path: Path) -> None:
+    hook = tmp_path / "lefthook.yml"
+    original = (
+        "pre-push:\n"
+        "  commands:\n"
+        "    apex-ray-review:\n"
+        "      run: apex-ray gate pre-push\n"
+        "pre-push:\n"
+        "  commands:\n"
+        "    apex-ray-review:\n"
+        "      run: apex-ray gate pre-push\n"
+    )
+    hook.write_text(original, encoding="utf-8")
+
+    with pytest.raises(ConfigError, match="duplicate mapping key 'pre-push'"):
+        init_project(tmp_path, runtime_version="0.1.13")
+
+    assert hook.read_text(encoding="utf-8") == original
+    assert not (tmp_path / ".apex-ray").exists()
+
+
+def test_init_project_rejects_external_lefthook_symlink_before_writing(tmp_path: Path) -> None:
+    outside = tmp_path.with_name(f"{tmp_path.name}-outside-lefthook.yml")
+    outside.write_text("outside: true\n", encoding="utf-8")
+    try:
+        (tmp_path / "lefthook.yml").symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlink creation is unavailable: {exc}")
+
+    with pytest.raises(ConfigError, match="outside the repository"):
+        init_project(tmp_path, runtime_version="0.1.13", overwrite=True)
+
+    assert outside.read_text(encoding="utf-8") == "outside: true\n"
+    assert not (tmp_path / ".apex-ray").exists()
+
+
+def test_refresh_managed_artifacts_updates_lock_hook_and_agent_commands_together(tmp_path: Path) -> None:
+    init_project(tmp_path, runtime_version="0.1.12")
+    config = tmp_path / ".apex-ray" / "config.yml"
+    config_before = config.read_bytes()
+
+    with pytest.raises(VersionLockError, match=r"requires Apex Ray 0\.1\.12"):
+        refresh_managed_artifacts(tmp_path, runtime_version="0.1.13")
+
+    written = refresh_managed_artifacts(
+        tmp_path,
+        runtime_version="0.1.13",
+        update_version_lock=True,
+    )
+
+    assert tmp_path / ".apex-ray" / "version" in written
+    assert (tmp_path / ".apex-ray" / "version").read_text(encoding="utf-8") == "0.1.13\n"
+    assert "apex-ray@0.1.13 gate pre-push" in (tmp_path / "lefthook.yml").read_text(encoding="utf-8")
+    assert "apex-ray@0.1.13 review" in (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
+    assert "apex-ray@0.1.13 doctor" in (tmp_path / ".apex-ray" / "skills" / "apex-ray" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
+    assert config.read_bytes() == config_before
+
+
+def test_refresh_managed_artifacts_preserves_existing_git_hook_mode(tmp_path: Path) -> None:
+    git.run_git(["init"], cwd=tmp_path)
+    init_project(tmp_path, hooks="git", runtime_version="0.1.12")
+
+    written = refresh_managed_artifacts(
+        tmp_path,
+        runtime_version="0.1.13",
+        update_version_lock=True,
+    )
+
+    hook = tmp_path / ".git" / "hooks" / "pre-push"
+    assert hook in written
+    assert "apex-ray@0.1.13 gate pre-push" in hook.read_text(encoding="utf-8")
+    assert not (tmp_path / "lefthook.yml").exists()
+    assert (tmp_path / ".apex-ray" / "version").read_text(encoding="utf-8") == "0.1.13\n"
+    statuses = managed_hook_statuses(tmp_path, runtime_version="0.1.13")
+    assert [(status.kind, status.status) for status in statuses] == [("git", "current")]
+
+
+def test_refresh_managed_artifacts_rejects_multiple_apex_hook_modes_before_writing(tmp_path: Path) -> None:
+    git.run_git(["init"], cwd=tmp_path)
+    init_project(tmp_path, hooks="git", runtime_version="0.1.12")
+    git_hook = tmp_path / ".git" / "hooks" / "pre-push"
+    git_hook_before = git_hook.read_bytes()
+    lefthook = tmp_path / "lefthook.yml"
+    lefthook.write_text(
+        'pre-push:\n  commands:\n    apex-ray-review:\n      run: "uvx --python 3.14 apex-ray@0.1.12 gate pre-push"\n',
+        encoding="utf-8",
+    )
+    lefthook_before = lefthook.read_bytes()
+
+    with pytest.raises(ConfigError, match="multiple Apex Ray hook modes"):
+        refresh_managed_artifacts(
+            tmp_path,
+            runtime_version="0.1.13",
+            update_version_lock=True,
+        )
+
+    assert (tmp_path / ".apex-ray" / "version").read_text(encoding="utf-8") == "0.1.12\n"
+    assert git_hook.read_bytes() == git_hook_before
+    assert lefthook.read_bytes() == lefthook_before
+
+
+def test_refresh_managed_artifacts_rejects_external_lock_parent_before_writing(tmp_path: Path) -> None:
+    outside = tmp_path.with_name(f"{tmp_path.name}-outside-apex-ray")
+    outside.mkdir()
+    outside_lock = outside / "version"
+    outside_lock.write_text("0.1.12\n", encoding="utf-8")
+    try:
+        (tmp_path / ".apex-ray").symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink creation is unavailable: {exc}")
+    hook = tmp_path / "lefthook.yml"
+    hook.write_text(
+        'pre-push:\n  commands:\n    apex-ray-review:\n      run: "uvx --python 3.14 apex-ray@0.1.12 gate pre-push"\n',
+        encoding="utf-8",
+    )
+    hook_before = hook.read_bytes()
+
+    with pytest.raises(VersionLockError, match="outside the repository"):
+        refresh_managed_artifacts(
+            tmp_path,
+            runtime_version="0.1.13",
+            update_version_lock=True,
+            agent_files="none",
+            agent_skill=False,
+        )
+
+    assert hook.read_bytes() == hook_before
+    assert outside_lock.read_text(encoding="utf-8") == "0.1.12\n"
+
+
+def test_refresh_managed_artifacts_dry_run_does_not_mutate_files(tmp_path: Path) -> None:
+    init_project(tmp_path, runtime_version="0.1.12")
+    tracked = [
+        tmp_path / ".apex-ray" / "version",
+        tmp_path / "lefthook.yml",
+        tmp_path / "AGENTS.md",
+        tmp_path / ".apex-ray" / "skills" / "apex-ray" / "SKILL.md",
+    ]
+    before = {path: path.read_bytes() for path in tracked}
+
+    paths = refresh_managed_artifacts(
+        tmp_path,
+        runtime_version="0.1.13",
+        update_version_lock=True,
+        dry_run=True,
+    )
+
+    assert tmp_path / ".apex-ray" / "version" in paths
+    assert tmp_path / "lefthook.yml" in paths
+    assert all(path.read_bytes() == contents for path, contents in before.items())
+
+
+def test_refresh_managed_artifacts_rejects_custom_hook_before_updating_lock_or_skills(tmp_path: Path) -> None:
+    init_project(tmp_path, runtime_version="0.1.12")
+    lock = tmp_path / ".apex-ray" / "version"
+    skill = tmp_path / ".apex-ray" / "skills" / "apex-ray" / "SKILL.md"
+    skill_before = skill.read_bytes()
+    hook = tmp_path / "lefthook.yml"
+    custom = "pre-push:\n  commands:\n    99-apex-ray:\n      run: ./scripts/apex-ray-pre-push.sh\n"
+    hook.write_text(custom, encoding="utf-8")
+
+    with pytest.raises(ConfigError, match="already contains another Apex Ray hook"):
+        refresh_managed_artifacts(
+            tmp_path,
+            runtime_version="0.1.13",
+            update_version_lock=True,
+            overwrite=True,
+        )
+
+    assert lock.read_text(encoding="utf-8") == "0.1.12\n"
+    assert skill.read_bytes() == skill_before
+    assert hook.read_text(encoding="utf-8") == custom
 
 
 def test_init_project_preserves_agent_symlink_on_force(tmp_path: Path) -> None:

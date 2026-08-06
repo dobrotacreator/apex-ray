@@ -52,6 +52,7 @@ git status --short
 ```
 
 Inspect and commit the setup files before using the first worktree review for application changes.
+`init` writes the repository's exact Apex Ray version to `.apex-ray/version` and renders managed hooks and agent commands through cached `uvx`; keep `uv` available on developer and CI machines.
 
 If Apex Ray later warns that generated agent instructions are outdated, refresh only those managed artifacts with:
 
@@ -59,6 +60,8 @@ If Apex Ray later warns that generated agent instructions are outdated, refresh 
 apex-ray init --refresh-agent-artifacts --dry-run
 apex-ray init --refresh-agent-artifacts
 ```
+
+Use `apex-ray init --refresh-managed-artifacts` to synchronize the lock-derived hook and instructions. Upgrading the lock is explicit: run the target package with `uvx`, then add `--update-version-lock`. See [configuration](docs/configuration.md#agent-artifact-refresh) for the safe migration flow.
 
 Run a deterministic no-LLM review:
 

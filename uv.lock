@@ -25,6 +25,7 @@ name = "apex-ray"
 version = "0.1.12"
 source = { editable = "." }
 dependencies = [
+    { name = "packaging" },
     { name = "pydantic" },
     { name = "pyyaml" },
     { name = "typer" },
@@ -45,6 +46,7 @@ docs = [
 
 [package.metadata]
 requires-dist = [
+    { name = "packaging", specifier = ">=25" },
     { name = "pydantic", specifier = ">=2.12" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "typer", specifier = ">=0.26.2" },

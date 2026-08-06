@@ -1,4 +1,5 @@
 import re
+import shlex
 import shutil
 import warnings
 from dataclasses import dataclass
@@ -7,16 +8,24 @@ from typing import Any
 
 import yaml
 from pydantic import ValidationError
+from yaml.nodes import MappingNode, Node, ScalarNode, SequenceNode
 
 from apex_ray import git
 from apex_ray.memory import MemoryError, load_memory_cards
 from apex_ray.models import ReviewConfig
 from apex_ray.rules import RuleError, load_rule_definitions
+from apex_ray.version_lock import (
+    assert_version_lock,
+    ensure_version_lock,
+    inspect_version_lock,
+    render_uvx_command,
+    validate_version_lock_target,
+)
 
 DEFAULT_BASE_BRANCH = "main"
 HOOK_MODES = {"lefthook", "git", "none"}
 AGENT_FILE_MODES = {"none", "codex", "claude", "both"}
-AGENT_ARTIFACT_TEMPLATE_VERSION = 3
+AGENT_ARTIFACT_TEMPLATE_VERSION = 4
 
 
 @dataclass(frozen=True)
@@ -29,6 +38,20 @@ class AgentArtifactStatus:
     @property
     def needs_refresh(self) -> bool:
         return self.status in {"missing", "outdated", "unmanaged"}
+
+
+@dataclass(frozen=True)
+class ManagedHookStatus:
+    path: Path
+    kind: str
+    status: str
+    expected_command: str
+    actual_command: str | None = None
+    reason: str = ""
+
+    @property
+    def needs_refresh(self) -> bool:
+        return self.status != "current"
 
 
 def default_config_text(base: str = DEFAULT_BASE_BRANCH) -> str:
@@ -109,6 +132,11 @@ APEX_RAY_AGENT_BLOCK_START = "<!-- APEX_RAY_START -->"
 APEX_RAY_AGENT_BLOCK_END = "<!-- APEX_RAY_END -->"
 APEX_RAY_AGENT_TEMPLATE_MARKER = f"<!-- apex-ray-agent-artifacts: version={AGENT_ARTIFACT_TEMPLATE_VERSION} -->"
 APEX_RAY_SKILL_TOKEN_RE = re.compile(r"(?<![\w-])\$apex-ray(?![\w-])")
+APEX_RAY_CLI_COMMAND_RE = re.compile(
+    r"(?<![\w$-])apex-ray(?=\s+(?:doctor|review|gate|findings|telemetry-summary|eval)\b)"
+)
+MANAGED_GIT_HOOK_MARKER = "# apex-ray-managed-hook: version=1"
+LEGACY_GIT_HOOK_BODY = "#!/bin/sh\nset -eu\napex-ray gate pre-push\n"
 APEX_RAY_AGENT_BLOCK = f"""{APEX_RAY_AGENT_BLOCK_START}
 {APEX_RAY_AGENT_TEMPLATE_MARKER}
 ## Apex Ray
@@ -226,8 +254,6 @@ Produce a concise recommendation report with these sections when relevant:
 Keep this workflow recommendation-only by default. Do not commit raw comments, raw telemetry, eval run directories, reports, provider settings, or private identifiers. Do not turn one-off PR feedback into repo memory unless it generalizes beyond that PR. Do not use Apex Ray learning as a substitute for fixing the product code, tests, CI, or human review process.
 """
 
-LEFTHOOK_APEX_RAY_COMMAND = "apex-ray gate pre-push"
-
 
 class ConfigError(RuntimeError):
     pass
@@ -291,7 +317,14 @@ def init_project(
     hooks: str = "lefthook",
     agent_files: str = "both",
     agent_skill: bool = True,
+    runtime_version: str | None = None,
+    update_version_lock: bool = False,
 ) -> list[Path]:
+    if runtime_version is None:
+        from apex_ray import __version__
+
+        runtime_version = __version__
+    hook_command = render_uvx_command(runtime_version, "gate", "pre-push")
     if update_gitignore:
         warnings.warn(
             "update_gitignore is deprecated and no longer manages the root .gitignore; "
@@ -300,12 +333,14 @@ def init_project(
             stacklevel=2,
         )
     _validate_init_options(hooks=hooks, agent_files=agent_files)
+    _preflight_version_lock(root, runtime_version=runtime_version, update=update_version_lock)
     _preflight_init_targets(
         root,
         hooks=hooks,
         agent_files=agent_files,
         agent_skill=agent_skill,
         overwrite=overwrite,
+        hook_command=hook_command,
     )
     written: list[Path] = []
     config_exists = default_config_path(root).exists()
@@ -323,15 +358,33 @@ def init_project(
     if apex_gitignore is not None:
         written.append(apex_gitignore)
     if hooks == "lefthook":
-        if _write_lefthook_hook(root / "lefthook.yml", overwrite=overwrite):
+        if _write_lefthook_hook(root, root / "lefthook.yml", overwrite=overwrite, command=hook_command):
             written.append(root / "lefthook.yml")
     elif hooks == "git":
-        hook_path = _write_git_pre_push_hook(root, overwrite=overwrite)
+        hook_path = _write_git_pre_push_hook(root, overwrite=overwrite, command=hook_command)
         if hook_path is not None:
             written.append(hook_path)
-    written.extend(_write_agent_files(root, agent_files=agent_files, agent_skill=agent_skill, overwrite=overwrite))
+    written.extend(
+        _write_agent_files(
+            root,
+            agent_files=agent_files,
+            agent_skill=agent_skill,
+            overwrite=overwrite,
+            runtime_version=runtime_version,
+        )
+    )
     if agent_skill and agent_files != "none":
-        written.extend(_write_agent_skill_files(root, agent_files=agent_files, overwrite=overwrite))
+        written.extend(
+            _write_agent_skill_files(
+                root,
+                agent_files=agent_files,
+                overwrite=overwrite,
+                runtime_version=runtime_version,
+            )
+        )
+    lock_path = ensure_version_lock(root, runtime_version=runtime_version, update=update_version_lock)
+    if lock_path is not None:
+        written.append(lock_path)
     return written
 
 
@@ -341,8 +394,13 @@ def refresh_agent_artifacts(
     agent_files: str = "both",
     agent_skill: bool = True,
     dry_run: bool = False,
+    runtime_version: str | None = None,
+    enforce_version_lock: bool = True,
 ) -> list[Path]:
     """Refresh only Apex Ray-managed agent instruction artifacts."""
+    runtime_version = _resolve_runtime_version(runtime_version)
+    if enforce_version_lock:
+        _preflight_version_lock(root, runtime_version=runtime_version, update=False)
     if agent_files not in AGENT_FILE_MODES:
         raise ConfigError("Unsupported agent-files value. Use none, codex, claude, or both.")
     if agent_files == "none":
@@ -354,6 +412,7 @@ def refresh_agent_artifacts(
             agent_skill=agent_skill,
             include_missing=True,
             include_unmanaged=True,
+            runtime_version=runtime_version,
         )
         if not agent_skill:
             statuses = [status for status in statuses if status.kind != "agent_skill"]
@@ -362,9 +421,106 @@ def refresh_agent_artifacts(
         _preflight_codex_skill_aliases(root)
     if agent_skill and agent_files != "none":
         _preflight_canonical_skills(root)
-    written = _write_agent_files(root, agent_files=agent_files, agent_skill=agent_skill, overwrite=True)
+    written = _write_agent_files(
+        root,
+        agent_files=agent_files,
+        agent_skill=agent_skill,
+        overwrite=True,
+        runtime_version=runtime_version,
+    )
     if agent_skill:
-        written.extend(_write_agent_skill_files(root, agent_files=agent_files, overwrite=True))
+        written.extend(
+            _write_agent_skill_files(
+                root,
+                agent_files=agent_files,
+                overwrite=True,
+                runtime_version=runtime_version,
+            )
+        )
+    return _dedupe_paths(written)
+
+
+def refresh_managed_artifacts(
+    root: Path,
+    *,
+    hooks: str | None = None,
+    agent_files: str = "both",
+    agent_skill: bool = True,
+    runtime_version: str,
+    update_version_lock: bool = False,
+    overwrite: bool = False,
+    dry_run: bool = False,
+) -> list[Path]:
+    """Synchronize the lock-derived hook and agent artifacts without rewriting project config."""
+    if hooks is not None and hooks not in HOOK_MODES:
+        raise ConfigError("Unsupported hooks value. Use lefthook, git, or none.")
+    if agent_files not in AGENT_FILE_MODES:
+        raise ConfigError("Unsupported agent-files value. Use none, codex, claude, or both.")
+    _preflight_version_lock(root, runtime_version=runtime_version, update=update_version_lock)
+    effective_hooks = _resolve_managed_refresh_hook_mode(
+        root,
+        requested=hooks,
+        runtime_version=runtime_version,
+    )
+    _preflight_init_targets(
+        root,
+        hooks=effective_hooks,
+        agent_files=agent_files,
+        agent_skill=agent_skill,
+        overwrite=overwrite,
+        hook_command=render_uvx_command(runtime_version, "gate", "pre-push"),
+    )
+    lock_status = inspect_version_lock(root, runtime_version=runtime_version)
+    hook_command = render_uvx_command(runtime_version, "gate", "pre-push")
+    if dry_run:
+        paths: list[Path] = []
+        if lock_status.state.value != "current":
+            paths.append(lock_status.path)
+        if effective_hooks == "lefthook":
+            hook_path = root / "lefthook.yml"
+            status = _lefthook_status(root, hook_path, expected=hook_command) if hook_path.exists() else None
+            if status is None or status.needs_refresh:
+                paths.append(hook_path)
+        elif effective_hooks == "git":
+            hook_path = _git_pre_push_hook_path(root)
+            status = _git_hook_status(root, hook_path, expected=hook_command) if hook_path.exists() else None
+            if status is None or status.needs_refresh:
+                paths.append(hook_path)
+        if agent_files != "none":
+            paths.extend(
+                refresh_agent_artifacts(
+                    root,
+                    agent_files=agent_files,
+                    agent_skill=agent_skill,
+                    dry_run=True,
+                    runtime_version=runtime_version,
+                    enforce_version_lock=False,
+                )
+            )
+        return _dedupe_paths(paths)
+
+    written: list[Path] = []
+    if effective_hooks == "lefthook":
+        hook_path = root / "lefthook.yml"
+        if _write_lefthook_hook(root, hook_path, overwrite=overwrite, command=hook_command):
+            written.append(hook_path)
+    elif effective_hooks == "git":
+        hook_path = _write_git_pre_push_hook(root, overwrite=overwrite, command=hook_command)
+        if hook_path is not None:
+            written.append(hook_path)
+    if agent_files != "none":
+        written.extend(
+            refresh_agent_artifacts(
+                root,
+                agent_files=agent_files,
+                agent_skill=agent_skill,
+                runtime_version=runtime_version,
+                enforce_version_lock=False,
+            )
+        )
+    lock_path = ensure_version_lock(root, runtime_version=runtime_version, update=update_version_lock)
+    if lock_path is not None:
+        written.append(lock_path)
     return _dedupe_paths(written)
 
 
@@ -375,6 +531,7 @@ def agent_artifact_statuses(
     agent_skill: bool | None = None,
     include_missing: bool = False,
     include_unmanaged: bool = False,
+    runtime_version: str | None = None,
 ) -> list[AgentArtifactStatus]:
     """Return local generated-agent-artifact status without modifying files."""
     if agent_files not in AGENT_FILE_MODES:
@@ -384,7 +541,13 @@ def agent_artifact_statuses(
     statuses: list[AgentArtifactStatus] = []
     seen: set[Path] = set()
     for path in _agent_file_status_targets(root, agent_files=agent_files, include_missing=include_missing):
-        status = _agent_file_status(root, path, agent_skill=agent_skill, include_missing=include_missing)
+        status = _agent_file_status(
+            root,
+            path,
+            agent_skill=agent_skill,
+            include_missing=include_missing,
+            runtime_version=runtime_version,
+        )
         if status is None or (status.status == "unmanaged" and not include_unmanaged):
             continue
         resolved = _status_identity(root, status.path)
@@ -396,6 +559,7 @@ def agent_artifact_statuses(
         root,
         agent_files=agent_files,
         include_missing=include_missing,
+        runtime_version=runtime_version,
     ):
         status = _agent_skill_status(
             root,
@@ -416,9 +580,13 @@ def agent_artifact_refresh_warning(root: Path) -> str | None:
         return None
     paths = ", ".join(str(status.path.relative_to(root)) for status in stale[:5])
     suffix = "" if len(stale) <= 5 else f", and {len(stale) - 5} more"
+    runtime_version = _resolve_runtime_version(None)
+    lock_status = inspect_version_lock(root, runtime_version=runtime_version)
+    target_version = lock_status.locked_version or runtime_version
     return (
         f"Apex Ray agent artifacts are outdated: {paths}{suffix}. "
-        "Run `apex-ray init --refresh-agent-artifacts` to update managed AGENTS/CLAUDE blocks and skills."
+        f"Run `{render_uvx_command(target_version, 'init', '--refresh-agent-artifacts')}` "
+        "to update managed AGENTS/CLAUDE blocks and skills."
     )
 
 
@@ -429,6 +597,57 @@ def _validate_init_options(*, hooks: str, agent_files: str) -> None:
         raise ConfigError("Unsupported agent-files value. Use none, codex, claude, or both.")
 
 
+def _preflight_version_lock(root: Path, *, runtime_version: str, update: bool) -> None:
+    status = inspect_version_lock(root, runtime_version=runtime_version)
+    if status.state.value in {"missing", "current"}:
+        return
+    if update:
+        validate_version_lock_target(root)
+        return
+    assert_version_lock(root, runtime_version=runtime_version)
+
+
+def _resolve_managed_refresh_hook_mode(
+    root: Path,
+    *,
+    requested: str | None,
+    runtime_version: str,
+) -> str:
+    statuses = managed_hook_statuses(root, runtime_version=runtime_version)
+    existing_modes = {status.kind for status in statuses}
+    if len(existing_modes) > 1:
+        joined = ", ".join(sorted(existing_modes))
+        raise ConfigError(
+            f"Repository contains multiple Apex Ray hook modes ({joined}). "
+            "Remove one hook mechanism before refreshing managed artifacts."
+        )
+    if existing_modes:
+        existing = next(iter(existing_modes))
+        if requested == "none":
+            raise ConfigError(
+                f"Repository already contains an Apex Ray {existing} hook. "
+                "Refresh that hook or remove it before using --hooks none."
+            )
+        if requested is not None and requested != existing:
+            raise ConfigError(
+                f"Repository already uses the Apex Ray {existing} hook mode. "
+                "Omit --hooks to preserve it, or migrate hook modes manually before refreshing."
+            )
+        return existing
+    if requested is not None:
+        return requested
+    if git.is_git_repo(root):
+        try:
+            git_hook = _git_pre_push_hook_path(root)
+        except ConfigError:
+            git_hook = None
+        if git_hook is not None and git_hook.exists():
+            return "git"
+    if (root / "lefthook.yml").exists():
+        return "lefthook"
+    return "lefthook"
+
+
 def _preflight_init_targets(
     root: Path,
     *,
@@ -436,9 +655,15 @@ def _preflight_init_targets(
     agent_files: str,
     agent_skill: bool,
     overwrite: bool,
+    hook_command: str,
 ) -> None:
     if hooks == "lefthook":
-        _validate_lefthook_target(root / "lefthook.yml", overwrite=overwrite)
+        _validate_lefthook_target(
+            root,
+            root / "lefthook.yml",
+            overwrite=overwrite,
+            expected_command=hook_command,
+        )
     elif hooks == "git":
         _validate_git_hook_target(root, overwrite=overwrite)
     if agent_files in {"codex", "both"} and (root / "AGENTS.md").is_symlink():
@@ -640,6 +865,7 @@ def _agent_file_status(
     *,
     agent_skill: bool | None,
     include_missing: bool,
+    runtime_version: str | None,
 ) -> AgentArtifactStatus | None:
     if not path.exists() and not path.is_symlink():
         return AgentArtifactStatus(path, "agent_file", "missing", "file does not exist") if include_missing else None
@@ -648,7 +874,10 @@ def _agent_file_status(
     block = _extract_agent_block(text)
     if block is None:
         return AgentArtifactStatus(path, "agent_file", "unmanaged", "Apex Ray managed block not found")
-    expected = _agent_block(agent_skill=_detect_agent_skill_from_block(block) if agent_skill is None else agent_skill)
+    expected = _agent_block(
+        agent_skill=_detect_agent_skill_from_block(block) if agent_skill is None else agent_skill,
+        runtime_version=runtime_version,
+    )
     if _normalize_artifact_text(block) == _normalize_artifact_text(expected):
         return AgentArtifactStatus(path, "agent_file", "current")
     return AgentArtifactStatus(path, "agent_file", "outdated", "managed block differs from current template")
@@ -659,13 +888,11 @@ def _agent_skill_status_targets(
     *,
     agent_files: str,
     include_missing: bool,
+    runtime_version: str | None,
 ) -> list[tuple[Path, str, str, str]]:
     targets: list[tuple[Path, str, str, str]] = []
     codex_skills_expected = include_missing or _codex_skills_are_managed(root)
-    for skill_name, skill_text in (
-        ("apex-ray", APEX_RAY_SKILL_TEXT),
-        ("apex-ray-improve", APEX_RAY_IMPROVE_SKILL_TEXT),
-    ):
+    for skill_name, skill_text in _agent_skill_templates(runtime_version):
         canonical = root / ".apex-ray" / "skills" / skill_name / "SKILL.md"
         if include_missing or canonical.exists() or canonical.is_symlink():
             targets.append((canonical, skill_name, skill_text, "file"))
@@ -915,17 +1142,11 @@ def _append_marked_block(path: Path, block: str, *, overwrite: bool) -> bool:
     return True
 
 
-def _write_lefthook_hook(path: Path, *, overwrite: bool) -> bool:
-    raw = path.read_text(encoding="utf-8") if path.exists() else ""
-    _validate_lefthook_text(path, raw, overwrite=overwrite)
-    try:
-        data = yaml.safe_load(raw) if raw.strip() else {}
-    except yaml.YAMLError as exc:
-        raise ConfigError(f"Invalid YAML in {path}: {exc}") from exc
-    if data is None:
-        data = {}
-    if not isinstance(data, dict):
-        raise ConfigError(f"Invalid Lefthook config in {path}: expected a mapping")
+def _write_lefthook_hook(root: Path, path: Path, *, overwrite: bool, command: str) -> bool:
+    write_path = _safe_repo_write_path(root, path)
+    raw = _read_setup_text(path) if path.exists() else ""
+    _validate_lefthook_text(path, raw, overwrite=overwrite, expected_command=command)
+    data = _load_lefthook_data(path, raw)
     data.setdefault("no_tty", True)
     pre_push = data.setdefault("pre-push", {})
     if not isinstance(pre_push, dict):
@@ -934,36 +1155,260 @@ def _write_lefthook_hook(path: Path, *, overwrite: bool) -> bool:
     commands = pre_push.setdefault("commands", {})
     if not isinstance(commands, dict):
         raise ConfigError(f"Invalid Lefthook config in {path}: pre-push.commands must be a mapping")
-    if "apex-ray-review" in commands and not overwrite:
-        return False
-    commands["apex-ray-review"] = {"run": LEFTHOOK_APEX_RAY_COMMAND}
-    path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+    existing = commands.get("apex-ray-review")
+    if existing is not None:
+        actual = existing.get("run") if isinstance(existing, dict) else None
+        if actual == command:
+            return False
+        state = _managed_gate_command_state(actual, expected=command)
+        if state == "unmanaged" and not overwrite:
+            raise ConfigError(
+                f"Lefthook command apex-ray-review in {path} is not an Apex Ray-managed gate command. "
+                "Move or rename it, or rerun with --force to replace that command."
+            )
+        if isinstance(actual, str) and raw:
+            updated = _replace_lefthook_run_scalar(path, raw, command)
+            if updated is not None:
+                write_path.write_text(updated, encoding="utf-8")
+                return True
+    commands["apex-ray-review"] = {"run": command}
+    write_path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
     return True
 
 
-def _validate_lefthook_target(path: Path, *, overwrite: bool) -> None:
-    raw = path.read_text(encoding="utf-8") if path.exists() else ""
-    _validate_lefthook_text(path, raw, overwrite=overwrite)
+def _validate_lefthook_target(
+    root: Path,
+    path: Path,
+    *,
+    overwrite: bool,
+    expected_command: str,
+) -> None:
+    _safe_repo_write_path(root, path)
+    raw = _read_setup_text(path) if path.exists() else ""
+    _validate_lefthook_text(path, raw, overwrite=overwrite, expected_command=expected_command)
 
 
-def _validate_lefthook_text(path: Path, raw: str, *, overwrite: bool) -> None:
-    if raw.strip() and "apex-ray-review" not in raw and not overwrite:
+def _read_setup_text(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise ConfigError(f"Unable to read repository setup file {path}: {exc}") from exc
+
+
+def _validate_lefthook_text(
+    path: Path,
+    raw: str,
+    *,
+    overwrite: bool,
+    expected_command: str,
+) -> None:
+    if not raw.strip():
+        return
+    data = _load_lefthook_data(path, raw)
+    commands = _lefthook_commands(path, data)
+    entries = _lefthook_pre_push_entries(path, data)
+    conflicting = [
+        label
+        for label, entry in entries
+        if label != "commands.apex-ray-review" and _looks_like_apex_ray_hook(label, entry)
+    ]
+    if conflicting:
+        joined = ", ".join(conflicting)
+        raise ConfigError(
+            f"Lefthook config at {path} already contains another Apex Ray hook ({joined}). "
+            "Migrate it manually to the managed apex-ray-review command before refreshing."
+        )
+    if "apex-ray-review" not in commands and not overwrite:
         raise ConfigError(
             f"Lefthook config already exists at {path}. "
             "Add the apex-ray-review command manually, use --hooks none, or rerun with --force if YAML "
             "formatting/comments can be rewritten."
         )
+    managed_entry = commands.get("apex-ray-review")
+    actual = managed_entry.get("run") if isinstance(managed_entry, dict) else None
+    if isinstance(actual, str) and actual != expected_command:
+        _assert_lefthook_run_replacement_safe(path, raw)
 
 
-def _write_git_pre_push_hook(root: Path, *, overwrite: bool) -> Path | None:
+def _load_lefthook_data(path: Path, raw: str) -> dict[str, Any]:
+    try:
+        document = yaml.compose(raw) if raw.strip() else None
+        data = yaml.safe_load(raw) if raw.strip() else {}
+    except yaml.YAMLError as exc:
+        raise ConfigError(f"Invalid YAML in {path}: {exc}") from exc
+    duplicate_key = _find_duplicate_yaml_mapping_key(document)
+    if duplicate_key is not None:
+        raise ConfigError(f"Invalid Lefthook config in {path}: duplicate mapping key {duplicate_key!r}")
+    if data is None:
+        return {}
+    if not isinstance(data, dict):
+        raise ConfigError(f"Invalid Lefthook config in {path}: expected a mapping")
+    return data
+
+
+def _lefthook_commands(path: Path, data: dict[str, Any]) -> dict[str, Any]:
+    pre_push = data.get("pre-push", {})
+    if pre_push is None:
+        return {}
+    if not isinstance(pre_push, dict):
+        raise ConfigError(f"Invalid Lefthook config in {path}: pre-push must be a mapping")
+    commands = pre_push.get("commands", {})
+    if commands is None:
+        return {}
+    if not isinstance(commands, dict):
+        raise ConfigError(f"Invalid Lefthook config in {path}: pre-push.commands must be a mapping")
+    return commands
+
+
+def _lefthook_pre_push_entries(path: Path, data: dict[str, Any]) -> list[tuple[str, Any]]:
+    pre_push = data.get("pre-push", {})
+    if pre_push is None:
+        return []
+    if not isinstance(pre_push, dict):
+        raise ConfigError(f"Invalid Lefthook config in {path}: pre-push must be a mapping")
+    entries: list[tuple[str, Any]] = []
+    for section in ("commands", "scripts"):
+        values = pre_push.get(section, {})
+        if values is None:
+            continue
+        if not isinstance(values, dict):
+            raise ConfigError(f"Invalid Lefthook config in {path}: pre-push.{section} must be a mapping")
+        entries.extend((f"{section}.{name}", entry) for name, entry in values.items())
+    return entries
+
+
+def _looks_like_apex_ray_hook(name: str, entry: Any) -> bool:
+    if "apex-ray" in name.lower():
+        return True
+    if isinstance(entry, str):
+        return "apex-ray" in entry.lower()
+    if not isinstance(entry, dict):
+        return False
+    return any(isinstance(entry.get(field), str) and "apex-ray" in entry[field].lower() for field in ("run", "runner"))
+
+
+def _managed_gate_command_state(command: Any, *, expected: str) -> str:
+    if command == expected:
+        return "current"
+    if command == "apex-ray gate pre-push":
+        return "outdated"
+    if not isinstance(command, str):
+        return "unmanaged"
+    try:
+        parts = shlex.split(command)
+    except ValueError:
+        return "unmanaged"
+    if (
+        len(parts) == 6
+        and parts[:3] == ["uvx", "--python", "3.14"]
+        and parts[3].startswith("apex-ray@")
+        and parts[4:] == ["gate", "pre-push"]
+    ):
+        return "outdated"
+    return "unmanaged"
+
+
+def _replace_lefthook_run_scalar(path: Path, raw: str, command: str) -> str | None:
+    try:
+        document = yaml.compose(raw)
+    except yaml.YAMLError:
+        return None
+    node = _managed_lefthook_run_node(document)
+    if not isinstance(node, ScalarNode):
+        return None
+    if _yaml_node_reference_count(document, node) > 1:
+        raise ConfigError(
+            f"Lefthook managed command in {path} uses a shared YAML anchor/alias. "
+            "Replace the alias with a standalone run value before refreshing."
+        )
+    rendered = yaml.safe_dump(command, default_style='"').splitlines()[0]
+    return f"{raw[: node.start_mark.index]}{rendered}{raw[node.end_mark.index :]}"
+
+
+def _assert_lefthook_run_replacement_safe(path: Path, raw: str) -> None:
+    try:
+        document = yaml.compose(raw)
+    except yaml.YAMLError:
+        return
+    node = _managed_lefthook_run_node(document)
+    if node is not None and _yaml_node_reference_count(document, node) > 1:
+        raise ConfigError(
+            f"Lefthook managed command in {path} uses a shared YAML anchor/alias. "
+            "Replace the alias with a standalone run value before refreshing."
+        )
+
+
+def _managed_lefthook_run_node(document: Node | None) -> Node | None:
+    node = document
+    for key in ("pre-push", "commands", "apex-ray-review", "run"):
+        node = _yaml_mapping_value(node, key)
+        if node is None:
+            return None
+    return node
+
+
+def _yaml_node_reference_count(document: Node | None, target: Node) -> int:
+    count = 0
+    expanded: set[int] = set()
+    pending = [document] if document is not None else []
+    while pending:
+        node = pending.pop()
+        if node is target:
+            count += 1
+        identity = id(node)
+        if identity in expanded:
+            continue
+        expanded.add(identity)
+        if isinstance(node, MappingNode):
+            for key_node, value_node in node.value:
+                pending.extend((key_node, value_node))
+        elif isinstance(node, SequenceNode):
+            pending.extend(node.value)
+    return count
+
+
+def _find_duplicate_yaml_mapping_key(document: Node | None) -> str | None:
+    expanded: set[int] = set()
+    pending = [document] if document is not None else []
+    while pending:
+        node = pending.pop()
+        identity = id(node)
+        if identity in expanded:
+            continue
+        expanded.add(identity)
+        if isinstance(node, MappingNode):
+            seen: set[tuple[str, str]] = set()
+            for key_node, value_node in node.value:
+                if isinstance(key_node, ScalarNode):
+                    key_identity = (key_node.tag, key_node.value)
+                    if key_identity in seen:
+                        return key_node.value
+                    seen.add(key_identity)
+                pending.extend((key_node, value_node))
+        elif isinstance(node, SequenceNode):
+            pending.extend(node.value)
+    return None
+
+
+def _yaml_mapping_value(node: Node | None, key: str) -> Node | None:
+    if not isinstance(node, MappingNode):
+        return None
+    for key_node, value_node in node.value:
+        if isinstance(key_node, ScalarNode) and key_node.value == key:
+            return value_node
+    return None
+
+
+def _write_git_pre_push_hook(root: Path, *, overwrite: bool, command: str) -> Path | None:
     hook = _git_pre_push_hook_path(root)
-    body = f"#!/bin/sh\nset -eu\n{LEFTHOOK_APEX_RAY_COMMAND}\n"
+    _validate_git_hook_write_path(root, hook)
+    body = _managed_git_hook_body(command)
     hook.parent.mkdir(parents=True, exist_ok=True)
     if hook.exists():
         existing = hook.read_text(encoding="utf-8", errors="ignore")
-        if ("apex-ray gate pre-push" in existing or "apex-ray review" in existing) and not overwrite:
+        if existing == body:
             return None
-        if not overwrite:
+        if not _is_managed_git_hook(existing) and existing != LEGACY_GIT_HOOK_BODY and not overwrite:
             raise ConfigError("Git pre-push hook already exists. Use --force to replace it or --hooks lefthook.")
     hook.write_text(body, encoding="utf-8")
     hook.chmod(0o755)
@@ -972,10 +1417,20 @@ def _write_git_pre_push_hook(root: Path, *, overwrite: bool) -> Path | None:
 
 def _validate_git_hook_target(root: Path, *, overwrite: bool) -> None:
     hook = _git_pre_push_hook_path(root)
+    _validate_git_hook_write_path(root, hook)
     if hook.exists():
         existing = hook.read_text(encoding="utf-8", errors="ignore")
-        if "apex-ray gate pre-push" not in existing and "apex-ray review" not in existing and not overwrite:
+        if not _is_managed_git_hook(existing) and existing != LEGACY_GIT_HOOK_BODY and not overwrite:
             raise ConfigError("Git pre-push hook already exists. Use --force to replace it or --hooks lefthook.")
+
+
+def _managed_git_hook_body(command: str) -> str:
+    return f"#!/bin/sh\nset -eu\n{MANAGED_GIT_HOOK_MARKER}\n{command}\n"
+
+
+def _is_managed_git_hook(body: str) -> bool:
+    lines = body.splitlines()
+    return len(lines) == 4 and lines[:3] == ["#!/bin/sh", "set -eu", MANAGED_GIT_HOOK_MARKER]
 
 
 def _git_pre_push_hook_path(root: Path) -> Path:
@@ -987,17 +1442,157 @@ def _git_pre_push_hook_path(root: Path) -> Path:
     return (root / hook_proc.stdout.strip()).resolve()
 
 
-def _write_agent_files(root: Path, *, agent_files: str, agent_skill: bool, overwrite: bool) -> list[Path]:
+def _validate_git_hook_write_path(root: Path, hook: Path) -> None:
+    resolved_hook = hook.resolve(strict=False)
+    resolved_root = root.resolve()
+    common_dir = git.common_dir(root)
+    if resolved_hook.is_relative_to(resolved_root):
+        return
+    if common_dir is not None and resolved_hook.is_relative_to(common_dir.resolve()):
+        return
+    raise ConfigError(
+        f"Git pre-push hook path is outside the repository or its Git common directory: {hook}. "
+        "Use --hooks lefthook or configure a repository-local core.hooksPath."
+    )
+
+
+def managed_hook_statuses(root: Path, *, runtime_version: str) -> list[ManagedHookStatus]:
+    expected = render_uvx_command(runtime_version, "gate", "pre-push")
+    statuses: list[ManagedHookStatus] = []
+    lefthook_path = root / "lefthook.yml"
+    if lefthook_path.exists():
+        status = _lefthook_status(root, lefthook_path, expected=expected)
+        if status is not None:
+            statuses.append(status)
+    if git.is_git_repo(root):
+        try:
+            git_hook = _git_pre_push_hook_path(root)
+        except ConfigError:
+            git_hook = None
+        if git_hook is not None and git_hook.exists():
+            status = _git_hook_status(root, git_hook, expected=expected)
+            if status is not None:
+                statuses.append(status)
+    return statuses
+
+
+def _lefthook_status(root: Path, path: Path, *, expected: str) -> ManagedHookStatus | None:
+    try:
+        _safe_repo_write_path(root, path)
+        raw = _read_setup_text(path)
+        data = _load_lefthook_data(path, raw)
+        commands = _lefthook_commands(path, data)
+        entries = _lefthook_pre_push_entries(path, data)
+    except (ConfigError, OSError, UnicodeError) as exc:
+        return ManagedHookStatus(path, "lefthook", "invalid", expected, reason=str(exc))
+    conflicts = [
+        label
+        for label, entry in entries
+        if label != "commands.apex-ray-review" and _looks_like_apex_ray_hook(label, entry)
+    ]
+    if conflicts:
+        return ManagedHookStatus(
+            path,
+            "lefthook",
+            "unmanaged",
+            expected,
+            reason=f"another Apex Ray hook is configured: {', '.join(conflicts)}",
+        )
+    entry = commands.get("apex-ray-review")
+    if entry is None:
+        return None
+    actual = entry.get("run") if isinstance(entry, dict) else None
+    state = _managed_gate_command_state(actual, expected=expected)
+    return ManagedHookStatus(
+        path,
+        "lefthook",
+        state,
+        expected,
+        actual_command=actual if isinstance(actual, str) else None,
+        reason="managed command does not match the repository version lock" if state == "outdated" else "",
+    )
+
+
+def _git_hook_status(root: Path, path: Path, *, expected: str) -> ManagedHookStatus | None:
+    try:
+        body = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        return ManagedHookStatus(path, "git", "invalid", expected, reason=str(exc))
+    expected_body = _managed_git_hook_body(expected)
+    if (
+        body != expected_body
+        and body != LEGACY_GIT_HOOK_BODY
+        and not _is_managed_git_hook(body)
+        and "apex-ray" not in body.lower()
+    ):
+        return None
+    try:
+        _validate_git_hook_write_path(root, path)
+    except ConfigError as exc:
+        return ManagedHookStatus(path, "git", "invalid", expected, reason=str(exc))
+    if body == expected_body:
+        return ManagedHookStatus(path, "git", "current", expected, actual_command=expected)
+    if body == LEGACY_GIT_HOOK_BODY:
+        return ManagedHookStatus(
+            path,
+            "git",
+            "outdated",
+            expected,
+            actual_command="apex-ray gate pre-push",
+            reason="legacy generated hook is not version-pinned",
+        )
+    if _is_managed_git_hook(body):
+        actual = body.splitlines()[-1]
+        state = _managed_gate_command_state(actual, expected=expected)
+        return ManagedHookStatus(
+            path,
+            "git",
+            state,
+            expected,
+            actual_command=actual,
+            reason="managed command does not match the repository version lock" if state == "outdated" else "",
+        )
+    if "apex-ray" in body.lower():
+        return ManagedHookStatus(
+            path,
+            "git",
+            "unmanaged",
+            expected,
+            reason="custom Git hook invokes Apex Ray and cannot be synchronized automatically",
+        )
+    return None
+
+
+def _write_agent_files(
+    root: Path,
+    *,
+    agent_files: str,
+    agent_skill: bool,
+    overwrite: bool,
+    runtime_version: str | None,
+) -> list[Path]:
     written: list[Path] = []
     agents_path = root / "AGENTS.md"
     if agent_files in {"codex", "both"}:
-        written_path = _append_agent_block(root, agents_path, agent_skill=agent_skill, overwrite=overwrite)
+        written_path = _append_agent_block(
+            root,
+            agents_path,
+            agent_skill=agent_skill,
+            overwrite=overwrite,
+            runtime_version=runtime_version,
+        )
         if written_path is not None:
             written.append(written_path)
     if agent_files in {"claude", "both"}:
         root_claude_file = root / "CLAUDE.md"
         if root_claude_file.exists() or root_claude_file.is_symlink():
-            written_path = _append_agent_block(root, root_claude_file, agent_skill=agent_skill, overwrite=overwrite)
+            written_path = _append_agent_block(
+                root,
+                root_claude_file,
+                agent_skill=agent_skill,
+                overwrite=overwrite,
+                runtime_version=runtime_version,
+            )
             if written_path is not None:
                 written.append(written_path)
             return written
@@ -1005,7 +1600,13 @@ def _write_agent_files(root: Path, *, agent_files: str, agent_skill: bool, overw
         claude_dir.mkdir(parents=True, exist_ok=True)
         claude_file = claude_dir / "CLAUDE.md"
         if claude_file.exists() or claude_file.is_symlink():
-            written_path = _append_agent_block(root, claude_file, agent_skill=agent_skill, overwrite=overwrite)
+            written_path = _append_agent_block(
+                root,
+                claude_file,
+                agent_skill=agent_skill,
+                overwrite=overwrite,
+                runtime_version=runtime_version,
+            )
             if written_path is not None:
                 written.append(written_path)
             return written
@@ -1018,13 +1619,24 @@ def _write_agent_files(root: Path, *, agent_files: str, agent_skill: bool, overw
                 claude_file.write_text("See [AGENTS.md](../AGENTS.md).\n", encoding="utf-8")
                 written.append(claude_file)
                 return written
-        if _append_marked_block(claude_file, _agent_block(agent_skill=agent_skill), overwrite=overwrite):
+        if _append_marked_block(
+            claude_file,
+            _agent_block(agent_skill=agent_skill, runtime_version=runtime_version),
+            overwrite=overwrite,
+        ):
             written.append(claude_file)
     return written
 
 
-def _append_agent_block(root: Path, path: Path, *, agent_skill: bool, overwrite: bool) -> Path | None:
-    block = _agent_block(agent_skill=agent_skill)
+def _append_agent_block(
+    root: Path,
+    path: Path,
+    *,
+    agent_skill: bool,
+    overwrite: bool,
+    runtime_version: str | None,
+) -> Path | None:
+    block = _agent_block(agent_skill=agent_skill, runtime_version=runtime_version)
     if path.is_symlink():
         target = _safe_repo_symlink_target(root, path)
         return target if _append_marked_block(target, block, overwrite=overwrite) else None
@@ -1041,20 +1653,43 @@ def _safe_repo_symlink_target(root: Path, path: Path) -> Path:
     return resolved_target
 
 
-def _agent_block(*, agent_skill: bool) -> str:
-    if agent_skill:
-        return APEX_RAY_AGENT_BLOCK
-    return APEX_RAY_AGENT_BLOCK_NO_SKILL
+def _agent_block(*, agent_skill: bool, runtime_version: str | None) -> str:
+    template = APEX_RAY_AGENT_BLOCK if agent_skill else APEX_RAY_AGENT_BLOCK_NO_SKILL
+    return _render_agent_artifact_text(template, runtime_version)
 
 
-def _write_agent_skill_files(root: Path, *, agent_files: str, overwrite: bool) -> list[Path]:
+def _agent_skill_templates(runtime_version: str | None) -> tuple[tuple[str, str], ...]:
+    return (
+        ("apex-ray", _render_agent_artifact_text(APEX_RAY_SKILL_TEXT, runtime_version)),
+        ("apex-ray-improve", _render_agent_artifact_text(APEX_RAY_IMPROVE_SKILL_TEXT, runtime_version)),
+    )
+
+
+def _render_agent_artifact_text(template: str, runtime_version: str | None) -> str:
+    runtime_version = _resolve_runtime_version(runtime_version)
+    launcher = render_uvx_command(runtime_version)
+    return APEX_RAY_CLI_COMMAND_RE.sub(launcher, template)
+
+
+def _resolve_runtime_version(runtime_version: str | None) -> str:
+    if runtime_version is not None:
+        return runtime_version
+    from apex_ray import __version__
+
+    return __version__
+
+
+def _write_agent_skill_files(
+    root: Path,
+    *,
+    agent_files: str,
+    overwrite: bool,
+    runtime_version: str | None,
+) -> list[Path]:
     if agent_files not in {"codex", "claude", "both"}:
         raise ConfigError("Unsupported agent-files value. Use none, codex, claude, or both.")
     written: list[Path] = []
-    for skill_name, skill_text in (
-        ("apex-ray", APEX_RAY_SKILL_TEXT),
-        ("apex-ray-improve", APEX_RAY_IMPROVE_SKILL_TEXT),
-    ):
+    for skill_name, skill_text in _agent_skill_templates(runtime_version):
         written.extend(_write_agent_skill(root, skill_name, skill_text, agent_files=agent_files, overwrite=overwrite))
     return written
 
