@@ -12,7 +12,7 @@ from types import SimpleNamespace
 import pytest
 from typer.testing import CliRunner
 
-from apex_ray import __version__
+from apex_ray import __version__, git
 from apex_ray.cli import app
 from apex_ray.cli.common import atomic_write_text
 from apex_ray.diff import parse_unified_diff
@@ -1174,6 +1174,7 @@ def test_gate_pre_push_incremental_retry_reviews_previous_head_delta(tmp_path: P
     monkeypatch.setattr("apex_ray.cli.gate.git.rev_parse", lambda _root, _ref: next(heads))
     monkeypatch.setattr("apex_ray.cli.gate.git.merge_base", lambda _root, _base, _head: "base-1")
     monkeypatch.setattr("apex_ray.cli.gate.git.object_exists", lambda _root, _ref: True)
+    monkeypatch.setattr("apex_ray.cli.gate.git.is_ancestor", lambda _root, _ancestor, _descendant: True)
     monkeypatch.setattr(
         "apex_ray.cli.gate.git.diff_base", lambda _root, _base: _diff_for("src/orders.ts", "old", "full")
     )
@@ -1191,6 +1192,137 @@ def test_gate_pre_push_incremental_retry_reviews_previous_head_delta(tmp_path: P
     assert second.exit_code == 0
     assert diff_calls == [_diff_for("src/orders.ts", "old", "full"), _diff_for("src/orders.ts", "head-1", "HEAD")]
     assert "Mode: incremental" in second.stdout
+
+
+def test_gate_pre_push_rejects_incremental_state_from_divergent_history(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _write_incremental_gate_config(tmp_path)
+    diff_calls: list[str] = []
+    heads = iter([_GATE_HEAD_1, _GATE_HEAD_2])
+
+    def fake_run_review_pipeline(root, diff_text, target_mode, config, **kwargs):
+        diff_calls.append(diff_text)
+        return build_report(
+            ProjectProfile(root=str(root), is_git_repo=True),
+            config,
+            parse_unified_diff(diff_text, target_mode=target_mode, base=kwargs.get("base")),
+        )
+
+    monkeypatch.setattr("apex_ray.cli.gate.git.repo_root", lambda _cwd, **_kwargs: tmp_path)
+    monkeypatch.setattr("apex_ray.cli.gate.git.is_git_repo", lambda _root: True)
+    monkeypatch.setattr("apex_ray.cli.gate.git.rev_parse", lambda _root, _ref: next(heads))
+    monkeypatch.setattr("apex_ray.cli.gate.git.merge_base", lambda _root, _base, _head: _GATE_MERGE_BASE)
+    monkeypatch.setattr("apex_ray.cli.gate.git.object_exists", lambda _root, _ref: True)
+    monkeypatch.setattr(
+        "apex_ray.cli.gate.git.is_ancestor",
+        lambda _root, _ancestor, _descendant: False,
+    )
+    monkeypatch.setattr(
+        "apex_ray.cli.gate.git.diff_base",
+        lambda _root, _base: _diff_for("src/orders.ts", "old", "full"),
+    )
+    monkeypatch.setattr(
+        "apex_ray.cli.gate.git.diff_range",
+        lambda *_args: pytest.fail("divergent state must not select an incremental range"),
+    )
+    monkeypatch.setattr("apex_ray.cli.gate.run_review_pipeline", fake_run_review_pipeline)
+    monkeypatch.setattr("apex_ray.cli.gate.continue_review_from_report", lambda report, **_kwargs: (report, []))
+
+    first = runner.invoke(app, ["gate", "pre-push"], catch_exceptions=False)
+    second = runner.invoke(app, ["gate", "pre-push"], catch_exceptions=False)
+
+    state = json.loads((tmp_path / ".apex-ray" / "reports" / "pre-push-state.json").read_text(encoding="utf-8"))
+    assert first.exit_code == 0
+    assert second.exit_code == 0
+    assert diff_calls == [
+        _diff_for("src/orders.ts", "old", "full"),
+        _diff_for("src/orders.ts", "old", "full"),
+    ]
+    assert "Mode: full" in second.stdout
+    assert "previous gate HEAD is not an ancestor of current HEAD" in second.stdout
+    assert state["head_sha"] == _GATE_HEAD_2
+
+
+@pytest.mark.parametrize(
+    ("fetch_config", "expected_events"),
+    [
+        (
+            "  gates:\n    pre_push:\n      fetch_base: true\n",
+            ["fetch:origin/main", "diff:origin/main"],
+        ),
+        ("", ["diff:origin/main"]),
+    ],
+)
+def test_gate_pre_push_fetch_base_is_explicit_and_precedes_diff(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fetch_config: str,
+    expected_events: list[str],
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    config_path = tmp_path / ".apex-ray" / "config.yml"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(
+        f"review:\n  base: origin/main\n{fetch_config}",
+        encoding="utf-8",
+    )
+    events: list[str] = []
+
+    def fake_run_review_pipeline(root, diff_text, target_mode, config, **kwargs):
+        return build_report(
+            ProjectProfile(root=str(root), is_git_repo=True),
+            config,
+            parse_unified_diff(diff_text, target_mode=target_mode, base=kwargs.get("base")),
+        )
+
+    monkeypatch.setattr("apex_ray.cli.gate.git.repo_root", lambda _cwd, **_kwargs: tmp_path)
+    monkeypatch.setattr("apex_ray.cli.gate.git.is_git_repo", lambda _root: True)
+    monkeypatch.setattr(
+        "apex_ray.cli.gate.git.fetch_remote_tracking_ref",
+        lambda _root, base: events.append(f"fetch:{base}"),
+    )
+    monkeypatch.setattr(
+        "apex_ray.cli.gate.git.diff_base",
+        lambda _root, base: events.append(f"diff:{base}") or _diff_for("src/orders.ts", "old", "new"),
+    )
+    monkeypatch.setattr("apex_ray.cli.gate.run_review_pipeline", fake_run_review_pipeline)
+    monkeypatch.setattr("apex_ray.cli.gate.continue_review_from_report", lambda report, **_kwargs: (report, []))
+
+    result = runner.invoke(app, ["gate", "pre-push"], catch_exceptions=False)
+
+    assert result.exit_code == 0
+    assert events == expected_events
+
+
+def test_gate_pre_push_fetch_base_failure_is_blocking(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    config_path = tmp_path / ".apex-ray" / "config.yml"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(
+        "review:\n  base: origin/main\n  gates:\n    pre_push:\n      fetch_base: true\n",
+        encoding="utf-8",
+    )
+
+    def fail_fetch(_root: Path, _base: str) -> None:
+        raise git.GitError(["fetch"], "network unavailable", 1)
+
+    monkeypatch.setattr("apex_ray.cli.gate.git.repo_root", lambda _cwd, **_kwargs: tmp_path)
+    monkeypatch.setattr("apex_ray.cli.gate.git.fetch_remote_tracking_ref", fail_fetch)
+    monkeypatch.setattr(
+        "apex_ray.cli.gate.run_review_pipeline",
+        lambda *_args, **_kwargs: pytest.fail("review must not start after a configured fetch failure"),
+    )
+
+    result = runner.invoke(app, ["gate", "pre-push"])
+
+    assert result.exit_code == 2
+    assert "network unavailable" in _plain_cli_output(result.output)
 
 
 def test_gate_pre_push_incremental_retry_tracks_reviewer_set_not_order(
@@ -1231,6 +1363,7 @@ review:
     monkeypatch.setattr("apex_ray.cli.gate.git.rev_parse", lambda _root, _ref: next(heads))
     monkeypatch.setattr("apex_ray.cli.gate.git.merge_base", lambda _root, _base, _head: "base-1")
     monkeypatch.setattr("apex_ray.cli.gate.git.object_exists", lambda _root, _ref: True)
+    monkeypatch.setattr("apex_ray.cli.gate.git.is_ancestor", lambda _root, _ancestor, _descendant: True)
     monkeypatch.setattr(
         "apex_ray.cli.gate.git.diff_base",
         lambda _root, _base: _diff_for("src/orders.ts", "old", "full"),
@@ -1741,6 +1874,7 @@ review:
     monkeypatch.setattr("apex_ray.cli.gate.git.rev_parse", lambda _root, _ref: _GATE_HEAD_1)
     monkeypatch.setattr("apex_ray.cli.gate.git.merge_base", lambda _root, _base, _head: _GATE_MERGE_BASE)
     monkeypatch.setattr("apex_ray.cli.gate.git.object_exists", lambda _root, _ref: True)
+    monkeypatch.setattr("apex_ray.cli.gate.git.is_ancestor", lambda _root, _ancestor, _descendant: True)
     monkeypatch.setattr(
         "apex_ray.cli.gate.git.diff_base",
         lambda _root, _base: _diff_for(packs[0].file, "old", "new"),
@@ -1871,6 +2005,7 @@ review:
     monkeypatch.setattr("apex_ray.cli.gate.git.rev_parse", lambda _root, _ref: next(heads))
     monkeypatch.setattr("apex_ray.cli.gate.git.merge_base", lambda _root, _base, _head: _GATE_MERGE_BASE)
     monkeypatch.setattr("apex_ray.cli.gate.git.object_exists", lambda _root, _ref: True)
+    monkeypatch.setattr("apex_ray.cli.gate.git.is_ancestor", lambda _root, _ancestor, _descendant: True)
     monkeypatch.setattr(
         "apex_ray.cli.gate.git.diff_base",
         lambda _root, _base: _diff_for(pack.file, "old", "new"),
@@ -1994,6 +2129,7 @@ review:
     monkeypatch.setattr("apex_ray.cli.gate.git.rev_parse", lambda _root, _ref: next(heads))
     monkeypatch.setattr("apex_ray.cli.gate.git.merge_base", lambda _root, _base, _head: _GATE_MERGE_BASE)
     monkeypatch.setattr("apex_ray.cli.gate.git.object_exists", lambda _root, _ref: True)
+    monkeypatch.setattr("apex_ray.cli.gate.git.is_ancestor", lambda _root, _ancestor, _descendant: True)
     monkeypatch.setattr("apex_ray.cli.gate.git.diff_base", fake_diff_base)
     monkeypatch.setattr(
         "apex_ray.cli.gate.git.diff_range",
@@ -2111,6 +2247,7 @@ def test_gate_pre_push_coverage_resume_keeps_older_carried_blocker(
     monkeypatch.setattr("apex_ray.cli.gate.git.rev_parse", lambda _root, _ref: next(heads))
     monkeypatch.setattr("apex_ray.cli.gate.git.merge_base", lambda _root, _base, _head: _GATE_MERGE_BASE)
     monkeypatch.setattr("apex_ray.cli.gate.git.object_exists", lambda _root, _ref: True)
+    monkeypatch.setattr("apex_ray.cli.gate.git.is_ancestor", lambda _root, _ancestor, _descendant: True)
     monkeypatch.setattr(
         "apex_ray.cli.gate.git.diff_base",
         lambda _root, _base: _diff_for(finding.file, "tenant lookup", "unscoped lookup"),
@@ -2197,6 +2334,7 @@ review:
     monkeypatch.setattr("apex_ray.cli.gate.git.rev_parse", lambda _root, _ref: _GATE_HEAD_1)
     monkeypatch.setattr("apex_ray.cli.gate.git.merge_base", lambda _root, _base, _head: _GATE_MERGE_BASE)
     monkeypatch.setattr("apex_ray.cli.gate.git.object_exists", lambda _root, _ref: True)
+    monkeypatch.setattr("apex_ray.cli.gate.git.is_ancestor", lambda _root, _ancestor, _descendant: True)
     monkeypatch.setattr(
         "apex_ray.cli.gate.git.diff_base",
         lambda _root, _base: _diff_for(pack.file, "old", "new"),
@@ -2295,6 +2433,7 @@ review:
     monkeypatch.setattr("apex_ray.cli.gate.git.rev_parse", lambda _root, _ref: "head-1")
     monkeypatch.setattr("apex_ray.cli.gate.git.merge_base", lambda _root, _base, _head: "base-1")
     monkeypatch.setattr("apex_ray.cli.gate.git.object_exists", lambda _root, _ref: True)
+    monkeypatch.setattr("apex_ray.cli.gate.git.is_ancestor", lambda _root, _ancestor, _descendant: True)
     monkeypatch.setattr("apex_ray.cli.gate.git.diff_base", fake_diff_base)
     monkeypatch.setattr(
         "apex_ray.cli.gate.git.diff_range",
@@ -2337,6 +2476,7 @@ def test_gate_pre_push_incremental_retry_carries_blocker_when_unrelated_delta(tm
     monkeypatch.setattr("apex_ray.cli.gate.git.rev_parse", lambda _root, _ref: next(heads))
     monkeypatch.setattr("apex_ray.cli.gate.git.merge_base", lambda _root, _base, _head: "base-1")
     monkeypatch.setattr("apex_ray.cli.gate.git.object_exists", lambda _root, _ref: True)
+    monkeypatch.setattr("apex_ray.cli.gate.git.is_ancestor", lambda _root, _ancestor, _descendant: True)
     monkeypatch.setattr(
         "apex_ray.cli.gate.git.diff_base", lambda _root, _base: _diff_for("src/orders.ts", "old", "full")
     )
@@ -2396,7 +2536,8 @@ def test_gate_pre_push_incremental_retry_drops_stale_carried_blocker_when_eviden
             context_packs=[context_pack] if report_finding is not None else [],
         )
 
-    def fake_run_git(args, cwd, check=True):
+    def fake_run_git(args, cwd, check=True, *, errors="replace"):
+        assert errors in {"replace", "strict"}
         if args[:1] == ["show"] and args[1].startswith("HEAD:"):
             path = args[1].removeprefix("HEAD:")
             stdout = head_source.get(path, "")
@@ -2408,6 +2549,7 @@ def test_gate_pre_push_incremental_retry_drops_stale_carried_blocker_when_eviden
     monkeypatch.setattr("apex_ray.cli.gate.git.rev_parse", lambda _root, _ref: next(heads))
     monkeypatch.setattr("apex_ray.cli.gate.git.merge_base", lambda _root, _base, _head: "base-1")
     monkeypatch.setattr("apex_ray.cli.gate.git.object_exists", lambda _root, _ref: True)
+    monkeypatch.setattr("apex_ray.cli.gate.git.is_ancestor", lambda _root, _ancestor, _descendant: True)
     monkeypatch.setattr(
         "apex_ray.cli.gate.git.diff_base", lambda _root, _base: _diff_for("src/orders.ts", "old", "full")
     )
@@ -2448,6 +2590,7 @@ def test_gate_pre_push_incremental_retry_resolved_carried_blocker_passes(tmp_pat
     monkeypatch.setattr("apex_ray.cli.gate.git.rev_parse", lambda _root, _ref: next(heads))
     monkeypatch.setattr("apex_ray.cli.gate.git.merge_base", lambda _root, _base, _head: "base-1")
     monkeypatch.setattr("apex_ray.cli.gate.git.object_exists", lambda _root, _ref: True)
+    monkeypatch.setattr("apex_ray.cli.gate.git.is_ancestor", lambda _root, _ancestor, _descendant: True)
     monkeypatch.setattr(
         "apex_ray.cli.gate.git.diff_base", lambda _root, _base: _diff_for("src/orders.ts", "old", "full")
     )
@@ -2511,6 +2654,7 @@ def test_gate_pre_push_incremental_retry_drops_carried_blocker_after_pack_review
     monkeypatch.setattr("apex_ray.cli.gate.git.rev_parse", lambda _root, _ref: next(heads))
     monkeypatch.setattr("apex_ray.cli.gate.git.merge_base", lambda _root, _base, _head: "base-1")
     monkeypatch.setattr("apex_ray.cli.gate.git.object_exists", lambda _root, _ref: True)
+    monkeypatch.setattr("apex_ray.cli.gate.git.is_ancestor", lambda _root, _ancestor, _descendant: True)
     monkeypatch.setattr(
         "apex_ray.cli.gate.git.diff_base", lambda _root, _base: _diff_for("src/orders.ts", "old", "full")
     )
@@ -2556,6 +2700,7 @@ def test_gate_pre_push_incremental_retry_suppresses_carried_finding(tmp_path: Pa
     monkeypatch.setattr("apex_ray.cli.gate.git.rev_parse", lambda _root, _ref: next(heads))
     monkeypatch.setattr("apex_ray.cli.gate.git.merge_base", lambda _root, _base, _head: "base-1")
     monkeypatch.setattr("apex_ray.cli.gate.git.object_exists", lambda _root, _ref: True)
+    monkeypatch.setattr("apex_ray.cli.gate.git.is_ancestor", lambda _root, _ancestor, _descendant: True)
     monkeypatch.setattr(
         "apex_ray.cli.gate.git.diff_base", lambda _root, _base: _diff_for("src/orders.ts", "old", "full")
     )
@@ -2607,6 +2752,7 @@ def test_gate_pre_push_incremental_retry_uncertain_resolution_blocks(tmp_path: P
     monkeypatch.setattr("apex_ray.cli.gate.git.rev_parse", lambda _root, _ref: next(heads))
     monkeypatch.setattr("apex_ray.cli.gate.git.merge_base", lambda _root, _base, _head: "base-1")
     monkeypatch.setattr("apex_ray.cli.gate.git.object_exists", lambda _root, _ref: True)
+    monkeypatch.setattr("apex_ray.cli.gate.git.is_ancestor", lambda _root, _ancestor, _descendant: True)
     monkeypatch.setattr(
         "apex_ray.cli.gate.git.diff_base", lambda _root, _base: _diff_for("src/orders.ts", "old", "full")
     )
@@ -2645,6 +2791,7 @@ def test_gate_pre_push_incremental_retry_uses_resolution_provider(tmp_path: Path
     monkeypatch.setattr("apex_ray.cli.gate.git.rev_parse", lambda _root, _ref: next(heads))
     monkeypatch.setattr("apex_ray.cli.gate.git.merge_base", lambda _root, _base, _head: "base-1")
     monkeypatch.setattr("apex_ray.cli.gate.git.object_exists", lambda _root, _ref: True)
+    monkeypatch.setattr("apex_ray.cli.gate.git.is_ancestor", lambda _root, _ancestor, _descendant: True)
     monkeypatch.setattr(
         "apex_ray.cli.gate.git.diff_base", lambda _root, _base: _diff_for("src/orders.ts", "old", "full")
     )

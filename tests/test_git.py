@@ -8,6 +8,108 @@ import pytest
 from apex_ray import git
 
 
+def test_run_git_decodes_output_as_utf8_without_locale_dependency(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: dict[str, object] = {}
+
+    def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        observed.update(kwargs)
+        return subprocess.CompletedProcess(
+            command,
+            returncode=0,
+            stdout="Unicode: — Привет \N{REPLACEMENT CHARACTER}\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr("apex_ray.git.subprocess.run", fake_run)
+
+    result = git.run_git(["diff"], cwd=tmp_path)
+
+    assert result.stdout == "Unicode: — Привет \N{REPLACEMENT CHARACTER}\n"
+    assert observed["encoding"] == "utf-8"
+    assert observed["errors"] == "replace"
+    assert "text" not in observed
+
+
+def test_run_git_allows_strict_utf8_for_machine_consumed_content(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: dict[str, object] = {}
+
+    def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        observed.update(kwargs)
+        return subprocess.CompletedProcess(command, returncode=0, stdout="content\n", stderr="")
+
+    monkeypatch.setattr("apex_ray.git.subprocess.run", fake_run)
+
+    result = git.run_git(["show", "HEAD:file"], cwd=tmp_path, errors="strict")
+
+    assert result.stdout == "content\n"
+    assert observed["encoding"] == "utf-8"
+    assert observed["errors"] == "strict"
+
+
+def test_fetch_remote_tracking_ref_uses_exact_validated_refspec(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run_git(
+        args: list[str],
+        cwd: Path,
+        check: bool = True,
+        *,
+        timeout: float | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        del check, timeout
+        assert cwd == tmp_path
+        calls.append(args)
+        if args == ["remote"]:
+            return subprocess.CompletedProcess(["git", *args], 0, stdout="origin\nteam/upstream\n", stderr="")
+        if args[:1] == ["check-ref-format"]:
+            return subprocess.CompletedProcess(["git", *args], 0, stdout="", stderr="")
+        if args[:1] == ["fetch"]:
+            return subprocess.CompletedProcess(["git", *args], 0, stdout="", stderr="")
+        raise AssertionError(f"unexpected git call: {args}")
+
+    monkeypatch.setattr("apex_ray.git.run_git", fake_run_git)
+
+    git.fetch_remote_tracking_ref(tmp_path, "refs/remotes/team/upstream/main")
+
+    assert calls[-1] == [
+        "fetch",
+        "--quiet",
+        "--no-tags",
+        "--no-recurse-submodules",
+        "--no-write-fetch-head",
+        "--",
+        "team/upstream",
+        "+refs/heads/main:refs/remotes/team/upstream/main",
+    ]
+
+
+def test_fetch_remote_tracking_ref_rejects_non_remote_base(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "apex_ray.git.run_git",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            ["git", "remote"],
+            0,
+            stdout="origin\n",
+            stderr="",
+        ),
+    )
+
+    with pytest.raises(git.GitRemoteRefError, match="exact remote-tracking ref"):
+        git.fetch_remote_tracking_ref(tmp_path, "main")
+
+
 def test_diff_worktree_includes_untracked_files(tmp_path: Path) -> None:
     subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True, text=True)
     (tmp_path / ".gitignore").write_text("ignored.ts\n", encoding="utf-8")

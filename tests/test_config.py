@@ -70,6 +70,7 @@ def test_init_config_creates_default_file(tmp_path: Path) -> None:
     assert config.triage.events_retention_days == 90
     assert config.gates.pre_push.progress == "auto"
     assert config.gates.pre_push.progress_interval_seconds == 5.0
+    assert config.gates.pre_push.fetch_base is False
     assert config.gates.pre_push.auto_followup_p0_max_pack_reviews == 16
     assert config.gates.pre_push.incremental_retry.enabled is False
     assert config.gates.pre_push.incremental_retry.state_path == ".apex-ray/reports/pre-push-state.json"
@@ -391,6 +392,19 @@ def test_load_config_parses_pre_push_incremental_retry(tmp_path: Path) -> None:
     assert config.gates.pre_push.incremental_retry.enabled is True
     assert config.gates.pre_push.incremental_retry.state_path == ".apex-ray/reports/custom-pre-push-state.json"
     assert config.gates.pre_push.incremental_retry.max_resolution_calls_per_retry == 3
+
+
+def test_load_config_parses_pre_push_fetch_base(tmp_path: Path) -> None:
+    path = tmp_path / ".apex-ray" / "config.yml"
+    path.parent.mkdir()
+    path.write_text(
+        "review:\n  gates:\n    pre_push:\n      fetch_base: true\n",
+        encoding="utf-8",
+    )
+
+    config, _ = load_config(tmp_path)
+
+    assert config.gates.pre_push.fetch_base is True
 
 
 def test_load_config_parses_pre_push_auto_followup_pack_review_cap(tmp_path: Path) -> None:

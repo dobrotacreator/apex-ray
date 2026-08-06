@@ -21,6 +21,10 @@ class GitOutputLimitError(RuntimeError):
     pass
 
 
+class GitRemoteRefError(RuntimeError):
+    pass
+
+
 @dataclass(frozen=True, slots=True)
 class GitNulOutput:
     returncode: int
@@ -37,11 +41,13 @@ def run_git(
     check: bool = True,
     *,
     timeout: float | None = None,
+    errors: str = "replace",
 ) -> subprocess.CompletedProcess[str]:
     proc = subprocess.run(
         ["git", *args],
         cwd=cwd,
-        text=True,
+        encoding="utf-8",
+        errors=errors,
         capture_output=True,
         check=False,
         timeout=timeout,
@@ -327,6 +333,51 @@ def merge_base(cwd: Path, base: str, head: str = "HEAD") -> str:
     return run_git(["merge-base", "--end-of-options", base, head], cwd=cwd).stdout.strip()
 
 
+def is_ancestor(cwd: Path, ancestor: str, descendant: str = "HEAD") -> bool:
+    args = ["merge-base", "--is-ancestor", "--end-of-options", ancestor, descendant]
+    proc = run_git(args, cwd=cwd, check=False)
+    if proc.returncode not in {0, 1}:
+        raise GitError(args, proc.stderr, proc.returncode)
+    return proc.returncode == 0
+
+
 def object_exists(cwd: Path, ref: str) -> bool:
     proc = run_git(["cat-file", "-e", "--end-of-options", f"{ref}^{{commit}}"], cwd=cwd, check=False)
     return proc.returncode == 0
+
+
+def fetch_remote_tracking_ref(cwd: Path, ref: str) -> None:
+    """Fetch one exact remote branch into its matching remote-tracking ref."""
+
+    remote, branch = _split_remote_tracking_ref(cwd, ref)
+    source_ref = f"refs/heads/{branch}"
+    target_ref = f"refs/remotes/{remote}/{branch}"
+    for candidate in (source_ref, target_ref):
+        validation = run_git(["check-ref-format", candidate], cwd=cwd, check=False)
+        if validation.returncode != 0:
+            raise GitRemoteRefError(f"Configured pre-push base {ref!r} is not a valid remote-tracking ref.")
+    run_git(
+        [
+            "fetch",
+            "--quiet",
+            "--no-tags",
+            "--no-recurse-submodules",
+            "--no-write-fetch-head",
+            "--",
+            remote,
+            f"+{source_ref}:{target_ref}",
+        ],
+        cwd=cwd,
+    )
+
+
+def _split_remote_tracking_ref(cwd: Path, ref: str) -> tuple[str, str]:
+    remotes = [line for line in run_git(["remote"], cwd=cwd).stdout.splitlines() if line]
+    for remote in sorted(remotes, key=len, reverse=True):
+        for prefix in (f"refs/remotes/{remote}/", f"{remote}/"):
+            if ref.startswith(prefix) and len(ref) > len(prefix):
+                return remote, ref[len(prefix) :]
+    raise GitRemoteRefError(
+        f"Configured pre-push base {ref!r} is not an exact remote-tracking ref. "
+        "Use '<remote>/<branch>' or 'refs/remotes/<remote>/<branch>'."
+    )

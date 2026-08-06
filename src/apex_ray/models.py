@@ -447,6 +447,7 @@ DEFAULT_AUTO_FOLLOWUP_P0_MAX_PACK_REVIEWS = 16
 
 class PrePushGateConfig(StrictApexModel):
     enabled: bool = True
+    fetch_base: bool = False
     min_finding_severity: FindingSeverity | None = FindingSeverity.HIGH
     require_verified_findings: bool = True
     fail_on_quality_gate: bool = True
