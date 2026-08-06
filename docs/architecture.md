@@ -252,7 +252,7 @@ It creates or updates:
 - `.apex-ray/eval/`: eval support directories; run outputs are ignored.
 - `lefthook.yml`: optional local hook config with an Apex Ray pre-push gate command.
 - `AGENTS.md` / Claude agent files: short pointers for coding agents.
-- `.apex-ray/skills/apex-ray/SKILL.md` for review workflows and `.apex-ray/skills/apex-ray-improve/SKILL.md` for post-merge learning recommendations, plus Codex aliases under `.agents/skills/` and Claude aliases under `.claude/skills/` when enabled.
+- `.apex-ray/skills/apex-ray/SKILL.md` for review workflows and `.apex-ray/skills/apex-ray-improve/SKILL.md` for post-merge learning recommendations, plus Codex skill-directory aliases under `.agents/skills/` and Claude aliases under `.claude/skills/` when enabled. Codex aliases are relative directory symlinks where supported and full directory copies otherwise.
 
 The init command is intentionally conservative: shared config is commit-friendly, local provider/model/cost settings go into `.apex-ray/config.local.yml`, generated Apex Ray outputs stay ignored by `.apex-ray/.gitignore`, and the root `.gitignore` is left untouched.
 

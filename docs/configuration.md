@@ -98,7 +98,7 @@ apex-ray init --refresh-agent-artifacts --dry-run
 apex-ray init --refresh-agent-artifacts
 ```
 
-The refresh preserves user-authored text outside the `<!-- APEX_RAY_START -->` / `<!-- APEX_RAY_END -->` block and rewrites generated skill files. It does not run automatically during review or pre-push, so Apex Ray never changes the working tree while evaluating a diff.
+The refresh preserves user-authored text outside the `<!-- APEX_RAY_START -->` / `<!-- APEX_RAY_END -->` block and refreshes generated skills. For Codex, it also migrates legacy file-level `SKILL.md` symlinks to discoverable skill-directory symlinks, with a full directory-copy fallback on systems where symlinks are unavailable. Conflicting unmanaged skill directories are reported instead of overwritten. Refresh does not run automatically during review or pre-push, so Apex Ray never changes the working tree while evaluating a diff.
 
 ## Local Override Example
 

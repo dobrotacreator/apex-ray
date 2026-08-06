@@ -293,7 +293,7 @@ def doctor(
         typer.echo(f"- Agent artifacts: unable to inspect ({exc})")
     else:
         managed_statuses = [status for status in artifact_statuses if status.status != "unmanaged"]
-        outdated_statuses = [status for status in managed_statuses if status.status == "outdated"]
+        outdated_statuses = [status for status in managed_statuses if status.status != "current"]
         if not managed_statuses:
             typer.echo("- Agent artifacts: not found")
         elif outdated_statuses:
