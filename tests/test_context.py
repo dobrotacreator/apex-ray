@@ -5,7 +5,7 @@ from apex_ray.analyzers import run_python_analyzer, run_typescript_analyzer
 from apex_ray.classify import classify_diff
 from apex_ray.context import _estimated_pack_chars, _finalize_pack, _risk_signals_for_symbols, build_context_packs
 from apex_ray.diff import parse_unified_diff
-from apex_ray.llm import review_cache_key
+from apex_ray.llm import build_review_prompt, build_shallow_review_prompt, review_cache_key
 from apex_ray.models import (
     AnalyzerConfig,
     AnalyzerFile,
@@ -282,6 +282,131 @@ def test_build_context_packs_preserves_fallback_reason_warning() -> None:
 
     assert len(packs) == 1
     assert packs[0].warnings == ["TypeScript analyzer shard failed; using diff-only fallback context."]
+
+
+def test_build_context_packs_keeps_global_analyzer_warnings_out_of_pack_payload() -> None:
+    diff_text = """diff --git a/src/permissions.ts b/src/permissions.ts
+--- a/src/permissions.ts
++++ b/src/permissions.ts
+@@ -1,3 +1,3 @@
+ export function canAccess(role: string): boolean {
+-  return role === 'admin';
++  return role === 'admin' || role === 'support';
+ }
+"""
+    diff = classify_diff(parse_unified_diff(diff_text, TargetMode.PATCH), ignore_patterns=[])
+    result = AnalyzerResult.model_validate(
+        {
+            "language": "typescript",
+            "projectRoot": str(TS_FIXTURE),
+            "files": [
+                {
+                    "path": "src/permissions.ts",
+                    "warnings": ["File-local parser recovery was used."],
+                }
+            ],
+            "warnings": ["Global workspace index warning."],
+            "partial": True,
+            "coverage": {
+                "partial": True,
+                "reasonCodes": ["workspace_index_partial"],
+                "scopes": ["workspace_index"],
+                "failedFileCount": 0,
+            },
+        }
+    )
+
+    packs = build_context_packs([result], diff.files, ReviewConfig(), repo_root=TS_FIXTURE)
+
+    assert len(packs) == 1
+    assert packs[0].warnings == ["File-local parser recovery was used."]
+    assert packs[0].analyzer_coverage is not None
+    assert packs[0].analyzer_coverage.model_dump(mode="json") == {
+        "partial": True,
+        "reason_codes": ["workspace_index_partial"],
+        "scopes": ["workspace_index"],
+        "failed_file_count": 0,
+    }
+    assert "Global workspace index warning." not in packs[0].model_dump_json()
+    prompt = build_review_prompt(packs[0])
+    assert "Global workspace index warning." not in prompt
+    assert "File-local parser recovery was used." in prompt
+
+
+def test_partial_typescript_coverage_reaches_uncovered_and_failed_fallback_packs() -> None:
+    diff_text = """diff --git a/src/permissions.ts b/src/permissions.ts
+--- a/src/permissions.ts
++++ b/src/permissions.ts
+@@ -1,3 +1,3 @@
+ export function canAccess(role: string): boolean {
+-  return role === 'admin';
++  return role === 'admin' || role === 'support';
+ }
+"""
+    diff = classify_diff(parse_unified_diff(diff_text, TargetMode.PATCH), ignore_patterns=[])
+    coverage = {
+        "partial": True,
+        "reasonCodes": ["workspace_index_partial", "changed_file_analysis_incomplete"],
+        "scopes": ["workspace_index", "changed_files"],
+        "failedFileCount": 1,
+    }
+    analyzed_result = AnalyzerResult.model_validate(
+        {
+            "language": "typescript",
+            "projectRoot": str(TS_FIXTURE),
+            "files": [
+                {
+                    "path": "src/permissions.ts",
+                    "warnings": ["File-local parser recovery was used."],
+                    "uncoveredChangedRanges": [[1, 3]],
+                }
+            ],
+            "partial": True,
+            "coverage": coverage,
+        }
+    )
+
+    uncovered_packs = build_context_packs(
+        [analyzed_result],
+        diff.files,
+        ReviewConfig(),
+        repo_root=TS_FIXTURE,
+    )
+    uncovered = next(pack for pack in uncovered_packs if pack.id.endswith("#diff-uncovered"))
+
+    assert uncovered.analyzer_coverage is not None
+    assert uncovered.analyzer_coverage.reason_codes == [
+        "workspace_index_partial",
+        "changed_file_analysis_incomplete",
+    ]
+    assert "File-local parser recovery was used." in uncovered.warnings
+    assert "Analyzer coverage is partial" in build_shallow_review_prompt(uncovered)
+
+    failed_result = AnalyzerResult.model_validate(
+        {
+            "language": "typescript",
+            "projectRoot": str(TS_FIXTURE),
+            "files": [],
+            "partial": True,
+            "coverage": coverage,
+            "failedFiles": ["src/permissions.ts"],
+        }
+    )
+    failed_packs = build_context_packs(
+        [failed_result],
+        diff.files,
+        ReviewConfig(),
+        repo_root=TS_FIXTURE,
+        fallback_reasons_by_path={
+            "src/permissions.ts": "TypeScript analyzer failed; using diff-only fallback context."
+        },
+    )
+
+    assert len(failed_packs) == 1
+    assert failed_packs[0].analyzer_coverage is not None
+    assert failed_packs[0].analyzer_coverage.failed_file_count == 1
+    assert failed_packs[0].warnings == ["TypeScript analyzer failed; using diff-only fallback context."]
+    assert "Analyzer coverage is partial" in build_shallow_review_prompt(failed_packs[0])
 
 
 def test_seeded_bug_fixture_targets_calculate_total(built_ts_analyzer: None) -> None:

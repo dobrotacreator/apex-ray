@@ -64,6 +64,7 @@ export function buildRepoIndex(
   let hits = 0;
   let misses = 0;
   let partial = inventory.partial;
+  let workspacePartial = false;
   let unavailableFileCount = 0;
   const acceptedFileBytesByKey = new Map<string, number>();
   let acceptedBytes = 0;
@@ -76,6 +77,7 @@ export function buildRepoIndex(
   let expansionBudgetWarningEmitted = false;
   const markCollectionStopped = (): void => {
     partial = true;
+    workspacePartial = true;
     if (collectionStopWarningEmitted) return;
     collectionStopWarningEmitted = true;
     warnings.push(
@@ -84,6 +86,7 @@ export function buildRepoIndex(
   };
   const markSemanticEntryLimitReached = (): void => {
     partial = true;
+    workspacePartial = true;
     if (semanticBudgetWarningEmitted) return;
     semanticBudgetWarningEmitted = true;
     warnings.push(
@@ -92,6 +95,7 @@ export function buildRepoIndex(
   };
   const markModuleTargetExpansionLimitReached = (): void => {
     partial = true;
+    workspacePartial = true;
     if (expansionBudgetWarningEmitted) return;
     expansionBudgetWarningEmitted = true;
     warnings.push(
@@ -126,6 +130,7 @@ export function buildRepoIndex(
   };
   const markUnavailable = (relPath: string, reason: string): void => {
     partial = true;
+    workspacePartial = true;
     unavailableFileCount += 1;
     if (unavailableFileCount <= 10) {
       warnings.push(
@@ -150,6 +155,7 @@ export function buildRepoIndex(
       additionalBytes > ANALYZER_SOURCE_BYTE_LIMIT - acceptedBytes
     ) {
       partial = true;
+      workspacePartial = true;
       if (!sourceBudgetWarningEmitted) {
         sourceBudgetWarningEmitted = true;
         warnings.push(
@@ -326,11 +332,13 @@ export function buildRepoIndex(
     fileIdentities,
     cacheStats,
     partial,
+    workspacePartial,
   };
   let lateExpansionWarningEmitted = false;
   let lateCacheSuppressionAttempted = false;
   repoIndex.markModuleResolutionPartial = (): void => {
     repoIndex.partial = true;
+    repoIndex.workspacePartial = true;
     if (!lateExpansionWarningEmitted) {
       lateExpansionWarningEmitted = true;
       warnings.push(

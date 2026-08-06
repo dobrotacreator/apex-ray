@@ -21,9 +21,9 @@ from apex_ray.models import (
 )
 
 LLM_CACHE_VERSION = "apex-ray-llm-cache-v2"
-REVIEW_PROMPT_VERSION = "review-v10"
-REVIEW_SHALLOW_PROMPT_VERSION = "review-shallow-v3"
-VERIFIER_PROMPT_VERSION = "verify-v10"
+REVIEW_PROMPT_VERSION = "review-v11"
+REVIEW_SHALLOW_PROMPT_VERSION = "review-shallow-v4"
+VERIFIER_PROMPT_VERSION = "verify-v11"
 DEFAULT_CACHE_DIR = ".apex-ray/cache/llm"
 
 

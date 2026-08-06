@@ -21,9 +21,15 @@ from pydantic import ValidationError
 from apex_ray.discovery import DISCOVERY_IGNORED_DIRS
 from apex_ray.models import (
     AnalyzerConfig,
+    AnalyzerCoverageScope,
+    AnalyzerCoverageSignal,
     AnalyzerIndexCacheStats,
+    AnalyzerMetrics,
+    AnalyzerPartialReasonCode,
     AnalyzerResult,
     AnalyzerShardFailure,
+    AnalyzerShardMetrics,
+    AnalyzerWarningSummary,
     ChangedFile,
     FileKind,
     RiskSeverity,
@@ -571,6 +577,7 @@ def run_typescript_analyzer(
     deadline = started_at + total_timeout_seconds
     with tempfile.TemporaryDirectory(prefix="apex-ray-typescript-inventory-") as inventory_dir:
         file_manifest_path = Path(inventory_dir) / "files.json"
+        manifest_started_at = time.monotonic()
         _write_typescript_file_manifest(
             repo_root,
             file_manifest_path,
@@ -579,7 +586,8 @@ def run_typescript_analyzer(
             deadline=deadline,
             total_timeout_seconds=total_timeout_seconds,
         )
-        return _run_typescript_analyzer_shards(
+        manifest_duration_ms = _monotonic_elapsed_ms(manifest_started_at)
+        result = _run_typescript_analyzer_shards(
             repo_root,
             changed_files,
             config,
@@ -589,6 +597,10 @@ def run_typescript_analyzer(
             deadline=deadline,
             total_timeout_seconds=total_timeout_seconds,
         )
+        if result.metrics is not None:
+            result.metrics.wall_duration_ms = _monotonic_elapsed_ms(started_at)
+            result.metrics.stage_durations_ms["manifest"] = manifest_duration_ms
+        return result
 
 
 def _run_typescript_analyzer_shards(
@@ -603,7 +615,9 @@ def _run_typescript_analyzer_shards(
     total_timeout_seconds: float,
 ) -> AnalyzerResult:
     results: list[AnalyzerResult] = []
+    successful_shard_indexes: list[int] = []
     failures: list[AnalyzerShardFailure] = []
+    failed_shard_metrics: list[AnalyzerShardMetrics] = []
     large_change_set_size = len(changed_files) if len(changed_files) >= config.large_change_file_threshold else None
     for index, shard in enumerate(shards, start=1):
         remaining_seconds = deadline - time.monotonic()
@@ -611,7 +625,7 @@ def _run_typescript_analyzer_shards(
             timeout_error = AnalyzerError(
                 f"TypeScript analyzer total timeout after {_format_seconds(total_timeout_seconds)}"
             )
-            failures.extend(
+            skipped_failures = [
                 _shard_failure(
                     skipped_index,
                     len(shards),
@@ -620,22 +634,40 @@ def _run_typescript_analyzer_shards(
                     status="timeout",
                 )
                 for skipped_index, skipped_shard in enumerate(shards[index - 1 :], start=index)
-            )
+            ]
+            failures.extend(skipped_failures)
+            failed_shard_metrics.extend(_failed_shard_metrics(failure, duration_ms=0) for failure in skipped_failures)
             break
+        shard_started_at = time.monotonic()
         try:
-            results.append(
-                _run_typescript_analyzer_shard(
-                    repo_root,
-                    script,
-                    shard,
-                    config,
-                    timeout_seconds=min(config.timeout_seconds, remaining_seconds),
-                    large_change_set_size=large_change_set_size,
-                    file_manifest_path=file_manifest_path,
+            shard_result = _run_typescript_analyzer_shard(
+                repo_root,
+                script,
+                shard,
+                config,
+                timeout_seconds=min(config.timeout_seconds, remaining_seconds),
+                large_change_set_size=large_change_set_size,
+                file_manifest_path=file_manifest_path,
+            )
+            shard_duration_ms = _monotonic_elapsed_ms(shard_started_at)
+            _annotate_successful_shard(
+                shard_result,
+                index=index,
+                total=len(shards),
+                changed_file_count=len(shard),
+                duration_ms=shard_duration_ms,
+            )
+            results.append(shard_result)
+            successful_shard_indexes.append(index)
+        except AnalyzerError as exc:
+            failure = _shard_failure(index, len(shards), shard, exc)
+            failures.append(failure)
+            failed_shard_metrics.append(
+                _failed_shard_metrics(
+                    failure,
+                    duration_ms=_monotonic_elapsed_ms(shard_started_at),
                 )
             )
-        except AnalyzerError as exc:
-            failures.append(_shard_failure(index, len(shards), shard, exc))
 
     if not results:
         if len(shards) == 1 and len(failures) == 1:
@@ -645,12 +677,23 @@ def _run_typescript_analyzer_shards(
             + "; ".join(_format_shard_failure(failure) for failure in failures)
         )
 
-    result = _merge_analyzer_results(results)
+    result = _merge_analyzer_results(
+        results,
+        shard_indexes=successful_shard_indexes,
+        total_shards=len(shards),
+    )
     if failures:
-        result.warnings.append(
-            f"Returning partial TypeScript analyzer result because {len(failures)} of {len(shards)} shards failed."
+        _append_analyzer_warning(
+            result,
+            f"Returning partial TypeScript analyzer result because {len(failures)} of {len(shards)} shards failed.",
+            shard_indexes=[failure.index for failure in failures],
         )
-        result.warnings.extend(_format_shard_failure(failure) for failure in failures)
+        for failure in failures:
+            _append_analyzer_warning(
+                result,
+                _format_shard_failure(failure),
+                shard_indexes=[failure.index],
+            )
         result.partial = True
         outer_failed_files = [path for failure in failures for path in failure.files]
         result.failed_files = list(dict.fromkeys([*result.failed_files, *outer_failed_files]))
@@ -666,7 +709,142 @@ def _run_typescript_analyzer_shards(
             retained_failure_keys.add(failure_key)
             combined_shard_failures.append(failure)
         result.shard_failures = combined_shard_failures
+        failure_reason_codes: list[AnalyzerPartialReasonCode] = list(
+            dict.fromkeys(
+                [
+                    *(result.coverage.reason_codes if result.coverage is not None else ["partial_reason_unspecified"]),
+                    *(_shard_partial_reason_code(failure.status) for failure in failures),
+                    "changed_file_analysis_incomplete",
+                ]
+            )
+        )
+        result.coverage = AnalyzerCoverageSignal(
+            partial=True,
+            reasonCodes=failure_reason_codes,
+            scopes=list(
+                dict.fromkeys(
+                    [
+                        *(result.coverage.scopes if result.coverage is not None else ["analyzer"]),
+                        "shards",
+                        "changed_files",
+                    ]
+                )
+            ),
+            failedFileCount=len(result.failed_files),
+        )
+        if result.metrics is None:
+            result.metrics = AnalyzerMetrics()
+        result.metrics.shards.extend(failed_shard_metrics)
+        result.metrics.shards.sort(key=lambda shard: shard.index)
+        result.metrics.wall_duration_ms = sum(shard.wall_duration_ms for shard in result.metrics.shards)
     return result
+
+
+def _annotate_successful_shard(
+    result: AnalyzerResult,
+    *,
+    index: int,
+    total: int,
+    changed_file_count: int,
+    duration_ms: int,
+) -> None:
+    result_is_partial = _analyzer_result_is_partial(result)
+    if result.coverage is None:
+        result.coverage = AnalyzerCoverageSignal(
+            partial=result_is_partial,
+            reasonCodes=["partial_reason_unspecified"] if result_is_partial else [],
+            scopes=["analyzer"] if result_is_partial else [],
+            failedFileCount=len(result.failed_files),
+        )
+    status: Literal["complete", "partial", "failed", "timeout", "skipped"] = (
+        "timeout"
+        if any(failure.status == "timeout" for failure in result.shard_failures)
+        else "partial"
+        if result_is_partial
+        else "complete"
+    )
+    source_metrics = result.metrics
+    source_shard = (
+        source_metrics.shards[0] if source_metrics is not None and source_metrics.shards else AnalyzerShardMetrics()
+    )
+    cache_hits = result.index_cache.hits if result.index_cache is not None else source_shard.index_cache_hits
+    cache_misses = result.index_cache.misses if result.index_cache is not None else source_shard.index_cache_misses
+    shard_metrics = source_shard.model_copy(
+        update={
+            "index": index,
+            "total": total,
+            "status": status,
+            "wall_duration_ms": duration_ms,
+            "changed_file_count": changed_file_count,
+            "analyzed_file_count": len(result.files),
+            "failed_file_count": len(result.failed_files),
+            "warning_count": sum(summary.occurrences for summary in result.warning_summaries)
+            if result.warning_summaries
+            else len(result.warnings),
+            "partial_reason_codes": list(result.coverage.reason_codes),
+            "index_cache_hits": cache_hits,
+            "index_cache_misses": cache_misses,
+        }
+    )
+    result.metrics = AnalyzerMetrics(
+        wallDurationMs=duration_ms,
+        stageDurationsMs=dict(source_metrics.stage_durations_ms) if source_metrics is not None else {},
+        shards=[shard_metrics],
+    )
+
+
+def _failed_shard_metrics(
+    failure: AnalyzerShardFailure,
+    *,
+    duration_ms: int,
+) -> AnalyzerShardMetrics:
+    return AnalyzerShardMetrics(
+        index=failure.index,
+        total=failure.total,
+        status=failure.status,
+        wallDurationMs=duration_ms,
+        changedFileCount=len(failure.files),
+        analyzedFileCount=0,
+        failedFileCount=len(failure.files),
+        warningCount=1,
+        partialReasonCodes=[
+            _shard_partial_reason_code(failure.status),
+            "changed_file_analysis_incomplete",
+        ],
+    )
+
+
+def _shard_partial_reason_code(
+    status: Literal["failed", "timeout", "skipped"],
+) -> AnalyzerPartialReasonCode:
+    if status == "failed":
+        return "shard_failed"
+    if status == "timeout":
+        return "shard_timeout"
+    return "shard_skipped"
+
+
+def _append_analyzer_warning(
+    result: AnalyzerResult,
+    message: str,
+    *,
+    shard_indexes: list[int],
+) -> None:
+    if message not in result.warnings:
+        result.warnings.append(message)
+    for summary in result.warning_summaries:
+        if summary.message != message:
+            continue
+        summary.occurrences += 1
+        summary.shard_indexes = list(dict.fromkeys([*summary.shard_indexes, *shard_indexes]))
+        return
+    result.warning_summaries.append(
+        AnalyzerWarningSummary(
+            message=message,
+            occurrences=1,
+            shardIndexes=list(dict.fromkeys(shard_indexes)),
+        )
+    )
 
 
 def _run_typescript_analyzer_shard(
@@ -2924,6 +3102,10 @@ def _format_seconds(seconds: float) -> str:
     return f"{seconds:.1f}s"
 
 
+def _monotonic_elapsed_ms(started_at: float) -> int:
+    return max(0, round((time.monotonic() - started_at) * 1000))
+
+
 def _analysis_time_budget_ms(timeout_seconds: float) -> int:
     margin_seconds = min(5.0, max(0.25, timeout_seconds * 0.05))
     budget_seconds = max(0.001, timeout_seconds - margin_seconds)
@@ -2957,11 +3139,19 @@ def _format_shard_failure(failure: AnalyzerShardFailure) -> str:
     return f"TypeScript analyzer shard {failure.index}/{failure.total} failed for {preview}: {failure.reason}"
 
 
-def _merge_analyzer_results(results: list[AnalyzerResult]) -> AnalyzerResult:
+def _merge_analyzer_results(
+    results: list[AnalyzerResult],
+    *,
+    shard_indexes: list[int] | None = None,
+    total_shards: int | None = None,
+) -> AnalyzerResult:
     first = results[0]
-    warnings: list[str] = []
-    for result in results:
-        warnings.extend(result.warnings)
+    source_shard_indexes = shard_indexes or list(range(1, len(results) + 1))
+    if len(source_shard_indexes) != len(results):
+        raise ValueError("TypeScript analyzer result/shard index count mismatch")
+    total_shards = total_shards or len(results)
+    warnings, warning_summaries = _merge_warning_summaries(results, source_shard_indexes)
+    failed_files = list(dict.fromkeys(path for result in results for path in result.failed_files))
 
     tsconfig_paths = {result.tsconfig_path for result in results}
     tsconfig_path = tsconfig_paths.pop() if len(tsconfig_paths) == 1 else None
@@ -2971,10 +3161,120 @@ def _merge_analyzer_results(results: list[AnalyzerResult]) -> AnalyzerResult:
         tsconfigPath=tsconfig_path,
         files=[file for result in results for file in result.files],
         warnings=warnings,
+        warningSummaries=warning_summaries,
         indexCache=_merge_index_cache_stats(results),
-        partial=any(result.partial for result in results),
-        failedFiles=[path for result in results for path in result.failed_files],
-        shardFailures=[failure for result in results for failure in result.shard_failures],
+        partial=any(_analyzer_result_is_partial(result) for result in results),
+        coverage=_merge_analyzer_coverage(results, failed_files),
+        metrics=_merge_analyzer_metrics(results, source_shard_indexes, total_shards),
+        failedFiles=failed_files,
+        shardFailures=[
+            failure.model_copy(update={"index": shard_index, "total": total_shards})
+            for result, shard_index in zip(results, source_shard_indexes, strict=True)
+            for failure in result.shard_failures
+        ],
+    )
+
+
+def _merge_warning_summaries(
+    results: list[AnalyzerResult],
+    source_shard_indexes: list[int] | None = None,
+) -> tuple[list[str], list[AnalyzerWarningSummary]]:
+    ordered_messages: list[str] = []
+    occurrence_counts: dict[str, int] = {}
+    shard_indexes: dict[str, list[int]] = {}
+
+    def add(message: str, occurrences: int, shard_index: int) -> None:
+        if message not in occurrence_counts:
+            ordered_messages.append(message)
+            occurrence_counts[message] = 0
+            shard_indexes[message] = []
+        occurrence_counts[message] += occurrences
+        if shard_index not in shard_indexes[message]:
+            shard_indexes[message].append(shard_index)
+
+    source_shard_indexes = source_shard_indexes or list(range(1, len(results) + 1))
+    for result, shard_index in zip(results, source_shard_indexes, strict=True):
+        summarized_messages: set[str] = set()
+        for summary in result.warning_summaries:
+            add(summary.message, summary.occurrences, shard_index)
+            summarized_messages.add(summary.message)
+        for warning in result.warnings:
+            if warning in summarized_messages:
+                continue
+            add(warning, 1, shard_index)
+
+    return ordered_messages, [
+        AnalyzerWarningSummary(
+            message=message,
+            occurrences=occurrence_counts[message],
+            shardIndexes=shard_indexes[message],
+        )
+        for message in ordered_messages
+    ]
+
+
+def _merge_analyzer_coverage(
+    results: list[AnalyzerResult],
+    failed_files: list[str],
+) -> AnalyzerCoverageSignal | None:
+    merged_partial = any(_analyzer_result_is_partial(result) for result in results)
+    if not merged_partial and not any(result.coverage is not None for result in results):
+        return None
+    reason_codes: list[AnalyzerPartialReasonCode] = []
+    scopes: list[AnalyzerCoverageScope] = []
+    reported_failed_files = 0
+    for result in results:
+        if result.coverage is None:
+            if result.partial and "partial_reason_unspecified" not in reason_codes:
+                reason_codes.append("partial_reason_unspecified")
+            continue
+        reported_failed_files += result.coverage.failed_file_count
+        for scope in result.coverage.scopes:
+            if scope not in scopes:
+                scopes.append(scope)
+        for reason_code in result.coverage.reason_codes:
+            if reason_code not in reason_codes:
+                reason_codes.append(reason_code)
+    if merged_partial and not reason_codes:
+        reason_codes.append("partial_reason_unspecified")
+    if merged_partial and not scopes:
+        scopes.append("analyzer")
+    return AnalyzerCoverageSignal(
+        partial=merged_partial,
+        reasonCodes=reason_codes,
+        scopes=scopes,
+        failedFileCount=max(len(failed_files), reported_failed_files),
+    )
+
+
+def _analyzer_result_is_partial(result: AnalyzerResult) -> bool:
+    return result.partial or (result.coverage is not None and result.coverage.partial)
+
+
+def _merge_analyzer_metrics(
+    results: list[AnalyzerResult],
+    source_shard_indexes: list[int],
+    total_shards: int,
+) -> AnalyzerMetrics | None:
+    result_metrics = [
+        (result.metrics, shard_index)
+        for result, shard_index in zip(results, source_shard_indexes, strict=True)
+        if result.metrics is not None
+    ]
+    if not result_metrics:
+        return None
+    stage_durations_ms: dict[str, int] = {}
+    shards: list[AnalyzerShardMetrics] = []
+    for metrics, shard_index in result_metrics:
+        assert metrics is not None
+        for stage, duration_ms in metrics.stage_durations_ms.items():
+            stage_durations_ms[stage] = stage_durations_ms.get(stage, 0) + duration_ms
+        source_shard = metrics.shards[0] if metrics.shards else AnalyzerShardMetrics()
+        shards.append(source_shard.model_copy(update={"index": shard_index, "total": total_shards}))
+    return AnalyzerMetrics(
+        wallDurationMs=sum(metrics.wall_duration_ms for metrics, _ in result_metrics),
+        stageDurationsMs=stage_durations_ms,
+        shards=shards,
     )
 
 

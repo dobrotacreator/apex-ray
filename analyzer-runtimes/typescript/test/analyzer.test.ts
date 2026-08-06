@@ -84,6 +84,23 @@ test("analyzer reports changed symbols, call references, and contracts", () => {
     assert.equal(result.files.length, 1);
     assert.equal(result.files[0].path, "src/cart.ts");
     assert.deepEqual(result.warnings, []);
+    assert.deepEqual(result.coverage, {
+      partial: false,
+      reasonCodes: [],
+      scopes: [],
+      failedFileCount: 0,
+    });
+    assert.ok(result.metrics.wallDurationMs >= 0);
+    assert.deepEqual(Object.keys(result.metrics.stageDurationsMs), [
+      "inventory",
+      "program_contexts",
+      "workspace_index",
+      "changed_files",
+    ]);
+    assert.equal(result.metrics.shards.length, 1);
+    assert.equal(result.metrics.shards[0].changedFileCount, 1);
+    assert.equal(result.metrics.shards[0].analyzedFileCount, 1);
+    assert.equal(result.metrics.shards[0].status, "complete");
 
     const changedSymbol = result.files[0].changedSymbols.find((symbol) => symbol.name === "calculateTotal");
     assert.ok(changedSymbol);
@@ -146,7 +163,12 @@ test("analyzer library API matches the CLI JSON contract", () => {
     const cliResult = runAnalyzer(repo, args);
     const apiResult = runAnalyzerInProcess(repo, args);
 
-    assert.deepEqual(apiResult, cliResult);
+    const { metrics: cliMetrics, ...cliStableResult } = cliResult;
+    const { metrics: apiMetrics, ...apiStableResult } = apiResult;
+    assert.deepEqual(apiStableResult, cliStableResult);
+    assertAnalyzerMetricDurations(cliMetrics);
+    assertAnalyzerMetricDurations(apiMetrics);
+    assert.deepEqual(analyzerMetricsShape(apiMetrics), analyzerMetricsShape(cliMetrics));
     const changedSymbol = apiResult.files[0].changedSymbols.find((symbol) => symbol.name === "changed");
     assert.ok(changedSymbol);
     assert.ok(
@@ -158,6 +180,37 @@ test("analyzer library API matches the CLI JSON contract", () => {
     fs.rmSync(repo, { recursive: true, force: true });
   }
 });
+
+function assertAnalyzerMetricDurations(metrics: AnalyzerResult["metrics"]): void {
+  assertFiniteNonNegativeDuration(metrics.wallDurationMs, "analyzer wall duration");
+  for (const [stage, duration] of Object.entries(metrics.stageDurationsMs)) {
+    assertFiniteNonNegativeDuration(duration, `analyzer stage ${stage}`);
+  }
+  for (const shard of metrics.shards) {
+    assertFiniteNonNegativeDuration(shard.wallDurationMs, `shard ${shard.index} wall duration`);
+    for (const [stage, duration] of Object.entries(shard.stageDurationsMs)) {
+      assertFiniteNonNegativeDuration(duration, `shard ${shard.index} stage ${stage}`);
+    }
+  }
+}
+
+function assertFiniteNonNegativeDuration(value: number, label: string): void {
+  assert.ok(Number.isFinite(value) && value >= 0, `${label} must be finite and non-negative`);
+}
+
+function analyzerMetricsShape(metrics: AnalyzerResult["metrics"]): object {
+  return {
+    stageNames: Object.keys(metrics.stageDurationsMs),
+    shards: metrics.shards.map(
+      ({ wallDurationMs, stageDurationsMs, ...shard }) => ({
+        ...shard,
+        stageNames: Object.keys(stageDurationsMs),
+        hasNonNegativeWallDuration: wallDurationMs >= 0,
+      }),
+    ),
+    hasNonNegativeWallDuration: metrics.wallDurationMs >= 0,
+  };
+}
 
 test("configured programs analyze changed JavaScript roots when allowJs is disabled", () => {
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), "apex-ray-ts-analyzer-configured-js-"));
@@ -1867,6 +1920,12 @@ test("focused programs cap supplemental ambient declaration roots deterministica
           warning.includes("ambient declaration coverage is partial"),
       ),
     );
+    assert.deepEqual(result.coverage, {
+      partial: true,
+      reasonCodes: ["program_context_incomplete"],
+      scopes: ["program_contexts"],
+      failedFileCount: 0,
+    });
   } finally {
     fs.rmSync(repo, { recursive: true, force: true });
   }
@@ -2560,6 +2619,13 @@ test("config-backed programs reject oversized changed roots as partial failures"
           warning.includes("compiler context is partial"),
       ),
     );
+    assert.ok(result.coverage.reasonCodes.includes("program_context_incomplete"));
+    assert.ok(result.coverage.reasonCodes.includes("changed_file_analysis_incomplete"));
+    assert.equal(result.coverage.reasonCodes.includes("repository_inventory_partial"), false);
+    assert.ok(result.coverage.reasonCodes.includes("workspace_index_partial"));
+    assert.ok(result.coverage.scopes.includes("program_contexts"));
+    assert.equal(result.coverage.scopes.includes("repository_inventory"), false);
+    assert.ok(result.coverage.scopes.includes("workspace_index"));
   } finally {
     fs.rmSync(repo, { recursive: true, force: true });
   }
@@ -2709,6 +2775,14 @@ test("analyzer returns partial JSON when the internal budget is exhausted", () =
       ),
     );
     assert.ok(result.warnings.some((warning) => warning.includes("internal budget exhausted")));
+    assert.equal(result.coverage.partial, true);
+    assert.ok(result.coverage.reasonCodes.includes("analysis_time_budget_exhausted"));
+    assert.ok(result.coverage.reasonCodes.includes("changed_file_analysis_incomplete"));
+    assert.ok(result.coverage.scopes.includes("analyzer"));
+    assert.ok(result.coverage.scopes.includes("changed_files"));
+    assert.equal(result.coverage.failedFileCount, 2);
+    assert.equal(result.metrics.shards[0].status, "timeout");
+    assert.ok(result.metrics.wallDurationMs >= 0);
   } finally {
     fs.rmSync(repo, { recursive: true, force: true });
   }

@@ -922,6 +922,7 @@ class AnalyzerFile(ApexModel):
         default_factory=list,
         alias="uncoveredChangedRanges",
     )
+    warnings: list[str] = Field(default_factory=list)
 
 
 class AnalyzerIndexCacheStats(ApexModel):
@@ -940,14 +941,74 @@ class AnalyzerShardFailure(ApexModel):
     status: Literal["failed", "timeout", "skipped"] = "failed"
 
 
+class AnalyzerWarningSummary(ApexModel):
+    message: str
+    occurrences: int = Field(default=1, ge=1)
+    shard_indexes: list[int] = Field(default_factory=list, alias="shardIndexes")
+
+
+AnalyzerPartialReasonCode = Literal[
+    "repository_inventory_partial",
+    "configuration_discovery_partial",
+    "workspace_index_partial",
+    "analysis_time_budget_exhausted",
+    "program_context_incomplete",
+    "changed_file_analysis_incomplete",
+    "shard_failed",
+    "shard_timeout",
+    "shard_skipped",
+    "partial_reason_unspecified",
+]
+AnalyzerCoverageScope = Literal[
+    "analyzer",
+    "repository_inventory",
+    "configuration",
+    "workspace_index",
+    "program_contexts",
+    "changed_files",
+    "shards",
+]
+
+
+class AnalyzerCoverageSignal(ApexModel):
+    partial: bool = False
+    reason_codes: list[AnalyzerPartialReasonCode] = Field(default_factory=list, alias="reasonCodes")
+    scopes: list[AnalyzerCoverageScope] = Field(default_factory=list)
+    failed_file_count: int = Field(default=0, alias="failedFileCount", ge=0)
+
+
+class AnalyzerShardMetrics(ApexModel):
+    index: int = Field(default=1, ge=1)
+    total: int = Field(default=1, ge=1)
+    status: Literal["complete", "partial", "failed", "timeout", "skipped"] = "complete"
+    wall_duration_ms: int = Field(default=0, alias="wallDurationMs", ge=0)
+    stage_durations_ms: dict[str, int] = Field(default_factory=dict, alias="stageDurationsMs")
+    changed_file_count: int = Field(default=0, alias="changedFileCount", ge=0)
+    analyzed_file_count: int = Field(default=0, alias="analyzedFileCount", ge=0)
+    failed_file_count: int = Field(default=0, alias="failedFileCount", ge=0)
+    warning_count: int = Field(default=0, alias="warningCount", ge=0)
+    partial_reason_codes: list[AnalyzerPartialReasonCode] = Field(default_factory=list, alias="partialReasonCodes")
+    index_cache_hits: int = Field(default=0, alias="indexCacheHits", ge=0)
+    index_cache_misses: int = Field(default=0, alias="indexCacheMisses", ge=0)
+
+
+class AnalyzerMetrics(ApexModel):
+    wall_duration_ms: int = Field(default=0, alias="wallDurationMs", ge=0)
+    stage_durations_ms: dict[str, int] = Field(default_factory=dict, alias="stageDurationsMs")
+    shards: list[AnalyzerShardMetrics] = Field(default_factory=list)
+
+
 class AnalyzerResult(ApexModel):
     language: str
     project_root: str = Field(alias="projectRoot")
     tsconfig_path: str | None = Field(default=None, alias="tsconfigPath")
     files: list[AnalyzerFile] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+    warning_summaries: list[AnalyzerWarningSummary] = Field(default_factory=list, alias="warningSummaries")
     index_cache: AnalyzerIndexCacheStats | None = Field(default=None, alias="indexCache")
     partial: bool = False
+    coverage: AnalyzerCoverageSignal | None = None
+    metrics: AnalyzerMetrics | None = None
     failed_files: list[str] = Field(default_factory=list, alias="failedFiles")
     shard_failures: list[AnalyzerShardFailure] = Field(default_factory=list, alias="shardFailures")
 
@@ -1011,6 +1072,7 @@ class ContextPack(ApexModel):
     memory_omissions: list[MemoryOmission] = Field(default_factory=list)
     reviewer: ReviewerPromptContext | None = None
     warnings: list[str] = Field(default_factory=list)
+    analyzer_coverage: AnalyzerCoverageSignal | None = None
     stats: ContextPackStats = Field(default_factory=ContextPackStats)
 
 

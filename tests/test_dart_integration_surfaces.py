@@ -293,9 +293,9 @@ def test_dart_prompts_cover_flutter_failure_modes_without_republishing_diagnosti
 
 
 def test_dart_prompt_changes_bump_all_cache_versions() -> None:
-    assert REVIEW_PROMPT_VERSION == "review-v10"
-    assert REVIEW_SHALLOW_PROMPT_VERSION == "review-shallow-v3"
-    assert VERIFIER_PROMPT_VERSION == "verify-v10"
+    assert REVIEW_PROMPT_VERSION == "review-v11"
+    assert REVIEW_SHALLOW_PROMPT_VERSION == "review-shallow-v4"
+    assert VERIFIER_PROMPT_VERSION == "verify-v11"
 
 
 def test_doctor_reports_resolved_dart_toolchain_without_eager_imports(

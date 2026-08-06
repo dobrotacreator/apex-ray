@@ -125,6 +125,7 @@ def _build_review_prompt(
         "Review exactly one context pack from a code diff.\n"
         f"{_focused_reviewer_guidance(pack)}"
         f"{_language_review_guidance(pack)}\n"
+        f"{_analyzer_coverage_guidance(pack)}"
         "Report only concrete issues caused by the diff. Do not report style nits, generic advice, or CI/linter findings.\n"
         "Start from diff_snippet and changed_snippets, then use impact_notes only as navigation hints.\n"
         "Use context layers deliberately: references/reference_snippets show callers and consumers; callee_snippets show called contracts, ports, state machines, and side-effect boundaries; contract_snippets show schemas, DTOs, and type contracts; metadata_snippets show framework boundaries such as routes, guards, permissions, DI, request parameters, and module providers; related_test_snippets show intended behavior.\n"
@@ -156,7 +157,9 @@ def _build_shallow_review_prompt(
         "Review exactly one compact code context pack from a diff.\n"
         f"{_focused_reviewer_guidance(pack)}"
         f"{_language_shallow_review_guidance(pack)}\n"
-        "Use only the supplied diff_snippet, changed_snippets, risk_signals, rules, and memory hints.\n"
+        f"{_analyzer_coverage_guidance(pack)}"
+        "Use only the supplied diff_snippet, changed_snippets, risk_signals, file-local warnings, "
+        "analyzer_coverage, rules, and memory hints.\n"
         "This pass optimizes breadth and recall on large PRs; report only concrete diff-caused issues visible in this compact context.\n"
         "Do not infer from missing callers, missing schemas, or absent files. Do not report style nits, generic advice, or CI/linter findings.\n"
         "For strict project rules and high-risk signals, look for direct violations in the changed lines and snippets.\n"
@@ -179,6 +182,7 @@ def build_verifier_prompt(finding: Finding, pack: ContextPack) -> str:
         "Approve concrete diff-caused violations of supplied strict project rules when the changed code clearly violates the rule; a strict safety, boundary, or project-policy violation is actionable even when the immediate failure mode is policy drift or future boundary risk rather than a current runtime exception.\n"
         "Still reject generic style preferences that are not tied to a supplied strict rule or concrete behavioral risk.\n"
         "Treat impact_notes as navigation hints only; reject if the concrete diff/snippet evidence does not support the finding.\n"
+        f"{_analyzer_coverage_guidance(pack)}"
         "Reject if context_pack_id differs from the supplied context pack id, or if finding.file is not present in any supplied context layer: changed snippets, references, callees, contracts, metadata, or related tests.\n"
         "Use context layers deliberately: references show consumers, callees show called contracts and side-effect boundaries, contracts show schemas/DTO/type requirements, metadata shows framework/route/permission/DI boundaries, and related tests show intended behavior.\n"
         f"{_language_verifier_guidance(pack)}\n"
@@ -205,6 +209,7 @@ def build_verifier_batch_prompt(findings: list[Finding], pack: ContextPack) -> s
         "Approve concrete diff-caused violations of supplied strict project rules when the changed code clearly violates the rule; a strict safety, boundary, or project-policy violation is actionable even when the immediate failure mode is policy drift or future boundary risk rather than a current runtime exception.\n"
         "Still reject generic style preferences that are not tied to a supplied strict rule or concrete behavioral risk.\n"
         "Treat impact_notes as navigation hints only; reject if the concrete diff/snippet evidence does not support the finding.\n"
+        f"{_analyzer_coverage_guidance(pack)}"
         "Reject if context_pack_id differs from the supplied context pack id, or if finding.file is not present in any supplied context layer: changed snippets, references, callees, contracts, metadata, or related tests.\n"
         "Use context layers deliberately: references show consumers, callees show called contracts and side-effect boundaries, contracts show schemas/DTO/type requirements, metadata shows framework/route/permission/DI boundaries, and related tests show intended behavior.\n"
         f"{_language_verifier_guidance(pack)}\n"
@@ -878,6 +883,17 @@ def _bounded_resolution_identity_value(value: object) -> object:
     if isinstance(value, list):
         return [_bounded_resolution_identity_value(item) for item in value[:16]]
     return value
+
+
+def _analyzer_coverage_guidance(pack: ContextPack) -> str:
+    coverage = pack.analyzer_coverage
+    if coverage is None or not coverage.partial:
+        return ""
+    return (
+        "Analyzer coverage is partial: treat absent references, contracts, metadata, or related tests as unknown, "
+        "not as evidence that no such relationship exists; analyzer_coverage.reason_codes describe the affected "
+        "scope. Do not report partial coverage itself as a finding.\n"
+    )
 
 
 def _language_review_guidance(pack: ContextPack) -> str:

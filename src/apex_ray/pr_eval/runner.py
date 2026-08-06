@@ -23,6 +23,7 @@ from apex_ray.config import ConfigError, load_config
 from apex_ray.invocation import ReviewOverrides, apply_review_overrides
 from apex_ray.local_data import LocalDataPathError, resolve_runtime_config_paths
 from apex_ray.models import (
+    AnalyzerResult,
     LLMCoverageMode,
     LLMProviderName,
     ReviewReport,
@@ -560,8 +561,11 @@ def _pr_eval_case_run_fingerprint(case: PullRequestEvalCase, run_kwargs: Mapping
     return _run_state.pr_eval_case_run_fingerprint(case, run_kwargs)
 
 
-def _warnings_indicate_partial_analysis(warnings: list[str]) -> bool:
-    return _run_state.warnings_indicate_partial_analysis(warnings)
+def _warnings_indicate_partial_analysis(
+    warnings: list[str],
+    analyzer_results: list[AnalyzerResult] | None = None,
+) -> bool:
+    return _run_state.warnings_indicate_partial_analysis(warnings, analyzer_results)
 
 
 def _capture_output_dir(output_dir: Path, *, overwrite: bool) -> tuple[Path, bool]:
@@ -781,7 +785,7 @@ def _run_one_pr_eval_case(
     warnings = [*report.diff.warnings]
     for analyzer_result in report.analyzer_results:
         warnings.extend(analyzer_result.warnings)
-    analysis_partial = _warnings_indicate_partial_analysis(warnings)
+    analysis_partial = _warnings_indicate_partial_analysis(warnings, report.analyzer_results)
     coverage_partial = report.llm_coverage.partial_severity != "none"
     result_status: Literal["succeeded", "partial"] = "partial" if analysis_partial or coverage_partial else "succeeded"
     finished_at = _now_iso()

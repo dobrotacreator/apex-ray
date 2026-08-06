@@ -2,8 +2,15 @@ from pathlib import Path
 
 import pytest
 
-from apex_ray.llm.prompts import RESOLUTION_PROMPT_MAX_CHARS, build_resolution_prompt
+from apex_ray.llm.prompts import (
+    RESOLUTION_PROMPT_MAX_CHARS,
+    build_resolution_prompt,
+    build_review_prompt,
+    build_shallow_review_prompt,
+    build_verifier_prompt,
+)
 from apex_ray.models import (
+    AnalyzerCoverageSignal,
     ChangedFile,
     ChangedHunk,
     CodeSnippet,
@@ -24,6 +31,45 @@ from apex_ray.models import (
     TargetMode,
 )
 from apex_ray.report import build_report
+
+
+def test_partial_analyzer_coverage_is_compact_and_explained_in_all_review_prompts() -> None:
+    pack = ContextPack(
+        id="src/cart.ts#calculate:1",
+        file="src/cart.ts",
+        warnings=["File-local parser recovery was used."],
+        analyzer_coverage=AnalyzerCoverageSignal(
+            partial=True,
+            reasonCodes=["workspace_index_partial"],
+            scopes=["workspace_index"],
+            failedFileCount=2,
+        ),
+    )
+    finding = Finding(
+        title="Cart total is wrong",
+        severity=FindingSeverity.HIGH,
+        confidence=FindingConfidence.HIGH,
+        file="src/cart.ts",
+        failure_mode="The changed total omits quantity.",
+        evidence="The multiplication was removed.",
+        suggested_fix="Restore multiplication.",
+        suggested_test="Cover multiple quantities.",
+        context_pack_id=pack.id,
+    )
+
+    prompts = [
+        build_review_prompt(pack),
+        build_shallow_review_prompt(pack),
+        build_verifier_prompt(finding, pack),
+    ]
+
+    for prompt in prompts:
+        assert "Analyzer coverage is partial" in prompt
+        assert '"reason_codes": [' in prompt
+        assert '"workspace_index_partial"' in prompt
+        assert '"scopes": [' in prompt
+        assert '"failed_file_count": 2' in prompt
+        assert "File-local parser recovery was used." in prompt
 
 
 def test_resolution_prompt_is_bounded_and_keeps_only_relevant_delta_evidence(

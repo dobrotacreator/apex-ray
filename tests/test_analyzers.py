@@ -100,6 +100,179 @@ def test_typescript_analyzer_resolves_relative_script_path_against_repo_root(
     assert seen_command[1] == str(script.resolve())
 
 
+def test_typescript_merge_deduplicates_global_warnings_and_preserves_occurrences() -> None:
+    first = AnalyzerResult(
+        language="typescript",
+        projectRoot="/repo",
+        files=[],
+        warnings=["workspace index is partial", "first shard only"],
+        partial=True,
+    )
+    second = AnalyzerResult(
+        language="typescript",
+        projectRoot="/repo",
+        files=[],
+        warnings=["workspace index is partial", "workspace index is partial"],
+        partial=True,
+    )
+
+    merged = typescript_analyzer_module._merge_analyzer_results([first, second])
+
+    assert merged.warnings == ["workspace index is partial", "first shard only"]
+    assert [summary.model_dump(mode="json") for summary in merged.warning_summaries] == [
+        {
+            "message": "workspace index is partial",
+            "occurrences": 3,
+            "shard_indexes": [1, 2],
+        },
+        {
+            "message": "first shard only",
+            "occurrences": 1,
+            "shard_indexes": [1],
+        },
+    ]
+
+
+def test_typescript_merge_aggregates_structured_coverage_and_shard_metrics() -> None:
+    first = AnalyzerResult.model_validate(
+        {
+            "language": "typescript",
+            "projectRoot": "/repo",
+            "files": [{"path": "src/first.ts"}],
+            "warnings": ["workspace index is partial"],
+            "partial": True,
+            "coverage": {
+                "partial": True,
+                "reasonCodes": ["workspace_index_partial"],
+                "scopes": ["workspace_index"],
+                "failedFileCount": 0,
+            },
+            "metrics": {
+                "wallDurationMs": 7,
+                "stageDurationsMs": {"workspace_index": 3, "changed_files": 4},
+                "shards": [
+                    {
+                        "index": 1,
+                        "total": 1,
+                        "status": "partial",
+                        "wallDurationMs": 7,
+                        "stageDurationsMs": {"workspace_index": 3, "changed_files": 4},
+                        "changedFileCount": 1,
+                        "analyzedFileCount": 1,
+                        "failedFileCount": 0,
+                        "warningCount": 1,
+                        "partialReasonCodes": ["workspace_index_partial"],
+                        "indexCacheHits": 2,
+                        "indexCacheMisses": 3,
+                    }
+                ],
+            },
+        }
+    )
+    second = AnalyzerResult.model_validate(
+        {
+            "language": "typescript",
+            "projectRoot": "/repo",
+            "files": [],
+            "warnings": ["analysis budget exhausted"],
+            "partial": True,
+            "failedFiles": ["src/second.ts"],
+            "coverage": {
+                "partial": True,
+                "reasonCodes": ["analysis_time_budget_exhausted", "changed_file_analysis_incomplete"],
+                "scopes": ["analyzer", "changed_files"],
+                "failedFileCount": 1,
+            },
+            "metrics": {
+                "wallDurationMs": 11,
+                "stageDurationsMs": {"workspace_index": 5, "changed_files": 6},
+                "shards": [
+                    {
+                        "index": 1,
+                        "total": 1,
+                        "status": "timeout",
+                        "wallDurationMs": 11,
+                        "stageDurationsMs": {"workspace_index": 5, "changed_files": 6},
+                        "changedFileCount": 1,
+                        "analyzedFileCount": 0,
+                        "failedFileCount": 1,
+                        "warningCount": 1,
+                        "partialReasonCodes": [
+                            "analysis_time_budget_exhausted",
+                            "changed_file_analysis_incomplete",
+                        ],
+                    }
+                ],
+            },
+        }
+    )
+
+    merged = typescript_analyzer_module._merge_analyzer_results([first, second])
+
+    assert merged.coverage is not None
+    assert merged.coverage.partial is True
+    assert merged.coverage.reason_codes == [
+        "workspace_index_partial",
+        "analysis_time_budget_exhausted",
+        "changed_file_analysis_incomplete",
+    ]
+    assert merged.coverage.scopes == ["workspace_index", "analyzer", "changed_files"]
+    assert merged.coverage.failed_file_count == 1
+    assert merged.metrics is not None
+    assert merged.metrics.wall_duration_ms == 18
+    assert merged.metrics.stage_durations_ms == {"workspace_index": 8, "changed_files": 10}
+    assert [(shard.index, shard.total) for shard in merged.metrics.shards] == [(1, 2), (2, 2)]
+    assert [shard.status for shard in merged.metrics.shards] == ["partial", "timeout"]
+
+
+def test_typescript_merge_keeps_top_level_partial_in_sync_with_structured_coverage() -> None:
+    result = AnalyzerResult.model_validate(
+        {
+            "language": "typescript",
+            "projectRoot": "/repo",
+            "partial": False,
+            "coverage": {
+                "partial": True,
+                "reasonCodes": ["workspace_index_partial"],
+                "scopes": ["workspace_index"],
+                "failedFileCount": 0,
+            },
+        }
+    )
+
+    typescript_analyzer_module._annotate_successful_shard(
+        result,
+        index=1,
+        total=1,
+        changed_file_count=0,
+        duration_ms=1,
+    )
+    merged = typescript_analyzer_module._merge_analyzer_results([result])
+
+    assert result.metrics is not None
+    assert result.metrics.shards[0].status == "partial"
+    assert merged.partial is True
+    assert merged.coverage is not None
+    assert merged.coverage.partial is True
+
+
+def test_typescript_merge_normalizes_unexplained_structured_partial_coverage() -> None:
+    result = AnalyzerResult.model_validate(
+        {
+            "language": "typescript",
+            "projectRoot": "/repo",
+            "partial": False,
+            "coverage": {"partial": True},
+        }
+    )
+
+    merged = typescript_analyzer_module._merge_analyzer_results([result])
+
+    assert merged.coverage is not None
+    assert merged.coverage.reason_codes == ["partial_reason_unspecified"]
+    assert merged.coverage.scopes == ["analyzer"]
+
+
 def test_typescript_analyzer_fallback_retains_custom_config_extends(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -4243,7 +4416,7 @@ def test_typescript_analyzer_returns_partial_result_when_a_shard_times_out(
                 if shard_files == ["src/file-0.ts"]
                 else [{"path": path, "symbols": [], "imports": [], "exports": []} for path in shard_files]
             ),
-            "warnings": [f"warning for {shard_files[0]}"],
+            "warnings": ["shared workspace warning", f"warning for {shard_files[0]}"],
             "indexCache": None,
             "partial": shard_files == ["src/file-0.ts"],
             "failedFiles": ["src/file-0.ts"] if shard_files == ["src/file-0.ts"] else [],
@@ -4276,12 +4449,32 @@ def test_typescript_analyzer_returns_partial_result_when_a_shard_times_out(
     assert [file.path for file in result.files] == ["src/file-2.ts"]
     assert "warning for src/file-0.ts" in result.warnings
     assert "warning for src/file-2.ts" in result.warnings
+    assert result.warnings.count("shared workspace warning") == 1
     assert any("partial TypeScript analyzer result" in warning for warning in result.warnings)
     assert any("src/file-1.ts" in warning and "timed out after" in warning for warning in result.warnings)
     assert result.partial is True
     assert result.failed_files == ["src/file-0.ts", "src/file-1.ts"]
     assert [failure.status for failure in result.shard_failures] == ["timeout", "timeout"]
     assert [failure.files for failure in result.shard_failures] == [["src/file-0.ts"], ["src/file-1.ts"]]
+    assert result.coverage is not None
+    assert result.coverage.failed_file_count == 2
+    assert "shard_timeout" in result.coverage.reason_codes
+    assert result.metrics is not None
+    assert [(shard.index, shard.total) for shard in result.metrics.shards] == [(1, 3), (2, 3), (3, 3)]
+    assert [shard.status for shard in result.metrics.shards] == ["timeout", "timeout", "complete"]
+    assert result.metrics.wall_duration_ms >= max(shard.wall_duration_ms for shard in result.metrics.shards)
+    assert "total" not in result.metrics.stage_durations_ms
+    shared_summary = next(
+        summary for summary in result.warning_summaries if summary.message == "shared workspace warning"
+    )
+    assert shared_summary.occurrences == 2
+    assert shared_summary.shard_indexes == [1, 3]
+    outer_failure_summary = next(
+        summary
+        for summary in result.warning_summaries
+        if summary.message.startswith("Returning partial TypeScript analyzer result")
+    )
+    assert outer_failure_summary.shard_indexes == [2]
 
 
 def test_typescript_analyzer_respects_total_timeout_across_shards(

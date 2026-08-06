@@ -2,6 +2,11 @@ import json
 from pathlib import Path
 
 from apex_ray.models import (
+    AnalyzerCoverageSignal,
+    AnalyzerMetrics,
+    AnalyzerResult,
+    AnalyzerShardMetrics,
+    AnalyzerWarningSummary,
     ContextPack,
     DiffStats,
     DiffSummary,
@@ -79,6 +84,175 @@ def test_review_telemetry_round_trip(tmp_path: Path) -> None:
     assert entry["pack_status_counts"] == {"reviewed_deep": 1}
     assert "Latest LLM tokens: `~100`" in summary
     assert "Latest actual LLM tokens: `100`" in summary
+
+
+def test_review_telemetry_exports_path_free_analyzer_stage_and_shard_aggregates(
+    tmp_path: Path,
+) -> None:
+    analyzer_result = AnalyzerResult(
+        language="typescript",
+        projectRoot="/sensitive/repo",
+        warnings=["Sensitive analyzer warning for src/private.ts"],
+        warningSummaries=[
+            AnalyzerWarningSummary(
+                message="Sensitive analyzer warning for src/private.ts",
+                occurrences=4,
+                shardIndexes=[1, 2],
+            )
+        ],
+        partial=True,
+        coverage=AnalyzerCoverageSignal(
+            partial=True,
+            reasonCodes=["workspace_index_partial"],
+            scopes=["workspace_index"],
+            failedFileCount=1,
+        ),
+        metrics=AnalyzerMetrics(
+            wallDurationMs=25,
+            stageDurationsMs={
+                "manifest": 2,
+                "workspace_index": 8,
+                "/sensitive/repo/src/private.ts": 99,
+            },
+            shards=[
+                AnalyzerShardMetrics(
+                    index=1,
+                    total=2,
+                    status="partial",
+                    wallDurationMs=11,
+                    stageDurationsMs={"workspace_index": 4, "src/private.ts": 99},
+                    changedFileCount=3,
+                    analyzedFileCount=3,
+                    warningCount=2,
+                    partialReasonCodes=["workspace_index_partial"],
+                    indexCacheHits=5,
+                    indexCacheMisses=7,
+                ),
+                AnalyzerShardMetrics(
+                    index=2,
+                    total=2,
+                    status="timeout",
+                    wallDurationMs=12,
+                    changedFileCount=2,
+                    failedFileCount=1,
+                    warningCount=2,
+                    partialReasonCodes=["shard_timeout", "changed_file_analysis_incomplete"],
+                ),
+            ],
+        ),
+        failedFiles=["src/private.ts"],
+    )
+    report = build_report(
+        ProjectProfile(root=str(tmp_path), is_git_repo=True),
+        ReviewConfig(),
+        DiffSummary(target_mode=TargetMode.PATCH),
+        analyzer_results=[analyzer_result],
+    )
+    telemetry_path = tmp_path / "review-runs.jsonl"
+
+    append_review_telemetry(report, telemetry_path, source_repo=tmp_path, duration_ms=30)
+
+    analyzer = load_review_telemetry(telemetry_path)[0]["analyzers"][0]
+    assert analyzer == {
+        "language": "typescript",
+        "partial": True,
+        "partial_reason_codes": ["workspace_index_partial"],
+        "partial_scopes": ["workspace_index"],
+        "failed_file_count": 1,
+        "warning_count": 4,
+        "unique_warning_count": 1,
+        "wall_duration_ms": 25,
+        "stage_durations_ms": {"manifest": 2, "workspace_index": 8},
+        "shards": [
+            {
+                "index": 1,
+                "total": 2,
+                "status": "partial",
+                "wall_duration_ms": 11,
+                "stage_durations_ms": {"workspace_index": 4},
+                "changed_file_count": 3,
+                "analyzed_file_count": 3,
+                "failed_file_count": 0,
+                "warning_count": 2,
+                "partial_reason_codes": ["workspace_index_partial"],
+                "index_cache_hits": 5,
+                "index_cache_misses": 7,
+            },
+            {
+                "index": 2,
+                "total": 2,
+                "status": "timeout",
+                "wall_duration_ms": 12,
+                "stage_durations_ms": {},
+                "changed_file_count": 2,
+                "analyzed_file_count": 0,
+                "failed_file_count": 1,
+                "warning_count": 2,
+                "partial_reason_codes": ["shard_timeout", "changed_file_analysis_incomplete"],
+                "index_cache_hits": 0,
+                "index_cache_misses": 0,
+            },
+        ],
+    }
+    serialized = json.dumps(analyzer)
+    assert "/sensitive/repo" not in serialized
+    assert "src/private.ts" not in serialized
+    assert "Sensitive analyzer warning" not in serialized
+
+
+def test_review_telemetry_preserves_structured_failed_file_count(tmp_path: Path) -> None:
+    analyzer_result = AnalyzerResult(
+        language="typescript",
+        projectRoot=str(tmp_path),
+        partial=True,
+        coverage=AnalyzerCoverageSignal(
+            partial=True,
+            reasonCodes=["changed_file_analysis_incomplete"],
+            scopes=["changed_files"],
+            failedFileCount=3,
+        ),
+        failedFiles=["src/retained.ts"],
+    )
+    report = build_report(
+        ProjectProfile(root=str(tmp_path), is_git_repo=True),
+        ReviewConfig(),
+        DiffSummary(target_mode=TargetMode.PATCH),
+        analyzer_results=[analyzer_result],
+    )
+    telemetry_path = tmp_path / "review-runs.jsonl"
+
+    append_review_telemetry(report, telemetry_path, source_repo=tmp_path, duration_ms=1)
+
+    analyzer = load_review_telemetry(telemetry_path)[0]["analyzers"][0]
+    assert analyzer["failed_file_count"] == 3
+
+
+def test_review_telemetry_counts_legacy_and_structured_warnings(tmp_path: Path) -> None:
+    analyzer_result = AnalyzerResult(
+        language="typescript",
+        projectRoot=str(tmp_path),
+        warnings=["repeated", "repeated", "legacy only"],
+        warningSummaries=[
+            AnalyzerWarningSummary(
+                message="repeated",
+                occurrences=4,
+                shardIndexes=[1, 2],
+            )
+        ],
+    )
+    report = build_report(
+        ProjectProfile(root=str(tmp_path), is_git_repo=True),
+        ReviewConfig(),
+        DiffSummary(target_mode=TargetMode.PATCH),
+        analyzer_results=[analyzer_result],
+    )
+    telemetry_path = tmp_path / "review-runs.jsonl"
+
+    append_review_telemetry(report, telemetry_path, source_repo=tmp_path, duration_ms=1)
+
+    analyzer = load_review_telemetry(telemetry_path)[0]["analyzers"][0]
+    assert analyzer["warning_count"] == 5
+    assert analyzer["unique_warning_count"] == 2
 
 
 def test_review_telemetry_input_ratio_includes_provider_split_cache_tokens(tmp_path: Path) -> None:

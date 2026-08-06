@@ -7,6 +7,7 @@ from apex_ray.findings import (
     unresolved_verifications,
 )
 from apex_ray.models import Finding, ReviewReport
+from apex_ray.report.analyzers import analyzer_warning_labels
 from apex_ray.report.coverage import _unreviewed_pack_reason
 from apex_ray.report.formatting import summarize_notes
 
@@ -14,7 +15,7 @@ from apex_ray.report.formatting import summarize_notes
 def render_html(report: ReviewReport) -> str:
     warnings = [*report.diff.warnings]
     for analyzer_result in report.analyzer_results:
-        warnings.extend(analyzer_result.warnings)
+        warnings.extend(analyzer_warning_labels(analyzer_result))
     coverage = report.llm_coverage
     completion = report.coverage_completion
     completion_scope = ", ".join(completion.reviewer_ids) if completion and completion.reviewer_ids else "global"
