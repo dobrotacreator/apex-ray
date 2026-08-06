@@ -166,6 +166,8 @@ test("analyzer library API matches the CLI JSON contract", () => {
     const { metrics: cliMetrics, ...cliStableResult } = cliResult;
     const { metrics: apiMetrics, ...apiStableResult } = apiResult;
     assert.deepEqual(apiStableResult, cliStableResult);
+    assertAnalyzerMetricDurations(cliMetrics);
+    assertAnalyzerMetricDurations(apiMetrics);
     assert.deepEqual(analyzerMetricsShape(apiMetrics), analyzerMetricsShape(cliMetrics));
     const changedSymbol = apiResult.files[0].changedSymbols.find((symbol) => symbol.name === "changed");
     assert.ok(changedSymbol);
@@ -178,6 +180,23 @@ test("analyzer library API matches the CLI JSON contract", () => {
     fs.rmSync(repo, { recursive: true, force: true });
   }
 });
+
+function assertAnalyzerMetricDurations(metrics: AnalyzerResult["metrics"]): void {
+  assertFiniteNonNegativeDuration(metrics.wallDurationMs, "analyzer wall duration");
+  for (const [stage, duration] of Object.entries(metrics.stageDurationsMs)) {
+    assertFiniteNonNegativeDuration(duration, `analyzer stage ${stage}`);
+  }
+  for (const shard of metrics.shards) {
+    assertFiniteNonNegativeDuration(shard.wallDurationMs, `shard ${shard.index} wall duration`);
+    for (const [stage, duration] of Object.entries(shard.stageDurationsMs)) {
+      assertFiniteNonNegativeDuration(duration, `shard ${shard.index} stage ${stage}`);
+    }
+  }
+}
+
+function assertFiniteNonNegativeDuration(value: number, label: string): void {
+  assert.ok(Number.isFinite(value) && value >= 0, `${label} must be finite and non-negative`);
+}
 
 function analyzerMetricsShape(metrics: AnalyzerResult["metrics"]): object {
   return {

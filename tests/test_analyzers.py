@@ -225,6 +225,54 @@ def test_typescript_merge_aggregates_structured_coverage_and_shard_metrics() -> 
     assert [shard.status for shard in merged.metrics.shards] == ["partial", "timeout"]
 
 
+def test_typescript_merge_keeps_top_level_partial_in_sync_with_structured_coverage() -> None:
+    result = AnalyzerResult.model_validate(
+        {
+            "language": "typescript",
+            "projectRoot": "/repo",
+            "partial": False,
+            "coverage": {
+                "partial": True,
+                "reasonCodes": ["workspace_index_partial"],
+                "scopes": ["workspace_index"],
+                "failedFileCount": 0,
+            },
+        }
+    )
+
+    typescript_analyzer_module._annotate_successful_shard(
+        result,
+        index=1,
+        total=1,
+        changed_file_count=0,
+        duration_ms=1,
+    )
+    merged = typescript_analyzer_module._merge_analyzer_results([result])
+
+    assert result.metrics is not None
+    assert result.metrics.shards[0].status == "partial"
+    assert merged.partial is True
+    assert merged.coverage is not None
+    assert merged.coverage.partial is True
+
+
+def test_typescript_merge_normalizes_unexplained_structured_partial_coverage() -> None:
+    result = AnalyzerResult.model_validate(
+        {
+            "language": "typescript",
+            "projectRoot": "/repo",
+            "partial": False,
+            "coverage": {"partial": True},
+        }
+    )
+
+    merged = typescript_analyzer_module._merge_analyzer_results([result])
+
+    assert merged.coverage is not None
+    assert merged.coverage.reason_codes == ["partial_reason_unspecified"]
+    assert merged.coverage.scopes == ["analyzer"]
+
+
 def test_typescript_analyzer_fallback_retains_custom_config_extends(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

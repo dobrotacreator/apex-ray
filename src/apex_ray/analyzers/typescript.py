@@ -748,18 +748,19 @@ def _annotate_successful_shard(
     changed_file_count: int,
     duration_ms: int,
 ) -> None:
+    result_is_partial = _analyzer_result_is_partial(result)
     if result.coverage is None:
         result.coverage = AnalyzerCoverageSignal(
-            partial=result.partial,
-            reasonCodes=["partial_reason_unspecified"] if result.partial else [],
-            scopes=["analyzer"] if result.partial else [],
+            partial=result_is_partial,
+            reasonCodes=["partial_reason_unspecified"] if result_is_partial else [],
+            scopes=["analyzer"] if result_is_partial else [],
             failedFileCount=len(result.failed_files),
         )
     status: Literal["complete", "partial", "failed", "timeout", "skipped"] = (
         "timeout"
         if any(failure.status == "timeout" for failure in result.shard_failures)
         else "partial"
-        if result.partial
+        if result_is_partial
         else "complete"
     )
     source_metrics = result.metrics
@@ -3162,7 +3163,7 @@ def _merge_analyzer_results(
         warnings=warnings,
         warningSummaries=warning_summaries,
         indexCache=_merge_index_cache_stats(results),
-        partial=any(result.partial for result in results),
+        partial=any(_analyzer_result_is_partial(result) for result in results),
         coverage=_merge_analyzer_coverage(results, failed_files),
         metrics=_merge_analyzer_metrics(results, source_shard_indexes, total_shards),
         failedFiles=failed_files,
@@ -3216,7 +3217,8 @@ def _merge_analyzer_coverage(
     results: list[AnalyzerResult],
     failed_files: list[str],
 ) -> AnalyzerCoverageSignal | None:
-    if not any(result.partial or result.coverage is not None for result in results):
+    merged_partial = any(_analyzer_result_is_partial(result) for result in results)
+    if not merged_partial and not any(result.coverage is not None for result in results):
         return None
     reason_codes: list[AnalyzerPartialReasonCode] = []
     scopes: list[AnalyzerCoverageScope] = []
@@ -3233,12 +3235,20 @@ def _merge_analyzer_coverage(
         for reason_code in result.coverage.reason_codes:
             if reason_code not in reason_codes:
                 reason_codes.append(reason_code)
+    if merged_partial and not reason_codes:
+        reason_codes.append("partial_reason_unspecified")
+    if merged_partial and not scopes:
+        scopes.append("analyzer")
     return AnalyzerCoverageSignal(
-        partial=any(result.partial or (result.coverage and result.coverage.partial) for result in results),
+        partial=merged_partial,
         reasonCodes=reason_codes,
-        scopes=scopes or (["analyzer"] if any(result.partial for result in results) else []),
+        scopes=scopes,
         failedFileCount=max(len(failed_files), reported_failed_files),
     )
+
+
+def _analyzer_result_is_partial(result: AnalyzerResult) -> bool:
+    return result.partial or (result.coverage is not None and result.coverage.partial)
 
 
 def _merge_analyzer_metrics(
