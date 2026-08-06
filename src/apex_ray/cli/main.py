@@ -971,11 +971,24 @@ def _validate_worktree_output_paths(
 ) -> None:
     for path in paths:
         if path is not None and not git.worktree_output_path_is_stable(root, path, directory=directory):
+            display_path = _display_worktree_output_path(root, path)
             raise typer.BadParameter(
-                f"Worktree review writable path {path} must be outside the repository or Git-ignored and untracked; "
+                f"Worktree review writable path {display_path} must be outside the repository or Git-ignored and "
+                "untracked; "
                 "run apex-ray init and commit .apex-ray/.gitignore, use another already ignored path, "
                 "or use an external path."
             )
+
+
+def _display_worktree_output_path(root: Path, path: Path) -> Path:
+    """Prefer a concise repository-relative label for an unsafe path."""
+
+    if not path.is_absolute():
+        return path
+    try:
+        return path.resolve(strict=False).relative_to(root.resolve())
+    except (OSError, RuntimeError, ValueError):  # fmt: skip
+        return path
 
 
 def _analyzer_cache_write_roots(root: Path, config: ReviewConfig) -> list[Path]:
