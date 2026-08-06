@@ -270,9 +270,13 @@ def test_review_context_packs_opens_circuit_after_terminal_parallel_failure(
 ) -> None:
     class FailingProvider(_RenderedPromptReviewTestProvider):
         calls = 0
+        calls_lock = threading.Lock()
+        initial_calls_started = threading.Barrier(2)
 
         def review_context_pack(self, pack: ContextPack, repo_root: Path) -> list[Finding]:
-            self.calls += 1
+            with self.calls_lock:
+                self.calls += 1
+            self.initial_calls_started.wait(timeout=5)
             raise LLMProviderError("Invalid API key.", category="auth")
 
         def verify_finding(self, finding: Finding, pack: ContextPack, repo_root: Path) -> FindingVerification:
@@ -290,6 +294,73 @@ def test_review_context_packs_opens_circuit_after_terminal_parallel_failure(
     assert [run.status for run in runs[:2]] == ["failed_auth", "failed_auth"]
     assert [run.status for run in runs[2:]] == ["skipped_circuit_open"] * 4
     assert all("circuit" in (run.error or "").lower() for run in runs[2:])
+
+
+def test_review_context_packs_rechecks_terminal_circuit_inside_queued_worker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    circuit_opened = threading.Event()
+    third_render_started = threading.Event()
+
+    class SignalingCircuit(LLMRouteCircuitBreaker):
+        def record(
+            self,
+            config: LLMConfig,
+            profile: str | None,
+            status: str,
+            *,
+            max_consecutive_failures: int,
+        ) -> None:
+            super().record(
+                config,
+                profile,
+                status,
+                max_consecutive_failures=max_consecutive_failures,
+            )
+            if status == "failed_auth":
+                circuit_opened.set()
+
+    class QueuedReviewProvider(_RenderedPromptReviewTestProvider):
+        def __init__(self) -> None:
+            self.second_call_started = threading.Event()
+            self.call_indexes: list[int] = []
+            self.calls_lock = threading.Lock()
+
+        def review_context_pack(self, pack: ContextPack, repo_root: Path) -> list[Finding]:
+            pack_index = int(pack.id.rsplit("-", 1)[1])
+            with self.calls_lock:
+                self.call_indexes.append(pack_index)
+            if pack_index == 0:
+                assert self.second_call_started.wait(timeout=5)
+                return []
+            if pack_index == 1:
+                self.second_call_started.set()
+                assert third_render_started.wait(timeout=5)
+                raise LLMProviderError("Invalid API key.", category="auth")
+            return []
+
+    def coordinated_render(pack: ContextPack, *, review_depth="deep", cache=None):
+        if pack.id.endswith("-2"):
+            third_render_started.set()
+            assert circuit_opened.wait(timeout=5)
+        return render_review_prompt(pack, review_depth=review_depth, cache=cache)
+
+    provider = QueuedReviewProvider()
+    monkeypatch.setattr("apex_ray.llm.review.provider_from_config", lambda _config: provider)
+    monkeypatch.setattr("apex_ray.llm.review.render_review_prompt", coordinated_render)
+    packs = [make_pack().model_copy(update={"id": f"src/cart.ts#queued-{index}"}) for index in range(3)]
+    config = LLMConfig(provider=LLMProviderName.FAKE, cache_enabled=False, jobs=2)
+
+    findings, runs = review_context_packs(
+        packs,
+        config,
+        Path("."),
+        circuit_breaker=SignalingCircuit(),
+    )
+
+    assert findings == []
+    assert sorted(provider.call_indexes) == [0, 1]
+    assert [run.status for run in runs] == ["ok", "failed_auth", "skipped_circuit_open"]
 
 
 def test_review_context_packs_opens_circuit_only_for_failed_route(
@@ -984,6 +1055,61 @@ def test_review_context_packs_reports_parallel_progress_without_reordering_runs(
     assert [run.context_pack_id for run in runs] == [first.id, second.id]
     assert "review deep: 2 context pack(s), jobs=2" in progress.messages
     assert any(message.startswith("review deep 2/2 done") for message in progress.messages)
+
+
+def test_review_context_packs_refills_available_worker_before_slowest_finishes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class CoordinatedProvider(_RenderedPromptReviewTestProvider):
+        def __init__(self) -> None:
+            self.slow_call_started = threading.Event()
+            self.third_call_started = threading.Event()
+            self.third_started_before_slow_finished = False
+            self.active_calls = 0
+            self.max_active_calls = 0
+            self.calls_lock = threading.Lock()
+
+        def review_context_pack(self, pack: ContextPack, repo_root: Path) -> list[Finding]:
+            with self.calls_lock:
+                self.active_calls += 1
+                self.max_active_calls = max(self.max_active_calls, self.active_calls)
+            try:
+                pack_index = int(pack.id.rsplit("-", 1)[1])
+                if pack_index == 0:
+                    assert self.slow_call_started.wait(timeout=5)
+                elif pack_index == 1:
+                    self.slow_call_started.set()
+                    self.third_started_before_slow_finished = self.third_call_started.wait(timeout=1)
+                else:
+                    self.third_call_started.set()
+                return [
+                    Finding(
+                        title=f"Finding from pack {pack_index}",
+                        severity=FindingSeverity.MEDIUM,
+                        confidence=FindingConfidence.HIGH,
+                        file=pack.file,
+                        line=6,
+                        failure_mode=f"Pack {pack_index} can fail.",
+                        evidence=f"Pack {pack_index} changed the calculation.",
+                        suggested_fix="Preserve the calculation.",
+                        suggested_test=f"Cover pack {pack_index}.",
+                    )
+                ]
+            finally:
+                with self.calls_lock:
+                    self.active_calls -= 1
+
+    provider = CoordinatedProvider()
+    monkeypatch.setattr("apex_ray.llm.review.provider_from_config", lambda _config: provider)
+    packs = [make_pack().model_copy(update={"id": f"src/cart.ts#rolling-{index}"}) for index in range(3)]
+    config = LLMConfig(provider=LLMProviderName.FAKE, cache_enabled=False, jobs=2)
+
+    findings, runs = review_context_packs(packs, config, Path("."))
+
+    assert provider.third_started_before_slow_finished is True
+    assert provider.max_active_calls == config.jobs
+    assert [finding.context_pack_id for finding in findings] == [pack.id for pack in packs]
+    assert [run.context_pack_id for run in runs] == [pack.id for pack in packs]
 
 
 def test_filter_findings_for_context_pack_allows_reference_files() -> None:
@@ -2180,17 +2306,148 @@ def test_verify_findings_opens_circuit_only_for_failed_route(
     assert "circuit" in verifications[2].reason.lower()
 
 
-def test_verify_findings_opens_retryable_circuit_after_parallel_threshold(
+def test_verify_findings_rechecks_terminal_circuit_inside_queued_worker(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    circuit_opened = threading.Event()
+    third_cache_read_started = threading.Event()
+
+    class SignalingCircuit(LLMRouteCircuitBreaker):
+        def record(
+            self,
+            config: LLMConfig,
+            profile: str | None,
+            status: str,
+            *,
+            max_consecutive_failures: int,
+        ) -> None:
+            super().record(
+                config,
+                profile,
+                status,
+                max_consecutive_failures=max_consecutive_failures,
+            )
+            if status == "failed_auth":
+                circuit_opened.set()
+
+    class CoordinatedCache:
+        def read_verification(self, cache_key: str, finding: Finding) -> None:
+            if finding.title.endswith(" 2"):
+                third_cache_read_started.set()
+                assert circuit_opened.wait(timeout=5)
+            return None
+
+        def write_verification(
+            self,
+            cache_key: str,
+            config: LLMConfig,
+            verification: FindingVerification,
+        ) -> None:
+            return None
+
+    class QueuedVerifier:
+        def __init__(self) -> None:
+            self.second_call_started = threading.Event()
+            self.call_indexes: list[int] = []
+            self.calls_lock = threading.Lock()
+
+        def review_context_pack(self, pack: ContextPack, repo_root: Path) -> list[Finding]:
+            raise AssertionError("not used")
+
+        def verify_finding(
+            self,
+            finding: Finding,
+            pack: ContextPack,
+            repo_root: Path,
+        ) -> FindingVerification:
+            pack_index = int(pack.id.rsplit("-", 1)[1])
+            with self.calls_lock:
+                self.call_indexes.append(pack_index)
+            if pack_index == 0:
+                assert self.second_call_started.wait(timeout=5)
+            elif pack_index == 1:
+                self.second_call_started.set()
+                assert third_cache_read_started.wait(timeout=5)
+                raise LLMProviderError("Invalid API key.", category="auth")
+            return FindingVerification(
+                finding=finding,
+                approved=True,
+                confidence=FindingConfidence.HIGH,
+                reason=f"Verified pack {pack_index}.",
+            )
+
+    verifier = QueuedVerifier()
+    monkeypatch.setattr("apex_ray.llm.review.provider_from_config", lambda _config: verifier)
+    monkeypatch.setattr("apex_ray.llm.review.cache_for_config", lambda _repo_root, _config: CoordinatedCache())
+    packs = [make_pack().model_copy(update={"id": f"src/cart.ts#queued-verify-{index}"}) for index in range(3)]
+    findings = [
+        Finding(
+            title=f"Queued finding {index}",
+            severity=FindingSeverity.MEDIUM,
+            confidence=FindingConfidence.HIGH,
+            file=pack.file,
+            line=6,
+            failure_mode=f"Pack {index} can fail.",
+            evidence=f"Pack {index} removes a required check.",
+            suggested_fix="Restore the check.",
+            suggested_test=f"Cover pack {index}.",
+            context_pack_id=pack.id,
+        )
+        for index, pack in enumerate(packs)
+    ]
+    config = LLMConfig(provider=LLMProviderName.FAKE, jobs=2)
+
+    approved, verifications, runs = verify_findings(
+        findings,
+        packs,
+        config,
+        Path("."),
+        circuit_breaker=SignalingCircuit(),
+    )
+
+    assert approved == [findings[0]]
+    assert sorted(verifier.call_indexes) == [0, 1]
+    assert [verification.approved for verification in verifications] == [True, False, False]
+    assert [run.status for run in runs] == ["ok", "failed_auth", "skipped_circuit_open"]
+
+
+def test_verify_findings_does_not_submit_after_observed_retryable_circuit_opens(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class CoordinatedCircuit(LLMRouteCircuitBreaker):
+        failed_records = threading.Barrier(2)
+
+        def record(
+            self,
+            config: LLMConfig,
+            profile: str | None,
+            status: str,
+            *,
+            max_consecutive_failures: int,
+        ) -> None:
+            super().record(
+                config,
+                profile,
+                status,
+                max_consecutive_failures=max_consecutive_failures,
+            )
+            if status == "failed_timeout":
+                # Keep both initial futures in flight until the threshold-open
+                # state is observable to the scheduler.
+                self.failed_records.wait(timeout=5)
+
     class TimeoutVerifier:
         calls = 0
+        calls_lock = threading.Lock()
+        initial_calls_started = threading.Barrier(2)
 
         def review_context_pack(self, pack: ContextPack, repo_root: Path) -> list[Finding]:
             raise AssertionError("not used")
 
         def verify_finding(self, finding: Finding, pack: ContextPack, repo_root: Path) -> FindingVerification:
-            self.calls += 1
+            with self.calls_lock:
+                self.calls += 1
+            self.initial_calls_started.wait(timeout=5)
             raise LLMProviderError("Provider timed out.", category="timeout", retryable=True)
 
     timeout_verifier = TimeoutVerifier()
@@ -2219,7 +2476,13 @@ def test_verify_findings_opens_retryable_circuit_after_parallel_threshold(
         max_consecutive_provider_failures=2,
     )
 
-    approved, verifications, runs = verify_findings(findings, packs, config, Path("."))
+    approved, verifications, runs = verify_findings(
+        findings,
+        packs,
+        config,
+        Path("."),
+        circuit_breaker=CoordinatedCircuit(),
+    )
 
     assert approved == []
     assert timeout_verifier.calls == 2
@@ -2232,6 +2495,151 @@ def test_verify_findings_opens_retryable_circuit_after_parallel_threshold(
     ]
     assert all(not verification.approved for verification in verifications)
     assert all("circuit" in verification.reason.lower() for verification in verifications[2:])
+
+
+def test_verify_findings_bounds_retryable_calls_permitted_before_circuit_opens(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class StaggeredTimeoutVerifier:
+        def __init__(self) -> None:
+            self.second_call_started = threading.Event()
+            self.third_call_started = threading.Event()
+            self.call_indexes: list[int] = []
+            self.calls_lock = threading.Lock()
+
+        def review_context_pack(self, pack: ContextPack, repo_root: Path) -> list[Finding]:
+            raise AssertionError("not used")
+
+        def verify_finding(
+            self,
+            finding: Finding,
+            pack: ContextPack,
+            repo_root: Path,
+        ) -> FindingVerification:
+            pack_index = int(pack.id.rsplit("-", 1)[1])
+            with self.calls_lock:
+                self.call_indexes.append(pack_index)
+            if pack_index == 0:
+                assert self.second_call_started.wait(timeout=5)
+            elif pack_index == 1:
+                self.second_call_started.set()
+                assert self.third_call_started.wait(timeout=5)
+            elif pack_index == 2:
+                self.third_call_started.set()
+            else:
+                raise AssertionError("Provider call started after the retryable circuit opened.")
+            raise LLMProviderError("Provider timed out.", category="timeout", retryable=True)
+
+    timeout_verifier = StaggeredTimeoutVerifier()
+    monkeypatch.setattr("apex_ray.llm.review.provider_from_config", lambda _config: timeout_verifier)
+    packs = [make_pack().model_copy(update={"id": f"src/cart.ts#overshoot-{index}"}) for index in range(6)]
+    findings = [
+        Finding(
+            title=f"Overshoot finding {index}",
+            severity=FindingSeverity.MEDIUM,
+            confidence=FindingConfidence.HIGH,
+            file=pack.file,
+            line=6,
+            failure_mode="The changed code can fail.",
+            evidence="The diff removes a required check.",
+            suggested_fix="Restore the check.",
+            suggested_test="Add a regression test.",
+            context_pack_id=pack.id,
+        )
+        for index, pack in enumerate(packs)
+    ]
+    config = LLMConfig(
+        provider=LLMProviderName.FAKE,
+        model="timeout-route",
+        cache_enabled=False,
+        jobs=2,
+        max_consecutive_provider_failures=2,
+    )
+
+    approved, verifications, runs = verify_findings(findings, packs, config, Path("."))
+
+    max_permitted_before_open = config.jobs + config.max_consecutive_provider_failures - 1
+    assert approved == []
+    assert sorted(timeout_verifier.call_indexes) == list(range(max_permitted_before_open))
+    assert len(timeout_verifier.call_indexes) <= max_permitted_before_open
+    assert [run.status for run in runs[:max_permitted_before_open]] == ["failed_timeout"] * max_permitted_before_open
+    assert [run.status for run in runs[max_permitted_before_open:]] == ["skipped_circuit_open"] * (
+        len(packs) - max_permitted_before_open
+    )
+    assert all(not verification.approved for verification in verifications)
+    assert all("circuit" in verification.reason.lower() for verification in verifications[max_permitted_before_open:])
+
+
+def test_verify_findings_refills_available_worker_before_slowest_finishes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class CoordinatedVerifier:
+        def __init__(self) -> None:
+            self.slow_call_started = threading.Event()
+            self.third_call_started = threading.Event()
+            self.third_started_before_slow_finished = False
+            self.active_calls = 0
+            self.max_active_calls = 0
+            self.calls_lock = threading.Lock()
+
+        def review_context_pack(self, pack: ContextPack, repo_root: Path) -> list[Finding]:
+            raise AssertionError("not used")
+
+        def verify_finding(
+            self,
+            finding: Finding,
+            pack: ContextPack,
+            repo_root: Path,
+        ) -> FindingVerification:
+            with self.calls_lock:
+                self.active_calls += 1
+                self.max_active_calls = max(self.max_active_calls, self.active_calls)
+            try:
+                pack_index = int(pack.id.rsplit("-", 1)[1])
+                if pack_index == 0:
+                    assert self.slow_call_started.wait(timeout=5)
+                elif pack_index == 1:
+                    self.slow_call_started.set()
+                    self.third_started_before_slow_finished = self.third_call_started.wait(timeout=1)
+                else:
+                    self.third_call_started.set()
+                return FindingVerification(
+                    finding=finding,
+                    approved=True,
+                    confidence=FindingConfidence.HIGH,
+                    reason=f"Verified pack {pack_index}.",
+                )
+            finally:
+                with self.calls_lock:
+                    self.active_calls -= 1
+
+    verifier = CoordinatedVerifier()
+    monkeypatch.setattr("apex_ray.llm.review.provider_from_config", lambda _config: verifier)
+    packs = [make_pack().model_copy(update={"id": f"src/cart.ts#rolling-verify-{index}"}) for index in range(3)]
+    findings = [
+        Finding(
+            title=f"Finding {index}",
+            severity=FindingSeverity.MEDIUM,
+            confidence=FindingConfidence.HIGH,
+            file=pack.file,
+            line=6,
+            failure_mode=f"Pack {index} can fail.",
+            evidence=f"Pack {index} removes a required check.",
+            suggested_fix="Restore the check.",
+            suggested_test=f"Cover pack {index}.",
+            context_pack_id=pack.id,
+        )
+        for index, pack in enumerate(packs)
+    ]
+    config = LLMConfig(provider=LLMProviderName.FAKE, cache_enabled=False, jobs=2)
+
+    approved, verifications, runs = verify_findings(findings, packs, config, Path("."))
+
+    assert verifier.third_started_before_slow_finished is True
+    assert verifier.max_active_calls == config.jobs
+    assert approved == findings
+    assert [verification.finding for verification in verifications] == findings
+    assert [run.context_pack_id for run in runs] == [pack.id for pack in packs]
 
 
 def test_dedupe_findings_keeps_highest_ranked_duplicate() -> None:

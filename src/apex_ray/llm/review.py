@@ -1,6 +1,7 @@
 import json
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections.abc import Callable, Iterator
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
@@ -156,11 +157,7 @@ def review_context_packs(
     review_packs = [pack_for_reviewer(pack, reviewer) for pack in packs] if reviewer is not None else packs
     route_circuit = circuit_breaker if circuit_breaker is not None else LLMRouteCircuitBreaker()
 
-    def review_pack(
-        pack: ContextPack,
-        *,
-        first_route_permitted: bool,
-    ) -> tuple[list[Finding], list[LLMRun]]:
+    def review_pack(pack: ContextPack) -> tuple[list[Finding], list[LLMRun]]:
         rendered_prompt = render_review_prompt(
             pack,
             review_depth=review_depth,
@@ -171,7 +168,6 @@ def review_context_packs(
         pack_findings: list[Finding] = []
         runs: list[LLMRun] = []
         attempted_fallback = False
-        first_attempt = True
 
         while attempts:
             pack_config, profile, route_reason = attempts.pop(0)
@@ -195,12 +191,9 @@ def review_context_packs(
                     cached_findings = cache.read_review(cache_key)
                     cache_hit = cached_findings is not None
                 if cached_findings is None:
-                    open_failure = (
-                        None
-                        if first_attempt and first_route_permitted
-                        else route_circuit.open_failure(pack_config, profile)
-                    )
-                    first_attempt = False
+                    # Worker-side admission keeps cache hits usable while
+                    # preventing queued work from carrying a stale permit.
+                    open_failure = route_circuit.open_failure(pack_config, profile)
                     if open_failure is not None:
                         reason, trigger_status = open_failure
                         runs.append(
@@ -237,8 +230,6 @@ def review_context_packs(
                     usage = result.usage
                     if cache and cache_key:
                         cache.write_review(cache_key, pack_config, cached_findings)
-                else:
-                    first_attempt = False
                 filtered_findings = filter_findings_for_context_pack(cached_findings, pack)
                 pack_findings = [
                     finding.model_copy(
@@ -341,10 +332,6 @@ def review_context_packs(
 
         return [], runs
 
-    def first_review_route_permitted(pack: ContextPack) -> bool:
-        pack_config, profile, _route_reason = review_config_for_pack(base_config, pack)
-        return route_circuit.open_failure(pack_config, profile) is None
-
     progress.event(
         f"review {review_depth}: {len(review_packs)} context pack(s), "
         f"jobs={_effective_jobs(config.jobs, len(review_packs))}",
@@ -352,37 +339,33 @@ def review_context_packs(
     )
     if provider is None and config.jobs > 1 and len(review_packs) > 1:
         results: list[tuple[list[Finding], list[LLMRun]] | None] = [None] * len(review_packs)
-        with ThreadPoolExecutor(max_workers=config.jobs) as executor:
-            completed = 0
-            for chunk_start in range(0, len(review_packs), config.jobs):
-                chunk_end = min(chunk_start + config.jobs, len(review_packs))
-                route_permissions = {
-                    index: first_review_route_permitted(review_packs[index]) for index in range(chunk_start, chunk_end)
-                }
-                futures = {
-                    executor.submit(
-                        review_pack,
-                        review_packs[index],
-                        first_route_permitted=route_permissions[index],
-                    ): index
-                    for index in range(chunk_start, chunk_end)
-                }
-                for future in as_completed(futures):
-                    index = futures[future]
-                    result = future.result()
-                    results[index] = result
-                    completed += 1
-                    progress.event(
-                        _review_progress_message(
-                            review_depth,
-                            completed,
-                            len(review_packs),
-                            review_packs[index],
-                            result[1],
-                        ),
-                        key=f"review:{review_depth}",
-                        force=completed == len(review_packs),
-                    )
+
+        def submit_review_pack(
+            executor: ThreadPoolExecutor,
+            index: int,
+        ) -> Future[tuple[list[Finding], list[LLMRun]]]:
+            pack = review_packs[index]
+            return executor.submit(review_pack, pack)
+
+        completed = 0
+        for index, result in _rolling_thread_pool_results(
+            len(review_packs),
+            max_workers=config.jobs,
+            submit=submit_review_pack,
+        ):
+            results[index] = result
+            completed += 1
+            progress.event(
+                _review_progress_message(
+                    review_depth,
+                    completed,
+                    len(review_packs),
+                    review_packs[index],
+                    result[1],
+                ),
+                key=f"review:{review_depth}",
+                force=completed == len(review_packs),
+            )
         completed_results = [result for result in results if result is not None]
     else:
         completed_results = []
@@ -392,10 +375,7 @@ def review_context_packs(
                 key=f"review:{review_depth}:start",
                 force=index == 1,
             )
-            result = review_pack(
-                pack,
-                first_route_permitted=first_review_route_permitted(pack),
-            )
+            result = review_pack(pack)
             completed_results.append(result)
             progress.event(
                 _review_progress_message(review_depth, index, len(review_packs), pack, result[1]),
@@ -489,8 +469,6 @@ def verify_findings(
         verification_config: LLMConfig,
         profile: str | None,
         route_reason: str,
-        *,
-        first_route_permitted: bool,
     ) -> tuple[dict[int, FindingVerification], LLMRun]:
         pack = packs_by_id[pack_id]
         start = time.monotonic()
@@ -525,9 +503,9 @@ def verify_findings(
                 cache_hits = len(indexed_findings) - len(misses)
                 cache_misses = len(misses)
             if misses:
-                open_failure = (
-                    None if first_route_permitted else route_circuit.open_failure(verification_config, profile)
-                )
+                # Recheck after cache reads: this task may have waited in the
+                # executor while another in-flight call opened the circuit.
+                open_failure = route_circuit.open_failure(verification_config, profile)
                 if open_failure is not None:
                     reason, _trigger_status = open_failure
                     status = "skipped_circuit_open"
@@ -640,55 +618,41 @@ def verify_findings(
 
     verification_groups = _verification_groups_by_route(findings_by_pack_id, packs_by_id, config)
 
-    def first_verification_route_permitted(
-        route_config: LLMConfig,
-        profile: str | None,
-    ) -> bool:
-        return route_circuit.open_failure(route_config, profile) is None
-
     if provider is None and config.jobs > 1 and len(verification_groups) > 1:
         results: list[tuple[dict[int, FindingVerification], LLMRun] | None] = [None] * len(verification_groups)
         progress.event(
             f"verify: {len(findings)} finding(s) across {len(verification_groups)} context pack(s), jobs={config.jobs}",
             force=True,
         )
-        with ThreadPoolExecutor(max_workers=config.jobs) as executor:
-            completed = 0
-            for chunk_start in range(0, len(verification_groups), config.jobs):
-                chunk_end = min(chunk_start + config.jobs, len(verification_groups))
-                route_permissions = {
-                    index: first_verification_route_permitted(
-                        verification_groups[index][2],
-                        verification_groups[index][3],
-                    )
-                    for index in range(chunk_start, chunk_end)
-                }
-                futures = {
-                    executor.submit(
-                        verify_pack,
-                        pack_id,
-                        group,
-                        route_config,
-                        profile,
-                        route_reason,
-                        first_route_permitted=route_permissions[index],
-                    ): index
-                    for index, (pack_id, group, route_config, profile, route_reason) in enumerate(
-                        verification_groups[chunk_start:chunk_end],
-                        start=chunk_start,
-                    )
-                }
-                for future in as_completed(futures):
-                    index = futures[future]
-                    result = future.result()
-                    results[index] = result
-                    completed += 1
-                    pack_id = verification_groups[index][0]
-                    progress.event(
-                        _verify_progress_message(completed, len(verification_groups), pack_id, result[1]),
-                        key="verify",
-                        force=completed == len(verification_groups),
-                    )
+
+        def submit_verification_group(
+            executor: ThreadPoolExecutor,
+            index: int,
+        ) -> Future[tuple[dict[int, FindingVerification], LLMRun]]:
+            pack_id, group, route_config, profile, route_reason = verification_groups[index]
+            return executor.submit(
+                verify_pack,
+                pack_id,
+                group,
+                route_config,
+                profile,
+                route_reason,
+            )
+
+        completed = 0
+        for index, result in _rolling_thread_pool_results(
+            len(verification_groups),
+            max_workers=config.jobs,
+            submit=submit_verification_group,
+        ):
+            results[index] = result
+            completed += 1
+            pack_id = verification_groups[index][0]
+            progress.event(
+                _verify_progress_message(completed, len(verification_groups), pack_id, result[1]),
+                key="verify",
+                force=completed == len(verification_groups),
+            )
         completed_results = [result for result in results if result is not None]
     else:
         progress.event(
@@ -708,7 +672,6 @@ def verify_findings(
                 route_config,
                 profile,
                 route_reason,
-                first_route_permitted=first_verification_route_permitted(route_config, profile),
             )
             completed_results.append(result)
             progress.event(
@@ -769,6 +732,39 @@ def _route_label(config: LLMConfig, profile: str | None) -> str:
 
 def _elapsed_ms(start: float) -> int:
     return int((time.monotonic() - start) * 1000)
+
+
+def _rolling_thread_pool_results[T](
+    total: int,
+    *,
+    max_workers: int,
+    submit: Callable[[ThreadPoolExecutor, int], Future[T]],
+) -> Iterator[tuple[int, T]]:
+    """Yield completed tasks while keeping at most max_workers in flight.
+
+    Workers recheck route admission after cache lookup and immediately before
+    provider creation. Retryable failures can permit bounded overshoot while
+    sibling calls are still in flight, but queued work cannot call a provider
+    after the open circuit is observable.
+    """
+    next_index = 0
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        in_flight: dict[Future[T], int] = {}
+        while next_index < total and len(in_flight) < max_workers:
+            in_flight[submit(executor, next_index)] = next_index
+            next_index += 1
+
+        while in_flight:
+            completed_futures, _pending = wait(in_flight, return_when=FIRST_COMPLETED)
+            completed_results: list[tuple[int, T]] = []
+            for future in sorted(completed_futures, key=in_flight.__getitem__):
+                index = in_flight.pop(future)
+                result = future.result()
+                if next_index < total:
+                    in_flight[submit(executor, next_index)] = next_index
+                    next_index += 1
+                completed_results.append((index, result))
+            yield from completed_results
 
 
 def _effective_jobs(jobs: int, total: int) -> int:
