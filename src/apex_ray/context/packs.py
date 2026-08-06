@@ -14,6 +14,7 @@ from apex_ray.context.snippets import test_snippets as _test_snippets
 from apex_ray.line_ranges import merge_line_ranges as _merge_line_ranges
 from apex_ray.memory import select_memory_for_pack
 from apex_ray.models import (
+    AnalyzerCoverageSignal,
     AnalyzerFile,
     AnalyzerReference,
     AnalyzerResult,
@@ -41,10 +42,15 @@ def build_context_packs(
 ) -> list[ContextPack]:
     fallback_reasons_by_path = fallback_reasons_by_path or {}
     changed_by_path = {file.path: file for file in changed_files}
+    fallback_coverage_by_path: dict[str, AnalyzerCoverageSignal] = {}
     packed_paths: set[str] = set()
     packs: list[ContextPack] = []
 
     for result in analyzer_results:
+        coverage = _pack_analyzer_coverage(result)
+        if coverage is not None:
+            for failed_path in result.failed_files:
+                fallback_coverage_by_path.setdefault(failed_path, coverage)
         for analyzed_file in result.files:
             changed_file = changed_by_path.get(analyzed_file.path)
             if not changed_file:
@@ -59,6 +65,8 @@ def build_context_packs(
                         "Analyzer semantic-enrichment limit reached; this remaining scope uses diff-only context.",
                         ranges=analyzed_file.uncovered_changed_ranges,
                         pack_id=f"{changed_file.path}#diff-uncovered",
+                        warnings=list(dict.fromkeys(analyzed_file.warnings)),
+                        analyzer_coverage=coverage,
                     )
                 )
             packed_paths.add(changed_file.path)
@@ -67,7 +75,13 @@ def build_context_packs(
         if changed_file.path in packed_paths or not _should_build_fallback_pack(changed_file):
             continue
         packs.append(
-            _fallback_pack_for_file(changed_file, config, repo_root, fallback_reasons_by_path.get(changed_file.path))
+            _fallback_pack_for_file(
+                changed_file,
+                config,
+                repo_root,
+                fallback_reasons_by_path.get(changed_file.path),
+                analyzer_coverage=fallback_coverage_by_path.get(changed_file.path),
+            )
         )
 
     return packs
@@ -95,6 +109,8 @@ def _fallback_pack_for_file(
     *,
     ranges: list[tuple[int, int]] | None = None,
     pack_id: str | None = None,
+    warnings: list[str] | None = None,
+    analyzer_coverage: AnalyzerCoverageSignal | None = None,
 ) -> ContextPack:
     related_test_snippets: list[CodeSnippet] = []
     scoped_file = changed_file
@@ -159,7 +175,8 @@ def _fallback_pack_for_file(
             related_test_snippets=related_test_snippets,
             risk_signals=risk_signals,
             rules=config.rules,
-            warnings=([fallback_reason] if fallback_reason else []),
+            warnings=list(dict.fromkeys([*([fallback_reason] if fallback_reason else []), *(warnings or [])])),
+            analyzer_coverage=(analyzer_coverage.model_copy(deep=True) if analyzer_coverage is not None else None),
         ),
         config,
     )
@@ -334,7 +351,8 @@ def _packs_for_file(
                         related_test_snippets=related_test_snippets,
                         risk_signals=risk_signals,
                         rules=config.rules,
-                        warnings=result.warnings,
+                        warnings=_pack_warnings(result, analyzed_file),
+                        analyzer_coverage=_pack_analyzer_coverage(result),
                     ),
                     config,
                 )
@@ -381,7 +399,8 @@ def _packs_for_file(
                 related_test_snippets=related_test_snippets,
                 risk_signals=risk_signals,
                 rules=config.rules,
-                warnings=result.warnings,
+                warnings=_pack_warnings(result, analyzed_file),
+                analyzer_coverage=_pack_analyzer_coverage(result),
             ),
             config,
         )
@@ -449,9 +468,31 @@ def _symbol_pack(
             related_test_snippets=related_test_snippets,
             risk_signals=risk_signals,
             rules=config.rules,
-            warnings=result.warnings,
+            warnings=_pack_warnings(result, analyzed_file),
+            analyzer_coverage=_pack_analyzer_coverage(result),
         ),
         config,
+    )
+
+
+def _pack_warnings(result: AnalyzerResult, analyzed_file: AnalyzerFile) -> list[str]:
+    if result.language == "typescript":
+        return list(dict.fromkeys(analyzed_file.warnings))
+    return list(dict.fromkeys([*result.warnings, *analyzed_file.warnings]))
+
+
+def _pack_analyzer_coverage(result: AnalyzerResult) -> AnalyzerCoverageSignal | None:
+    if result.language != "typescript" or not (
+        result.partial or (result.coverage is not None and result.coverage.partial)
+    ):
+        return None
+    if result.coverage is not None:
+        return result.coverage.model_copy(deep=True)
+    return AnalyzerCoverageSignal(
+        partial=True,
+        reasonCodes=["partial_reason_unspecified"],
+        scopes=["analyzer"],
+        failedFileCount=len(result.failed_files),
     )
 
 

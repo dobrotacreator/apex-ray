@@ -6,6 +6,7 @@ from typing import Any, Literal
 
 from pydantic import ValidationError
 
+from apex_ray.models import AnalyzerResult
 from apex_ray.pr_eval.models import (
     PrEvalCaseStatus,
     PullRequestEvalCase,
@@ -199,7 +200,17 @@ def _label_file_digest(labels_dir: Path, pr_number: int) -> str | None:
         return "unreadable"
 
 
-def warnings_indicate_partial_analysis(warnings: list[str]) -> bool:
+def warnings_indicate_partial_analysis(
+    warnings: list[str],
+    analyzer_results: list[AnalyzerResult] | None = None,
+) -> bool:
+    typescript_results = [result for result in analyzer_results or [] if result.language == "typescript"]
+    if any(
+        result.partial or (result.coverage is not None and result.coverage.partial) for result in typescript_results
+    ):
+        return True
+    if typescript_results and all(result.coverage is not None for result in typescript_results):
+        return False
     partial_markers = (
         "partial TypeScript analyzer result",
         "TypeScript analyzer unavailable",

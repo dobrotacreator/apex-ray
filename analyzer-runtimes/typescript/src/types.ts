@@ -70,6 +70,63 @@ export interface FileAnalysis {
   exports: string[];
   relatedTests: string[];
   changedSymbols: AnalyzerSymbol[];
+  warnings?: string[];
+}
+
+export type AnalyzerShardStatus =
+  | "complete"
+  | "partial"
+  | "failed"
+  | "timeout"
+  | "skipped";
+
+export type AnalyzerPartialReasonCode =
+  | "repository_inventory_partial"
+  | "configuration_discovery_partial"
+  | "workspace_index_partial"
+  | "analysis_time_budget_exhausted"
+  | "program_context_incomplete"
+  | "changed_file_analysis_incomplete"
+  | "shard_failed"
+  | "shard_timeout"
+  | "shard_skipped"
+  | "partial_reason_unspecified";
+
+export type AnalyzerCoverageScope =
+  | "analyzer"
+  | "repository_inventory"
+  | "configuration"
+  | "workspace_index"
+  | "program_contexts"
+  | "changed_files"
+  | "shards";
+
+export interface AnalyzerCoverageSignal {
+  partial: boolean;
+  reasonCodes: AnalyzerPartialReasonCode[];
+  scopes: AnalyzerCoverageScope[];
+  failedFileCount: number;
+}
+
+export interface AnalyzerShardMetrics {
+  index: number;
+  total: number;
+  status: AnalyzerShardStatus;
+  wallDurationMs: number;
+  stageDurationsMs: Record<string, number>;
+  changedFileCount: number;
+  analyzedFileCount: number;
+  failedFileCount: number;
+  warningCount: number;
+  partialReasonCodes: AnalyzerPartialReasonCode[];
+  indexCacheHits: number;
+  indexCacheMisses: number;
+}
+
+export interface AnalyzerMetrics {
+  wallDurationMs: number;
+  stageDurationsMs: Record<string, number>;
+  shards: AnalyzerShardMetrics[];
 }
 
 export interface AnalyzerResult {
@@ -80,6 +137,8 @@ export interface AnalyzerResult {
   warnings: string[];
   indexCache: RepoIndexCacheStats | null;
   partial: boolean;
+  coverage: AnalyzerCoverageSignal;
+  metrics: AnalyzerMetrics;
   failedFiles: string[];
   shardFailures: AnalyzerShardFailure[];
 }
@@ -133,6 +192,7 @@ export interface RepoIndex {
   fileIdentities?: Map<string, StableFileIdentity>;
   cacheStats: RepoIndexCacheStats | null;
   partial?: boolean;
+  workspacePartial?: boolean;
   markModuleResolutionPartial?: () => void;
 }
 

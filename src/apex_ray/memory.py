@@ -207,6 +207,8 @@ def memory_cards_for_audience(pack: ContextPack, audience: str) -> list[MemoryMa
 
 def pack_prompt_payload(pack: ContextPack, audience: str, depth: str = "deep") -> dict[str, object]:
     payload = pack.model_dump(mode="json")
+    if payload.get("analyzer_coverage") is None:
+        payload.pop("analyzer_coverage", None)
     payload["symbol"] = _compact_symbol_for_prompt(pack.symbol)
     payload["symbols"] = [_compact_symbol_for_prompt(symbol) for symbol in pack.symbols]
     payload["memory_matches"] = [match.model_dump(mode="json") for match in memory_cards_for_audience(pack, audience)]
@@ -233,6 +235,7 @@ def pack_prompt_payload(pack: ContextPack, audience: str, depth: str = "deep") -
                 "memory_matches",
                 "reviewer",
                 "warnings",
+                "analyzer_coverage",
                 "stats",
             )
             if key in payload

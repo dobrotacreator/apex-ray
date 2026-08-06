@@ -18,6 +18,9 @@ from apex_ray.findings import (
 from apex_ray.models import ReviewReport
 
 DEFAULT_REVIEW_TELEMETRY_PATH = ".apex-ray/telemetry/review-runs.jsonl"
+_ANALYZER_TELEMETRY_STAGES = frozenset(
+    {"manifest", "inventory", "program_contexts", "workspace_index", "changed_files", "total"}
+)
 
 
 class TelemetryError(RuntimeError):
@@ -115,6 +118,7 @@ def append_review_telemetry(
         ),
         "pack_status_counts": dict(sorted(Counter(status.status for status in coverage.pack_statuses).items())),
         "risk_by_severity": report.summary.risk_by_severity,
+        "analyzers": _analyzer_telemetry(report),
         "reviewers": reviewers,
         "stage_durations_ms": dict(sorted(report.stage_durations_ms.items())),
         "routes": [route.model_dump(mode="json", exclude_none=True) for route in coverage.routes],
@@ -131,6 +135,62 @@ def append_review_telemetry(
     except OSError as exc:
         raise TelemetryError(f"Unable to append review telemetry {telemetry_path}: {exc}") from exc
     return telemetry_path
+
+
+def _analyzer_telemetry(report: ReviewReport) -> list[dict[str, Any]]:
+    analyzers: list[dict[str, Any]] = []
+    for result in report.analyzer_results:
+        summarized_warning_messages = {summary.message for summary in result.warning_summaries}
+        warning_count = sum(summary.occurrences for summary in result.warning_summaries) + sum(
+            warning not in summarized_warning_messages for warning in result.warnings
+        )
+        unique_warning_count = len(set(result.warnings).union(summarized_warning_messages))
+        metrics = result.metrics
+        failed_file_count = max(
+            len(result.failed_files),
+            result.coverage.failed_file_count if result.coverage is not None else 0,
+        )
+        analyzers.append(
+            {
+                "language": result.language,
+                "partial": result.coverage.partial if result.coverage is not None else result.partial,
+                "partial_reason_codes": list(result.coverage.reason_codes) if result.coverage is not None else [],
+                "partial_scopes": list(result.coverage.scopes) if result.coverage is not None else [],
+                "failed_file_count": failed_file_count,
+                "warning_count": warning_count,
+                "unique_warning_count": unique_warning_count,
+                "wall_duration_ms": metrics.wall_duration_ms if metrics is not None else 0,
+                "stage_durations_ms": _analyzer_stage_telemetry(metrics.stage_durations_ms) if metrics else {},
+                "shards": [
+                    {
+                        "index": shard.index,
+                        "total": shard.total,
+                        "status": shard.status,
+                        "wall_duration_ms": shard.wall_duration_ms,
+                        "stage_durations_ms": _analyzer_stage_telemetry(shard.stage_durations_ms),
+                        "changed_file_count": shard.changed_file_count,
+                        "analyzed_file_count": shard.analyzed_file_count,
+                        "failed_file_count": shard.failed_file_count,
+                        "warning_count": shard.warning_count,
+                        "partial_reason_codes": list(shard.partial_reason_codes),
+                        "index_cache_hits": shard.index_cache_hits,
+                        "index_cache_misses": shard.index_cache_misses,
+                    }
+                    for shard in metrics.shards
+                ]
+                if metrics is not None
+                else [],
+            }
+        )
+    return analyzers
+
+
+def _analyzer_stage_telemetry(stage_durations_ms: Mapping[str, int]) -> dict[str, int]:
+    return {
+        stage: duration_ms
+        for stage, duration_ms in sorted(stage_durations_ms.items())
+        if stage in _ANALYZER_TELEMETRY_STAGES
+    }
 
 
 def load_review_telemetry(path: Path) -> list[dict[str, Any]]:

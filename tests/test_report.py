@@ -1,6 +1,8 @@
 from apex_ray.gates import evaluate_pre_push_gate
 from apex_ray.models import (
+    AnalyzerResult,
     AnalyzerSymbol,
+    AnalyzerWarningSummary,
     ChangedFile,
     ContextPack,
     ContextPackStats,
@@ -25,13 +27,52 @@ from apex_ray.models import (
     ReviewConfig,
     ReviewCoverageCompletion,
     ReviewerConfig,
+    ReviewReport,
     RiskSeverity,
     RiskSignal,
     TargetMode,
 )
-from apex_ray.report import build_report, render_markdown
+from apex_ray.report import build_report, render_html, render_markdown
 from apex_ray.report.coverage import render_coverage_summary_lines
 from apex_ray.report.coverage_breakdown import pack_residual_priority
+
+
+def test_report_renders_warning_multiplicity_and_loads_legacy_analyzer_fields() -> None:
+    analyzer_result = AnalyzerResult(
+        language="typescript",
+        projectRoot="/repo",
+        warnings=["TypeScript workspace index is partial."],
+        warningSummaries=[
+            AnalyzerWarningSummary(
+                message="TypeScript workspace index is partial.",
+                occurrences=3,
+                shardIndexes=[1, 2, 3],
+            )
+        ],
+        partial=True,
+    )
+    report = build_report(
+        ProjectProfile(root="/repo", is_git_repo=True),
+        ReviewConfig(),
+        DiffSummary(target_mode=TargetMode.PATCH),
+        analyzer_results=[analyzer_result],
+    )
+
+    assert "repeated 3 times; shards 1, 2, 3" in render_markdown(report)
+    assert "repeated 3 times; shards 1, 2, 3" in render_html(report)
+
+    legacy_payload = report.model_dump(mode="json")
+    legacy_result = legacy_payload["analyzer_results"][0]
+    legacy_result.pop("warning_summaries")
+    legacy_result.pop("coverage")
+    legacy_result.pop("metrics")
+    round_tripped = ReviewReport.model_validate(legacy_payload)
+
+    assert round_tripped.schema_version == "review-report/v1"
+    assert round_tripped.analyzer_results[0].warnings == ["TypeScript workspace index is partial."]
+    assert round_tripped.analyzer_results[0].warning_summaries == []
+    assert round_tripped.analyzer_results[0].coverage is None
+    assert round_tripped.analyzer_results[0].metrics is None
 
 
 def test_render_markdown_explains_project_risk_and_focused_reviewers() -> None:

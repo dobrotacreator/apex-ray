@@ -24,6 +24,7 @@ from apex_ray.models import (
     ReviewInputSnapshot,
     ReviewReport,
 )
+from apex_ray.report.analyzers import analyzer_warning_labels
 from apex_ray.report.coverage import (
     _build_llm_coverage,
     _format_pack_symbols,
@@ -460,7 +461,7 @@ def render_markdown(report: ReviewReport) -> str:
     lines.extend(["## Warnings", ""])
     warnings = [*report.diff.warnings]
     for analyzer_result in report.analyzer_results:
-        warnings.extend(analyzer_result.warnings)
+        warnings.extend(analyzer_warning_labels(analyzer_result))
 
     if warnings:
         for warning in warnings:

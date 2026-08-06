@@ -10,6 +10,8 @@ import yaml
 
 from apex_ray import pr_eval
 from apex_ray.models import (
+    AnalyzerCoverageSignal,
+    AnalyzerResult,
     DiffSummary,
     Finding,
     FindingConfidence,
@@ -37,6 +39,49 @@ from apex_ray.pr_eval import (
 )
 from apex_ray.pr_eval import runner as pr_eval_runner
 from apex_ray.report import build_report
+
+
+def test_pr_eval_prefers_structured_typescript_coverage_with_legacy_warning_fallback() -> None:
+    complete = AnalyzerResult(
+        language="typescript",
+        projectRoot="/repo",
+        warnings=["Returning partial TypeScript analyzer result from a stale producer."],
+        partial=False,
+        coverage=AnalyzerCoverageSignal(partial=False),
+    )
+    partial = complete.model_copy(
+        update={
+            "warnings": [],
+            "partial": True,
+            "coverage": AnalyzerCoverageSignal(
+                partial=True,
+                reasonCodes=["workspace_index_partial"],
+            ),
+        }
+    )
+    legacy = AnalyzerResult(
+        language="typescript",
+        projectRoot="/legacy",
+        warnings=["Returning partial TypeScript analyzer result from a legacy shard."],
+        partial=False,
+    )
+
+    assert pr_eval_runner._warnings_indicate_partial_analysis(complete.warnings, [complete]) is False
+    assert pr_eval_runner._warnings_indicate_partial_analysis([], [partial]) is True
+    assert (
+        pr_eval_runner._warnings_indicate_partial_analysis(
+            [*complete.warnings, *legacy.warnings],
+            [complete, legacy],
+        )
+        is True
+    )
+    assert (
+        pr_eval_runner._warnings_indicate_partial_analysis(
+            ["TypeScript analyzer timed out after 30s"],
+            [],
+        )
+        is True
+    )
 
 
 def test_greptile_findings_keep_first_pass_inline_comments_and_ignore_edited_summary() -> None:
