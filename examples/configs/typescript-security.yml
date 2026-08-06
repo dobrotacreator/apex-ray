@@ -144,8 +144,8 @@ review:
       require_verified_findings: true
       fail_on_quality_gate: true
       fail_on_partial_severity: critical
-      auto_followup_p0: true
-      auto_followup_p0_max_pack_reviews: 16
+      auto_followup: true
+      auto_followup_max_pack_reviews: 16
       incremental_retry:
         enabled: true
         max_resolution_calls_per_retry: 8

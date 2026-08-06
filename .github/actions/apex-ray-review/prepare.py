@@ -53,6 +53,9 @@ class PlanOptions(NamedTuple):
     artifact_name: str
     sarif_category: str
     fail_on_quality_gate: bool
+    coverage_policy: str
+    followup_max_pack_reviews: int
+    max_followup_passes: int
 
 
 def create_plan(options: PlanOptions) -> dict[str, Any]:
@@ -65,6 +68,17 @@ def create_plan(options: PlanOptions) -> dict[str, Any]:
     requested_config = _safe_repo_path(options.config_path, label="Config path")
     reviewers = parse_reviewers(options.reviewers)
     llm = _choice(options.llm, {"auto", "true", "false"}, label="LLM mode")
+    coverage_policy = _choice(
+        options.coverage_policy,
+        {"configured", "complete"},
+        label="Coverage policy",
+    )
+    if coverage_policy == "complete" and llm == "false":
+        raise ValueError("Coverage policy 'complete' requires LLM review; do not set llm: false.")
+    if options.followup_max_pack_reviews <= 0:
+        raise ValueError("Follow-up max pack reviews must be greater than zero.")
+    if options.max_followup_passes <= 0:
+        raise ValueError("Max follow-up passes must be greater than zero.")
     artifact_name = _safe_artifact_value(options.artifact_name, label="Artifact name")
     sarif_category = _safe_artifact_value(
         options.sarif_category,
@@ -98,6 +112,8 @@ def create_plan(options: PlanOptions) -> dict[str, Any]:
         repository=options.repository,
         actor=options.actor,
     )
+    if coverage_policy == "complete" and untrusted_pr:
+        raise ValueError("Coverage policy 'complete' requires LLM review and cannot run for an untrusted pull request.")
     use_head_config = bool(pr_data is not None and options.trust_pr_config and not untrusted_pr)
     # INPUT_BASE selects only the analyzed diff. Restricted configuration has a
     # separate, fail-closed trust root supplied by the pull-request event.
@@ -172,6 +188,19 @@ def create_plan(options: PlanOptions) -> dict[str, Any]:
         args.extend(["--base", base_sha])
     for reviewer in reviewers:
         args.extend(["--reviewer", reviewer])
+    if coverage_policy == "complete":
+        # ``llm: auto`` deliberately remains config-driven. The CLI validates
+        # the fully resolved config and fails before the pipeline when coverage
+        # completion is requested with LLM review disabled.
+        args.extend(
+            [
+                "--until-complete",
+                "--followup-max-pack-reviews",
+                str(options.followup_max_pack_reviews),
+                "--max-followup-passes",
+                str(options.max_followup_passes),
+            ]
+        )
 
     if untrusted_pr:
         args.append("--no-llm")
@@ -204,6 +233,9 @@ def create_plan(options: PlanOptions) -> dict[str, Any]:
         "artifact_name": artifact_name,
         "sarif_category": sarif_category,
         "fail_on_quality_gate": options.fail_on_quality_gate,
+        "coverage_policy": coverage_policy,
+        "followup_max_pack_reviews": options.followup_max_pack_reviews,
+        "max_followup_passes": options.max_followup_passes,
         "notices": notices,
         "args": args,
     }
@@ -704,6 +736,16 @@ def _parse_bool(value: str, *, label: str) -> bool:
     return normalized == "true"
 
 
+def _parse_positive_int(value: str, *, label: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise ValueError(f"{label} must be a positive integer.") from exc
+    if parsed <= 0:
+        raise ValueError(f"{label} must be a positive integer.")
+    return parsed
+
+
 def _write_output(name: str, value: str) -> None:
     output_path = os.environ.get("GITHUB_OUTPUT")
     if not output_path:
@@ -792,6 +834,7 @@ def _write_plan_outputs(plan: dict[str, Any], plan_path: Path) -> None:
         "artifact-name": str(plan["artifact_name"]),
         "sarif-category": str(plan["sarif_category"]),
         "fail-on-quality-gate": str(plan["fail_on_quality_gate"]).lower(),
+        "coverage-policy": str(plan["coverage_policy"]),
     }
     for name, value in outputs.items():
         _write_output(name, value)
@@ -829,6 +872,15 @@ def _plan_from_environment() -> int:
         fail_on_quality_gate=_parse_bool(
             os.environ["INPUT_FAIL_ON_QUALITY_GATE"],
             label="Fail on quality gate",
+        ),
+        coverage_policy=os.environ.get("INPUT_COVERAGE_POLICY", "configured"),
+        followup_max_pack_reviews=_parse_positive_int(
+            os.environ.get("INPUT_FOLLOWUP_MAX_PACK_REVIEWS", "16"),
+            label="Follow-up max pack reviews",
+        ),
+        max_followup_passes=_parse_positive_int(
+            os.environ.get("INPUT_MAX_FOLLOWUP_PASSES", "8"),
+            label="Max follow-up passes",
         ),
     )
     plan = create_plan(options)
@@ -923,6 +975,11 @@ def _run(plan_path: Path) -> int:
 
 
 def _finalize(plan_path: Path) -> int:
+    from apex_ray.pipeline.coverage import (
+        CoverageScopeError,
+        coverage_is_complete,
+        resolve_completion_reviewer_scope,
+    )
     from apex_ray.report import load_review_report
 
     plan = _read_plan(plan_path)
@@ -953,7 +1010,6 @@ def _finalize(plan_path: Path) -> int:
         )
         return 1
     counts = Counter(str(finding.severity) for finding in report.findings)
-    reviewer_text = ", ".join(plan["reviewers"]) or "configured reviewers"
     coverage = report.llm_coverage
     quality_gate_status = str(coverage.quality_gate_status)
     if quality_gate_status not in _QUALITY_GATE_STATUSES:
@@ -962,6 +1018,40 @@ def _finalize(plan_path: Path) -> int:
     if not isinstance(fail_on_quality_gate, bool):
         raise ValueError("Invalid Apex Ray Action quality gate policy.")
     quality_gate_failed = fail_on_quality_gate and quality_gate_status == "fail"
+    coverage_policy = plan.get("coverage_policy", "configured")
+    if coverage_policy not in {"configured", "complete"}:
+        raise ValueError("Invalid Apex Ray Action coverage policy.")
+    coverage_status = str(coverage.completion_status)
+    if coverage_status not in {"disabled", "complete", "partial", "incomplete"}:
+        raise ValueError(f"Invalid coverage completion status: {coverage_status!r}")
+    completion = report.coverage_completion
+    if coverage_policy == "complete":
+        if completion is None:
+            raise ValueError("Complete coverage policy requires a persisted coverage completion result.")
+        plan_reviewers = plan.get("reviewers")
+        if not isinstance(plan_reviewers, list) or not all(isinstance(item, str) for item in plan_reviewers):
+            raise ValueError("Invalid Apex Ray Action reviewer scope.")
+        try:
+            expected_scope = resolve_completion_reviewer_scope(report.config, plan_reviewers)
+        except CoverageScopeError as exc:
+            raise ValueError(f"Invalid Apex Ray Action reviewer scope: {exc}") from exc
+        expected_reviewer_ids = expected_scope or []
+        completion_reviewer_ids = list(dict.fromkeys(completion.reviewer_ids))
+        if completion_reviewer_ids != completion.reviewer_ids:
+            raise ValueError("Persisted coverage completion has an invalid reviewer scope.")
+        if completion_reviewer_ids != expected_reviewer_ids:
+            raise ValueError("Persisted coverage completion does not match the requested reviewer scope.")
+        if completion.status == "complete" and not coverage_is_complete(
+            report,
+            reviewer_ids=completion_reviewer_ids or None,
+        ):
+            raise ValueError("Persisted coverage completion is inconsistent with the final review report.")
+        coverage_status = str(completion.status)
+        reviewer_text = ", ".join(expected_reviewer_ids) or "general"
+    else:
+        reviewer_text = ", ".join(plan["reviewers"]) or "configured reviewers"
+    completion_failed = coverage_policy == "complete" and coverage_status != "complete"
+    gate_failed = quality_gate_failed or completion_failed
     reviewer_statuses = {
         reviewer.reviewer_id: reviewer.status
         for reviewer in sorted(coverage.reviewers, key=lambda reviewer: reviewer.reviewer_id)
@@ -978,6 +1068,7 @@ def _finalize(plan_path: Path) -> int:
             f"(critical `{counts['critical']}`, high `{counts['high']}`, "
             f"medium `{counts['medium']}`, low `{counts['low']}`)",
             f"- Coverage quality gate: `{quality_gate_status}`",
+            f"- Coverage completion: `{coverage_status}`",
             f"- Context coverage: `{coverage.reviewed_context_packs}` / `{coverage.total_context_packs}` packs",
             f"- Markdown artifact: `{plan['markdown_output']}`",
             f"- SARIF artifact: `{plan['sarif_output']}`",
@@ -992,18 +1083,19 @@ def _finalize(plan_path: Path) -> int:
         "low-findings-count": str(counts["low"]),
         "partial-coverage": str(partial_coverage).lower(),
         "partial-coverage-severity": str(coverage.partial_severity),
+        "coverage-status": coverage_status,
         "reviewer-statuses": json.dumps(
             reviewer_statuses,
             sort_keys=True,
             separators=(",", ":"),
         ),
         "quality-gate-status": quality_gate_status,
-        "gate-outcome": "fail" if quality_gate_failed else "pass",
+        "gate-outcome": "fail" if gate_failed else "pass",
         "sarif-ready": "true",
     }
     for name, value in outputs.items():
         _write_output(name, value)
-    return 1 if quality_gate_failed else 0
+    return 1 if gate_failed else 0
 
 
 def main() -> int:

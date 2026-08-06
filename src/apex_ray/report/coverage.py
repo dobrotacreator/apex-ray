@@ -1,5 +1,4 @@
 from collections import Counter
-from shlex import quote
 from typing import Literal
 
 from apex_ray.findings import (
@@ -9,6 +8,7 @@ from apex_ray.findings import (
     unresolved_verification_candidate_pack_ids,
     verification_candidates_by_reviewer_pack,
 )
+from apex_ray.invocation import render_shell_command
 from apex_ray.llm.usage import aggregate_actual_usage
 from apex_ray.models import (
     ContextPack,
@@ -46,7 +46,7 @@ from apex_ray.report.run_state import (
     EffectiveLLMPackRunState,
     reduce_llm_pack_run_states,
 )
-from apex_ray.reviewers import reviewer_matches_pack
+from apex_ray.reviewers import llm_config_for_reviewer, reviewer_matches_pack
 
 
 def _build_llm_coverage(
@@ -319,6 +319,16 @@ def _build_llm_coverage(
         verification_candidates,
         unresolved_verification_pack_ids,
     )
+    existing_todo_pack_ids = {todo.context_pack_id for todo in reviewer_coverage_todos}
+    depth_upgrade_todos = [
+        todo
+        for todo in _build_high_risk_depth_todos(
+            shallow_only_high_risk_ids,
+            context_packs,
+            reviewer_coverage,
+        )
+        if todo.context_pack_id not in existing_todo_pack_ids
+    ]
     reviewer_debt_pack_ids = {todo.context_pack_id for todo in reviewer_coverage_todos}
     coverage_todos = [
         *(
@@ -327,7 +337,16 @@ def _build_llm_coverage(
             if todo.context_pack_id not in reviewer_debt_pack_ids
         ),
         *reviewer_coverage_todos,
+        *depth_upgrade_todos,
     ]
+    depth_upgrade_ids = set(shallow_only_high_risk_ids)
+    for todo in coverage_todos:
+        if todo.context_pack_id in depth_upgrade_ids:
+            todo.suggested_command = continue_command_for_pack(
+                todo.context_pack_id,
+                reviewer_id=todo.reviewer_id,
+                review_depth_upgrade=True,
+            )
     coverage_todos.sort(
         key=lambda todo: (
             {"p0": 0, "p1": 1, "p2": 2}.get(todo.priority, 9),
@@ -488,6 +507,9 @@ def _build_reviewer_coverage(
         reviewer = configured.get(reviewer_id)
         required = reviewer.required if reviewer is not None and reviewer.enabled else False
         verify_enabled = reviewer.verify if reviewer is not None and reviewer.verify is not None else config.llm.verify
+        reviewer_llm_config = (
+            llm_config_for_reviewer(config.llm, reviewer) if reviewer is not None and reviewer.enabled else config.llm
+        )
         reviewer_states = [
             state
             for (state_reviewer_id, _pack_id), state in effective_run_states.items()
@@ -594,6 +616,11 @@ def _build_reviewer_coverage(
                 reviewer_id=reviewer_id,
                 required=required,
                 verify_enabled=verify_enabled,
+                coverage_mode=reviewer_llm_config.coverage_mode,
+                review_depth=reviewer.review_depth if reviewer is not None else reviewer_llm_config.review_depth,
+                max_packs=reviewer_llm_config.max_packs,
+                max_deep_packs=reviewer_llm_config.max_deep_packs,
+                max_input_tokens=reviewer_llm_config.max_input_tokens,
                 status=status,
                 reasons=reasons,
                 matching_context_packs=len(matching_ids),
@@ -668,6 +695,45 @@ def _format_run_cache(run: LLMRun) -> str:
 
 def _unreviewed_pack_reason(pack_id: str, coverage: LLMCoverageSummary) -> str:
     return coverage.unreviewed_context_pack_reasons.get(pack_id, "no review run recorded")
+
+
+def render_coverage_summary_lines(coverage: LLMCoverageSummary) -> list[str]:
+    if not coverage.enabled:
+        return ["Review coverage: DISABLED"]
+    reviewed = coverage.reviewed_context_packs
+    total = coverage.total_context_packs
+    ratio = reviewed / total if total else 1.0
+    status = "COMPLETE" if coverage.completion_status == "complete" else coverage.completion_status.upper()
+    lines = [f"Review coverage: {status} - {reviewed}/{total} unique context packs ({ratio:.1%})"]
+    assignment_total = sum(reviewer.matching_context_packs for reviewer in coverage.reviewers)
+    assignment_reviewed = sum(reviewer.reviewed_context_packs for reviewer in coverage.reviewers)
+    if assignment_total:
+        lines.append(f"Reviewer assignments: {assignment_reviewed}/{assignment_total}")
+    high_risk_total = coverage.high_risk_context_packs
+    high_risk_reviewed = coverage.reviewed_high_risk_context_packs
+    high_risk_depth_debt = len(coverage.shallow_only_high_risk_context_pack_ids)
+    high_risk_status = "COMPLETE" if high_risk_reviewed == high_risk_total and high_risk_depth_debt == 0 else "PARTIAL"
+    high_risk_depth_suffix = f"; depth debt: {high_risk_depth_debt} shallow-only" if high_risk_depth_debt else ""
+    lines.append(
+        f"High-risk coverage: {high_risk_status} - {high_risk_reviewed}/{high_risk_total}{high_risk_depth_suffix}"
+    )
+    residual_counts = Counter(residual.priority for residual in coverage.residual_risk_context_packs)
+    lines.append(
+        f"Remaining: P0 {residual_counts['p0']}, P1 {residual_counts['p1']}, "
+        f"P2 {residual_counts['p2']} globally unreviewed"
+    )
+    reviewer_summaries = {summary.reviewer_id: summary for summary in coverage.reviewers}
+    assignment_counts = Counter(
+        todo.priority
+        for todo in coverage.coverage_todos
+        if todo.reviewer_id is not None
+        and _todo_is_reviewer_assignment_debt(todo, reviewer_summaries.get(todo.reviewer_id))
+    )
+    lines.append(
+        f"Reviewer assignment debt: P0 {assignment_counts['p0']}, P1 {assignment_counts['p1']}, "
+        f"P2 {assignment_counts['p2']}"
+    )
+    return lines
 
 
 def _coverage_unreviewed_pack_reason(
@@ -949,9 +1015,7 @@ def _build_reviewer_coverage_todos(
                 )
             }
         )
-        debt_ids = set(reviewer.selected_context_pack_ids).difference(reviewer.reviewed_context_pack_ids)
-        if reviewer.matching_context_pack_ids and not reviewer.selected_context_pack_ids:
-            debt_ids.update(reviewer.matching_context_pack_ids)
+        debt_ids = set(reviewer.matching_context_pack_ids).difference(reviewer.reviewed_context_pack_ids)
         debt_ids.update(failed_verify_ids)
         debt_ids.update(missing_verify_ids)
         for pack_id in debt_ids:
@@ -964,7 +1028,12 @@ def _build_reviewer_coverage_todos(
                 else (
                     f"Reviewer {reviewer.reviewer_id} has unresolved verification subjects."
                     if pack_id in missing_verify_ids
-                    else f"Reviewer {reviewer.reviewer_id} did not complete its selected review."
+                    else (
+                        f"Reviewer {reviewer.reviewer_id} did not review a matching pack because it "
+                        "was not selected by reviewer limits."
+                        if pack_id not in reviewer.selected_context_pack_ids
+                        else f"Reviewer {reviewer.reviewer_id} did not complete its selected review."
+                    )
                 )
             )
             todos.append(
@@ -996,16 +1065,83 @@ def _build_reviewer_coverage_todos(
     )
 
 
+def _build_high_risk_depth_todos(
+    shallow_only_pack_ids: list[str],
+    context_packs: list[ContextPack],
+    reviewer_coverage: list[LLMReviewerCoverageSummary],
+) -> list[LLMCoverageTodo]:
+    packs_by_id = {pack.id: pack for pack in context_packs}
+    reviewer_order = {reviewer.reviewer_id: index for index, reviewer in enumerate(reviewer_coverage)}
+    todos: list[LLMCoverageTodo] = []
+    for pack_id in shallow_only_pack_ids:
+        pack = packs_by_id.get(pack_id)
+        if pack is None:
+            continue
+        matching = [reviewer for reviewer in reviewer_coverage if pack_id in reviewer.matching_context_pack_ids]
+        reviewer_id = (
+            min(
+                matching,
+                key=lambda reviewer: (
+                    not reviewer.required,
+                    reviewer_order[reviewer.reviewer_id],
+                ),
+            ).reviewer_id
+            if matching
+            else None
+        )
+        reviewer_suffix = f" with reviewer {reviewer_id}" if reviewer_id is not None else ""
+        todos.append(
+            LLMCoverageTodo(
+                context_pack_id=pack.id,
+                file=pack.file,
+                reviewer_id=reviewer_id,
+                file_kind=pack.file_kind,
+                priority=pack_residual_priority(pack),
+                slice=pack_review_slice(pack),
+                reason=f"High-risk pack was reviewed only shallowly; repeat it deeply{reviewer_suffix}.",
+                suggested_command=continue_command_for_pack(
+                    pack.id,
+                    reviewer_id=reviewer_id,
+                    review_depth_upgrade=True,
+                ),
+                estimated_chars=pack.stats.estimated_chars,
+                changed_lines=pack.changed_lines,
+                changed_symbols=_pack_symbol_names([pack]),
+            )
+        )
+    return todos
+
+
+def _todo_is_reviewer_assignment_debt(
+    todo: LLMCoverageTodo,
+    reviewer: LLMReviewerCoverageSummary | None,
+) -> bool:
+    if reviewer is None:
+        return True
+    return todo.context_pack_id not in reviewer.reviewed_context_pack_ids
+
+
 def continue_command_for_pack(
     pack_id: str,
     report_path: str = "<report.json>",
     reviewer_id: str | None = None,
     *,
     json_output_path: str | None = None,
+    review_depth_upgrade: bool = False,
 ) -> str:
-    command = f"apex-ray review --continue-from {quote(report_path)} --only-pack {quote(pack_id)} --llm"
+    args = [
+        "apex-ray",
+        "review",
+        "--continue-from",
+        report_path,
+        "--only-pack",
+        pack_id,
+        "--llm",
+    ]
     if reviewer_id is not None:
-        command += f" --reviewer {quote(reviewer_id)}"
+        args.extend(["--reviewer", reviewer_id])
+    if review_depth_upgrade:
+        args.extend(["--include-reviewed", "--continue-review-depth", "deep"])
     if json_output_path is not None:
-        command += f" --json {quote(json_output_path)}"
-    return command
+        args.extend(["--json", json_output_path])
+    return render_shell_command(args)

@@ -10,6 +10,7 @@ from apex_ray.models import (
     LLMRun,
     ProjectProfile,
     ReviewConfig,
+    ReviewCoverageCompletion,
     ReviewerConfig,
     TargetMode,
 )
@@ -98,9 +99,19 @@ def test_render_html_attributes_findings_routes_and_coverage_to_reviewers() -> N
         ],
         reviewer_selections={"security": selection, "finance": selection},
     )
+    report.coverage_completion = ReviewCoverageCompletion(
+        status="incomplete",
+        reviewer_ids=["security"],
+        batches=8,
+        stop_reason="max_batches",
+    )
 
     html = render_html(report)
 
+    assert "<span>Review completion</span><strong>incomplete</strong>" in html
+    assert "Bounded completion: <code>incomplete</code>" in html
+    assert "scope <code>security</code>" in html
+    assert "8 batch(es); stop reason <code>max_batches</code>" in html
     assert "<h2>Focused Reviewers</h2>" in html
     assert "Security &lt;Lead&gt;" in html
     assert "Authorization &amp; trust boundaries." in html

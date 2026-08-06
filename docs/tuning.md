@@ -124,6 +124,17 @@ review:
     jobs: 2
 ```
 
+`exhaustive` changes selection priority; it does not remove any of these caps
+or guarantee completion. When a reviewer scope must finish, use the bounded
+`--until-complete` loop and add `--strict-coverage` for a failing contract.
+That contract covers only packs matching explicitly selected reviewer filters;
+use a broad baseline reviewer when the requirement is the full reviewable
+diff.
+
+Keep `--followup-max-pack-reviews` and `--max-followup-passes` finite: their
+product is the upper bound on primary follow-up reviewer-pack assignments,
+while verification and provider retries can add calls.
+
 Treat those numbers as a starting scale, not a target. If ordinary changes
 consistently stop at a cap and leave high-risk residual packs, first check
 ignore rules and oversized/noisy context, then raise the constraint that
@@ -241,6 +252,15 @@ sum of reviewer budgets, not the top-level cap. Watch per-reviewer selected
 packs and actual tokens. If two reviewers repeatedly inspect the same packs
 and produce the same findings, tighten their focus/scope or combine them.
 
+More precisely, the top-level LLM values are defaults copied into each
+reviewer pass; reviewer fields then override their own copy. The CLI flags
+`--llm-coverage-mode`, `--llm-max-packs`, `--llm-max-deep-packs`, and
+`--llm-max-input-tokens` are run-wide overrides and replace both root and
+reviewer-specific values for that invocation. This is useful when every
+selected reviewer should use the same per-reviewer limits, but it deliberately
+removes specialist-specific sizing. It does not create a shared cost envelope;
+the possible aggregate remains the sum of the selected reviewer budgets.
+
 Use `required: true` only when failure of that reviewer must fail the LLM
 quality gate. A required reviewer needs a scope that should match every run in
 which it is selected; a narrowly risk-tagged specialist is usually optional
@@ -253,6 +273,14 @@ the key from GitHub Secrets. A reviewer matrix gives specialists independent
 timeouts, status checks, artifacts, and SARIF categories. It also multiplies
 provider calls, so lower each reviewer cap rather than copying one large
 single-review budget into every matrix job.
+
+Use `coverage-policy: complete` selectively for a trusted, explicitly selected
+baseline reviewer whose status must block merge. It performs bounded follow-up
+batches and exposes `coverage-status`; enabling it independently on every
+specialist matrix job multiplies the worst-case budget. Fork and Dependabot
+runs have no trusted LLM access and should keep the default configured policy.
+A narrow specialist can complete while unrelated global debt remains, so do
+not use a risk-filtered reviewer as a whole-diff completion proxy.
 
 Fork and Dependabot pull requests do not receive normal repository secrets.
 The bundled action falls back to deterministic no-LLM analysis for those

@@ -21,6 +21,7 @@ from apex_ray.models import (
     ProjectProfile,
     ReportSummary,
     ReviewConfig,
+    ReviewInputSnapshot,
     ReviewReport,
 )
 from apex_ray.report.coverage import (
@@ -47,6 +48,7 @@ def build_report(
     reviewer_selections: dict[str, LLMContextSelection] | None = None,
     stage_durations_ms: dict[str, int] | None = None,
     reviewer_scope_ids: list[str] | None = None,
+    input_snapshot: ReviewInputSnapshot | None = None,
 ) -> ReviewReport:
     files_by_kind = Counter(file.file_kind for file in diff.files)
     files_by_language = Counter(file.language for file in diff.files)
@@ -60,6 +62,7 @@ def build_report(
         project=project,
         config=config,
         diff=diff,
+        input_snapshot=input_snapshot,
         summary=ReportSummary(
             files_by_kind=dict(sorted(files_by_kind.items())),
             files_by_language=dict(sorted(files_by_language.items())),
@@ -245,11 +248,26 @@ def render_markdown(report: ReviewReport) -> str:
 
     lines.extend(["## LLM Coverage", ""])
     coverage = report.llm_coverage
+    lines.append(f"- Completion status: `{coverage.completion_status}`")
+    if report.coverage_completion is not None:
+        completion = report.coverage_completion
+        completion_scope = ", ".join(completion.reviewer_ids) if completion.reviewer_ids else "global"
+        lines.extend(
+            [
+                f"- Bounded completion: `{completion.status}`",
+                f"- Completion scope: `{completion_scope}`",
+                f"- Completion batches: `{completion.batches}`",
+                f"- Completion stop reason: `{completion.stop_reason}`",
+            ]
+        )
     if not coverage.enabled:
         lines.append("LLM review was not enabled.")
         lines.append("")
     else:
+        reviewer_assignments = sum(reviewer.matching_context_packs for reviewer in coverage.reviewers)
+        reviewed_assignments = sum(reviewer.reviewed_context_packs for reviewer in coverage.reviewers)
         lines.append(f"- Review context packs: `{coverage.reviewed_context_packs}` of `{coverage.total_context_packs}`")
+        lines.append(f"- Reviewer assignments: `{reviewed_assignments}` of `{reviewer_assignments}`")
         lines.append(
             f"- Deep/shallow reviewed packs: `{coverage.deep_reviewed_context_packs}` / "
             f"`{coverage.shallow_reviewed_context_packs}`"
@@ -262,8 +280,8 @@ def render_markdown(report: ReviewReport) -> str:
         lines.append(f"- Partial severity: `{coverage.partial_severity}`")
         lines.append(f"- Residual P0 packs: `{len(coverage.residual_risk_p0_context_pack_ids)}`")
         lines.append(f"- Residual P1 packs: `{len(coverage.residual_risk_p1_context_pack_ids)}`")
-        lines.append(f"- Failed review runs: `{coverage.failed_review_runs}`")
-        lines.append(f"- Failed verifier runs: `{coverage.failed_verify_runs}`")
+        lines.append(f"- Recorded failed review attempts: `{coverage.failed_review_runs}`")
+        lines.append(f"- Recorded failed verifier attempts: `{coverage.failed_verify_runs}`")
         lines.append(f"- Max packs: `{coverage.max_packs}`")
         if coverage.max_deep_packs:
             lines.append(f"- Max deep packs: `{coverage.max_deep_packs}`")
@@ -546,6 +564,15 @@ def _append_focused_reviewers_section(lines: list[str], report: ReviewReport) ->
             requirement = ", required" if reviewer_coverage.required else ""
             lines.append(f"  - Status: `{reviewer_coverage.status}`{requirement}")
             lines.append(f"  - Verification: `{'enabled' if reviewer_coverage.verify_enabled else 'disabled'}`")
+            max_deep = reviewer_coverage.max_deep_packs if reviewer_coverage.max_deep_packs is not None else "none"
+            max_input = (
+                f"~{reviewer_coverage.max_input_tokens}" if reviewer_coverage.max_input_tokens is not None else "none"
+            )
+            lines.append(
+                f"  - Effective limits: mode `{reviewer_coverage.coverage_mode or 'n/a'}`, "
+                f"depth `{reviewer_coverage.review_depth or 'n/a'}`, packs `{reviewer_coverage.max_packs or 'n/a'}`, "
+                f"deep `{max_deep}`, input `{max_input}` tokens"
+            )
             for reason in reviewer_coverage.reasons:
                 lines.append(f"    - {reason}")
         if selection is None:

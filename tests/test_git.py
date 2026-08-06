@@ -1,3 +1,4 @@
+import os
 import subprocess
 import threading
 from pathlib import Path
@@ -39,6 +40,131 @@ def test_diff_worktree_combines_tracked_and_untracked_changes(tmp_path: Path) ->
     assert "+export const tracked = 2;" in diff
     assert "diff --git a/new.ts b/new.ts" in diff
     assert "+export const created = true;" in diff
+
+
+def test_diff_range_does_not_interpret_untrusted_ref_as_git_option(tmp_path: Path) -> None:
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.email", "apex@example.test"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "Apex Test"], cwd=tmp_path, check=True)
+    (tmp_path / "tracked.ts").write_text("export const value = 1;\n", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.ts"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "initial"], cwd=tmp_path, check=True)
+    injected_output = tmp_path / "injected.diff"
+
+    with pytest.raises(git.GitError):
+        git.diff_range(tmp_path, f"--output={injected_output}", "HEAD")
+
+    assert not injected_output.exists()
+
+
+def test_worktree_output_path_stability_requires_untracked_ignored_path(tmp_path: Path) -> None:
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    (tmp_path / ".gitignore").write_text("reports/\ntracked-report.md\n", encoding="utf-8")
+    tracked = tmp_path / "tracked-report.md"
+    tracked.write_text("old report\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-f", ".gitignore", "tracked-report.md"], cwd=tmp_path, check=True)
+
+    assert git.worktree_output_path_is_stable(tmp_path, tmp_path / "reports" / "review.json") is True
+    assert git.worktree_output_path_is_stable(tmp_path, tracked) is False
+    assert git.worktree_output_path_is_stable(tmp_path, tmp_path / "review.json") is False
+    assert git.worktree_output_path_is_stable(tmp_path, tmp_path.parent / "external-review.json") is True
+    external_target = tmp_path.parent / f"{tmp_path.name}-external-review.json"
+    linked_output = tmp_path / "linked-review.json"
+    linked_output.symlink_to(external_target)
+    assert git.worktree_output_path_is_stable(tmp_path, linked_output) is False
+    external_alias = tmp_path.parent / f"{tmp_path.name}-repo-alias"
+    external_alias.symlink_to(tmp_path, target_is_directory=True)
+    assert git.worktree_output_path_is_stable(tmp_path, external_alias / tracked.name) is False
+    assert git.worktree_output_path_is_stable(tmp_path, external_alias / "reports" / "review.json") is True
+    external_direct_link = tmp_path.parent / f"{tmp_path.name}-tracked-link.md"
+    external_direct_link.symlink_to(tracked)
+    assert git.worktree_output_path_is_stable(tmp_path, external_direct_link) is False
+
+
+def test_worktree_output_path_stability_rejects_git_metadata(tmp_path: Path) -> None:
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    git_dir = tmp_path / ".git"
+
+    assert git.worktree_output_path_is_stable(tmp_path, git_dir / "index") is False
+    assert git.worktree_output_path_is_stable(tmp_path, git_dir / "config") is False
+    assert git.worktree_output_path_is_stable(tmp_path, git_dir / "refs" / "heads" / "main") is False
+    assert git.worktree_output_path_is_stable(tmp_path, git_dir / "apex-ray" / "reports", directory=True) is True
+
+
+def test_worktree_output_path_stability_rejects_linked_worktree_git_metadata(tmp_path: Path) -> None:
+    primary = tmp_path / "primary"
+    linked = tmp_path / "linked"
+    primary.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=primary, check=True)
+    subprocess.run(["git", "config", "user.email", "apex@example.test"], cwd=primary, check=True)
+    subprocess.run(["git", "config", "user.name", "Apex Test"], cwd=primary, check=True)
+    subprocess.run(["git", "commit", "--allow-empty", "-qm", "initial"], cwd=primary, check=True)
+    subprocess.run(["git", "worktree", "add", "-qb", "linked-test", str(linked)], cwd=primary, check=True)
+    common_dir = Path(
+        subprocess.run(
+            ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            cwd=linked,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+    )
+    linked_git_dir = Path(
+        subprocess.run(
+            ["git", "rev-parse", "--path-format=absolute", "--git-dir"],
+            cwd=linked,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+    )
+
+    assert git.worktree_output_path_is_stable(linked, common_dir / "config") is False
+    assert git.worktree_output_path_is_stable(linked, linked_git_dir / "index") is False
+    assert git.worktree_output_path_is_stable(linked, common_dir / "apex-ray" / "cache", directory=True) is True
+
+
+def test_worktree_output_directory_stability_honors_directory_only_ignore_before_creation(
+    tmp_path: Path,
+) -> None:
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    (tmp_path / ".gitignore").write_text("/cache/\n/ignored-file/\n/linked-cache/\n", encoding="utf-8")
+    subprocess.run(["git", "add", ".gitignore"], cwd=tmp_path, check=True)
+
+    cache_dir = tmp_path / "cache"
+
+    assert git.worktree_output_path_is_stable(tmp_path, cache_dir, directory=True) is True
+
+    cache_dir.mkdir()
+    tracked_cache_file = cache_dir / "tracked.json"
+    tracked_cache_file.write_text("{}\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-f", "cache/tracked.json"], cwd=tmp_path, check=True)
+
+    assert git.worktree_output_path_is_stable(tmp_path, cache_dir, directory=True) is False
+
+    ignored_file = tmp_path / "ignored-file"
+    ignored_file.write_text("not a directory\n", encoding="utf-8")
+    assert git.worktree_output_path_is_stable(tmp_path, ignored_file, directory=True) is False
+
+    real_cache = tmp_path / "real-cache"
+    real_cache.mkdir()
+    linked_cache = tmp_path / "linked-cache"
+    linked_cache.symlink_to(real_cache, target_is_directory=True)
+    assert git.worktree_output_path_is_stable(tmp_path, linked_cache, directory=True) is False
+
+
+def test_worktree_output_path_stability_handles_case_insensitive_repo_alias(tmp_path: Path) -> None:
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    tracked = tmp_path / "Tracked-Report.json"
+    tracked.write_text("old report\n", encoding="utf-8")
+    subprocess.run(["git", "add", "Tracked-Report.json"], cwd=tmp_path, check=True)
+    case_alias = tmp_path.with_name(tmp_path.name.swapcase())
+    if not case_alias.exists() or not os.path.samefile(case_alias, tmp_path):
+        pytest.skip("filesystem is case-sensitive")
+
+    aliased_output = case_alias / tracked.name.swapcase()
+
+    assert git.worktree_output_path_is_stable(tmp_path, aliased_output) is False
 
 
 def test_read_git_nul_output_enforces_exact_byte_boundary(tmp_path: Path) -> None:

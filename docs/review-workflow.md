@@ -26,6 +26,13 @@ apex-ray review \
   --sarif .apex-ray/reports/review.sarif
 ```
 
+For `--worktree`, every writable report or cache path inside the repository
+must be untracked and Git-ignored so report/checkpoint/cache writes cannot
+change the review target. This includes custom LLM and analyzer cache paths and
+relative `APEX_RAY_CACHE_HOME`/`XDG_CACHE_HOME` values. The defaults created by
+`apex-ray init` satisfy this requirement; an external absolute path is also
+safe. Apex Ray checks these paths before running analyzers or providers.
+
 ## Review Modes
 
 No-LLM mode is deterministic and cheap:
@@ -74,9 +81,28 @@ LLM coverage modes control how broadly Apex Ray reviews a diff:
 
 - `fast`: capped deep review.
 - `balanced`: deep review for high-value packs plus shallow breadth under token budget.
-- `exhaustive`: review every reviewable pack when budget allows.
+- `exhaustive`: prioritize every reviewable pack, while still honoring pack,
+  deep-review, input-token, and provider limits.
 
 Large diffs can still be partial. The report makes partial coverage explicit with reviewed and unreviewed pack IDs, residual priorities, skipped reasons, and continuation commands.
+
+The report-level LLM completion status has a separate, deliberately strict
+meaning:
+
+- `complete`: every context pack and matching reviewer assignment in the
+  report scope was reviewed and no partial coverage debt remains;
+- `partial`: reviewable work remains, but the run did not record a hard
+  execution or budget failure;
+- `incomplete`: work remains because a pack could not fit the configured
+  budget, a reviewer execution or verification failed, or required-reviewer
+  policy debt remains;
+- `disabled`: LLM review was not enabled for the run.
+
+Findings always describe the **reviewed scope**. “No blocking findings” or zero
+findings in a partial/incomplete report does not mean that the entire diff was
+reviewed cleanly. Unique context-pack coverage and reviewer assignments are
+also different counters: one pack reviewed by two specialists is one reviewed
+pack but two completed reviewer-pack assignments.
 
 Continue only unreviewed P0 packs:
 
@@ -86,6 +112,89 @@ apex-ray review \
   --residual-priority p0 \
   --llm
 ```
+
+An ordinary continuation is one budgeted reviewer pass. The effective
+`max_packs`, `max_deep_packs`, and `max_input_tokens` values still apply to
+each selected reviewer; CLI `--llm-max-*` overrides remain run-wide cost
+limits. Repeat the command for another manual pass, or use bounded completion
+when the selected reviewer scope must be drained automatically.
+
+Drain one baseline reviewer scope in bounded batches:
+
+```bash
+apex-ray review \
+  --continue-from .apex-ray/reports/review.json \
+  --reviewer correctness \
+  --until-complete \
+  --followup-max-pack-reviews 16 \
+  --max-followup-passes 8 \
+  --llm
+```
+
+`--until-complete` writes the best report it can produce and reports why it
+stopped. Add `--strict-coverage` when an incomplete result must exit non-zero;
+reports are still written before that exit. `--strict-coverage` implies the
+same completion loop, so it can also be used without spelling
+`--until-complete`.
+
+After every completed follow-up batch, Apex Ray writes each configured
+Markdown and JSON latest-report file through an atomic replacement. If the
+process is later interrupted, the JSON file is a valid resume point for
+another `--continue-from` run rather than a partially written artifact.
+Optional HTML, SARIF, telemetry, and archives are finalized after the loop.
+
+Each follow-up batch is capped in reviewer-pack assignments by
+`--followup-max-pack-reviews`, and `--max-followup-passes` bounds the number of
+batches. Provider retries and verification requests are additional calls. The
+loop stops early on completion, no eligible work, or no measurable progress.
+It cannot be combined with `--auto-followup`, continuation pack/slice/priority
+filters, or `--no-llm`.
+
+Pass one or more `--reviewer` flags to make the completion scope explicit. If
+they are omitted, a configuration with several enabled reviewers must have
+exactly one `required: true` baseline reviewer; otherwise the command rejects
+the ambiguous scope. A configuration with only one enabled reviewer and the
+built-in general-reviewer configuration are unambiguous. On a fresh review,
+that uniquely required baseline is the only reviewer run by the completion
+command; other configured reviewers are not started implicitly.
+
+Explicit reviewer completion applies only to context packs matching the
+selected reviewer filters and to that reviewer's assignments. It does not
+drain unrelated global packs. The scoped `coverage_completion` result can
+therefore be `complete` while the report-level LLM coverage remains `partial`
+because debt exists outside the selected matching scope. Use an unfiltered
+baseline reviewer when the completion check is intended to cover the full
+reviewable diff.
+
+`exhaustive` alone is not a completion contract: it still obeys the configured
+caps. Use bounded completion when the selected reviewer scope is a release or
+CI requirement, and size its limits for the expected worst case.
+
+### Safe Continuation Targets
+
+New reports fingerprint their review input. Before a continuation makes an LLM
+call, Apex Ray verifies the saved target:
+
+- base reviews retain `HEAD`, merge-base, and diff identities;
+- staged and worktree reviews retain `HEAD` and diff identities;
+- incremental pre-push Git ranges retain their range start, `HEAD`, and diff
+  identities and remain live Git targets;
+- only user-supplied `--diff` files become immutable, detached report
+  snapshots.
+
+If the live base, staged, worktree, or incremental range target changed,
+continuation stops and asks for a fresh review instead of attributing archived
+context packs to the new diff. The completion loop repeats this check around
+every batch. A detached `--diff` continuation prints a notice because live Git
+state is not part of its target.
+
+Reports produced by older Apex Ray versions have no input snapshot. Ordinary
+non-completion `--continue-from` remains available for compatibility, but Apex
+Ray prints a warning and can only review archived context packs; it cannot
+prove that they match the current Git state. `--until-complete` and
+`--strict-coverage` reject such reports because a multi-batch completion
+contract cannot run safely without target validation. Run a fresh review to
+use bounded completion.
 
 Continue with automatic P0 follow-up after a first pass:
 
@@ -97,10 +206,11 @@ apex-ray review \
   --auto-followup-max-pack-reviews 16
 ```
 
-The automatic pass is capped by reviewer-pack assignment, so a context pack
-matched by two specialist reviewers consumes two assignments. Explicit
-`--continue-from` commands remain available when you intentionally want to
-process more residual work.
+This CLI switch retains the focused P0 behavior. The automatic pass is capped
+by reviewer-pack assignment, so a context pack matched by two specialist
+reviewers consumes two assignments. Explicit `--continue-from` or bounded
+completion commands remain available when you intentionally want to process
+more residual work.
 
 ## Pre-Push Gate
 
@@ -114,11 +224,18 @@ Default gate behavior:
 - blocks on `critical` partial coverage;
 - prints live progress to stderr and a compact blocking summary to stdout.
 
-The default automatic P0 follow-up is limited to 16 primary reviewer-pack
-assignments. Globally unreviewed P0 work and unfinished assignments for
-reviewers marked `required: true` remain critical coverage debt and block the
-gate. Optional-specialist debt remains visible as a warning. Retries, provider
-fallbacks, and finding verification may add requests.
+The generated configuration enables a generalized automatic follow-up capped
+at 16 primary reviewer-pack assignments. It selects the exact packs behind the
+blocking decision: the default `critical` partial threshold contributes P0
+work, `major` expands threshold debt to P0/P1, and `minor` to P0/P1/P2;
+provider/verifier failures, unfinished selected required-reviewer assignments, configured
+source/high-risk thresholds, and high-risk depth debt remain eligible by their
+concrete pack IDs. Matching assignments deferred by reviewer limits remain
+visible as warnings unless an explicit strict/complete coverage policy requires
+them.
+Retries, provider fallbacks, and finding verification may add requests. See
+[Pre-Push Gate configuration](configuration.md#pre-push-gate) for the canonical
+and legacy keys.
 
 Run it manually before relying on hook behavior:
 
@@ -132,7 +249,10 @@ printed continuation commands also write back to that report, so a completed
 manual continuation clears the carried debt. If commits were added in the
 meantime, Apex Ray requires one additional gate run to review that pending
 delta. Response and analyzer caches reduce repeated work throughout this
-process.
+process. If a carried coverage retry has no eligible work while newer commits
+are pending, the gate refreshes the full current base range immediately instead
+of repeatedly starving that delta. Continuation guidance uses POSIX shell
+syntax on macOS/Linux and explicitly PowerShell-safe syntax on Windows.
 
 ### Local False Positives
 

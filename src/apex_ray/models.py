@@ -3,7 +3,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
 
 _HTTP_FIELD_NAME = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")
 
@@ -453,6 +453,8 @@ class PrePushGateConfig(StrictApexModel):
     fail_on_partial_severity: Literal["none", "minor", "major", "critical"] | None = "critical"
     max_stdout_findings: int = Field(default=10, ge=0)
     stdout_format: Literal["agent", "compact"] = "agent"
+    auto_followup: bool | None = None
+    auto_followup_max_pack_reviews: int | None = Field(default=None, gt=0)
     auto_followup_p0: bool = True
     auto_followup_p0_max_pack_reviews: int = Field(
         default=DEFAULT_AUTO_FOLLOWUP_P0_MAX_PACK_REVIEWS,
@@ -560,6 +562,50 @@ class DiffSummary(ApexModel):
     files: list[ChangedFile] = Field(default_factory=list)
     stats: DiffStats = Field(default_factory=DiffStats)
     warnings: list[str] = Field(default_factory=list)
+
+
+class ReviewInputSnapshot(ApexModel):
+    schema_version: Literal["review-input-snapshot/v1"] = "review-input-snapshot/v1"
+    target_mode: TargetMode
+    base_ref: str | None = None
+    head_sha: str | None = None
+    merge_base_sha: str | None = None
+    range_start_sha: str | None = None
+    diff_sha256: str
+
+    @model_validator(mode="after")
+    def validate_git_identity(self) -> Self:
+        object_id_fields = ("head_sha", "merge_base_sha", "range_start_sha")
+        for field_name in object_id_fields:
+            value = getattr(self, field_name)
+            if value is not None and re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", value) is None:
+                raise ValueError(f"{field_name} must be a full lowercase Git object id")
+        if re.fullmatch(r"[0-9a-f]{64}", self.diff_sha256) is None:
+            raise ValueError("diff_sha256 must be a lowercase SHA-256 digest")
+        if self.base_ref is not None and (
+            not self.base_ref or self.base_ref.startswith("-") or any(ord(char) < 32 for char in self.base_ref)
+        ):
+            raise ValueError("base_ref must be a non-option Git revision without control characters")
+
+        target_mode = TargetMode(self.target_mode)
+        if target_mode == TargetMode.BASE:
+            if self.base_ref is None or self.head_sha is None or self.merge_base_sha is None:
+                raise ValueError("base snapshots require base_ref, head_sha, and merge_base_sha")
+            if self.range_start_sha is not None:
+                raise ValueError("base snapshots cannot contain range_start_sha")
+        elif target_mode in {TargetMode.STAGED, TargetMode.WORKTREE}:
+            if self.head_sha is None:
+                raise ValueError(f"{target_mode} snapshots require head_sha")
+            if self.base_ref is not None or self.merge_base_sha is not None or self.range_start_sha is not None:
+                raise ValueError(f"{target_mode} snapshots cannot contain base or range identity")
+        elif self.range_start_sha is not None:
+            if self.head_sha is None or self.base_ref is None:
+                raise ValueError("live range snapshots require base_ref, head_sha, and range_start_sha")
+            if self.merge_base_sha is not None:
+                raise ValueError("live range snapshots cannot contain merge_base_sha")
+        elif self.base_ref is not None or self.head_sha is not None or self.merge_base_sha is not None:
+            raise ValueError("detached patch snapshots cannot contain live Git identity")
+        return self
 
 
 class ReportSummary(ApexModel):
@@ -701,6 +747,11 @@ class LLMReviewerCoverageSummary(ApexModel):
     reviewer_id: str
     required: bool = False
     verify_enabled: bool = False
+    coverage_mode: LLMCoverageMode | None = None
+    review_depth: Literal["balanced", "deep", "shallow"] | None = None
+    max_packs: int | None = None
+    max_deep_packs: int | None = None
+    max_input_tokens: int | None = None
     status: Literal["not_applicable", "pass", "warn", "fail"] = "not_applicable"
     reasons: list[str] = Field(default_factory=list)
     matching_context_packs: int = 0
@@ -782,6 +833,49 @@ class LLMCoverageSummary(ApexModel):
     cache_hits: int = 0
     cache_misses: int = 0
     routes: list[LLMRouteSummary] = Field(default_factory=list)
+
+    @computed_field(return_type=Literal["disabled", "complete", "partial", "incomplete"])
+    @property
+    def completion_status(self) -> Literal["disabled", "complete", "partial", "incomplete"]:
+        if not self.enabled:
+            return "disabled"
+        reviewer_assignment_debt = any(
+            reviewer.reviewed_context_packs < reviewer.matching_context_packs for reviewer in self.reviewers
+        )
+        reviewer_status_debt = any(reviewer.status in {"warn", "fail"} for reviewer in self.reviewers)
+        required_reviewer_failed = any(reviewer.required and reviewer.status == "fail" for reviewer in self.reviewers)
+        active_reviewer_run_failed = any(
+            reviewer.failed_review_runs or reviewer.failed_verify_runs for reviewer in self.reviewers
+        )
+        failed_pack = any(status.status.startswith("failed_") for status in self.pack_statuses)
+        if failed_pack or active_reviewer_run_failed or self.over_budget_context_pack_ids or required_reviewer_failed:
+            return "incomplete"
+        if (
+            self.unreviewed_context_packs == 0
+            and self.partial_severity == "none"
+            and not reviewer_assignment_debt
+            and not reviewer_status_debt
+        ):
+            return "complete"
+        return "partial"
+
+
+CoverageStopReason = Literal["complete", "no_eligible_work", "no_progress", "max_batches"]
+
+
+class ReviewCoverageCompletion(ApexModel):
+    status: Literal["complete", "incomplete"]
+    reviewer_ids: list[str] = Field(default_factory=list)
+    batches: int = Field(default=0, ge=0)
+    stop_reason: CoverageStopReason
+
+    @model_validator(mode="after")
+    def validate_contract(self) -> Self:
+        if len(self.reviewer_ids) != len(set(self.reviewer_ids)):
+            raise ValueError("coverage completion reviewer_ids must be unique")
+        if (self.status == "complete") != (self.stop_reason == "complete"):
+            raise ValueError("coverage completion status and stop_reason are inconsistent")
+        return self
 
 
 class MemorySummary(ApexModel):
@@ -1049,12 +1143,14 @@ class ReviewReport(ApexModel):
     project: ProjectProfile
     config: ReviewConfig
     diff: DiffSummary
+    input_snapshot: ReviewInputSnapshot | None = None
     summary: ReportSummary
     llm_selection: LLMContextSelection | None = None
     reviewer_selections: dict[str, LLMContextSelection] = Field(default_factory=dict)
     reviewer_scope_ids: list[str] | None = None
     stage_durations_ms: dict[str, int] = Field(default_factory=dict)
     llm_coverage: LLMCoverageSummary = Field(default_factory=LLMCoverageSummary)
+    coverage_completion: ReviewCoverageCompletion | None = None
     memory_summary: MemorySummary = Field(default_factory=MemorySummary)
     rules: list[str] = Field(default_factory=list)
     analyzer_results: list[AnalyzerResult] = Field(default_factory=list)

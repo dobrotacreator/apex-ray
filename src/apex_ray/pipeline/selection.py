@@ -136,6 +136,7 @@ def plan_llm_context_selection(
     coverage_mode: LLMCoverageMode | str = LLMCoverageMode.BALANCED,
     provider: ProviderSelector = None,
     rendered_prompts: ReviewPromptCache | None = None,
+    priority_by_pack_id: dict[str, str] | None = None,
 ) -> LLMContextSelection:
     mode = LLMCoverageMode(coverage_mode)
     initial_rendered_prompt_keys: set[ReviewPromptCacheKey] = (
@@ -176,6 +177,7 @@ def plan_llm_context_selection(
         deep_reviewable_indexed,
         changed_files,
         deep_cap,
+        priority_by_pack_id=priority_by_pack_id,
     )
 
     deep_selected_indexes, deep_tokens = _select_indexes_with_token_budget(
@@ -218,6 +220,7 @@ def plan_llm_context_selection(
             [(index, context_packs[index]) for index in shallow_candidate_indexes],
             changed_files,
             shallow_cap,
+            priority_by_pack_id=priority_by_pack_id,
         )
         shallow_selected_indexes, shallow_tokens = _select_indexes_with_token_budget(
             shallow_budget_candidate_indexes,

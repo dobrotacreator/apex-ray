@@ -72,6 +72,7 @@ class PrePushGateState(ApexModel):
     coverage_debt: CoverageDebt = Field(default_factory=CoverageDebt)
     reviewed_context_pack_ids: list[str] = Field(default_factory=list)
     context_pack_fingerprints: dict[str, str] = Field(default_factory=dict)
+    input_snapshot_fingerprint: str = ""
     report_fingerprint: str = ""
 
 
@@ -224,6 +225,11 @@ def build_pre_push_state(
         context_pack_fingerprints={
             pack.id: context_pack_fingerprint(pack.model_dump(mode="json")) for pack in report.context_packs
         },
+        input_snapshot_fingerprint=(
+            context_pack_fingerprint(report.input_snapshot.model_dump(mode="json"))
+            if report.input_snapshot is not None
+            else ""
+        ),
         report_fingerprint=review_report_fingerprint(report),
     )
 

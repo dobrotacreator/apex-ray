@@ -9,6 +9,7 @@ from apex_ray.findings import (
     verified_report_findings,
 )
 from apex_ray.models import Finding, PrePushGateConfig, ReviewReport
+from apex_ray.report.coverage import render_coverage_summary_lines
 from apex_ray.report.run_state import reduce_llm_pack_run_states
 from apex_ray.reviewers import effective_reviewers, reviewer_matches_pack
 from apex_ray.triage import StaleSuppression, SuppressedFinding
@@ -94,9 +95,20 @@ def render_pre_push_gate_stdout(
     expired_suppressions: int = 0,
     pruned_suppressions: int = 0,
 ) -> str:
-    title = "APEX RAY GATE: BLOCKED" if decision.blocked else "APEX RAY GATE: PASSED"
+    completion_status = report.llm_coverage.completion_status
+    if decision.blocked:
+        title = "APEX RAY GATE: BLOCKED"
+    elif completion_status == "partial":
+        title = "APEX RAY GATE: PASSED WITH PARTIAL COVERAGE"
+    elif completion_status == "incomplete":
+        title = "APEX RAY GATE: PASSED WITH INCOMPLETE REVIEW"
+    else:
+        title = "APEX RAY GATE: PASSED"
     lines = [
         title,
+        "",
+        f"Push decision: {'BLOCKED' if decision.blocked else 'ALLOWED'}",
+        *render_coverage_summary_lines(report.llm_coverage),
         "",
         f"Target: base {base}...HEAD",
         f"Report: {markdown_path}",
@@ -137,12 +149,16 @@ def render_pre_push_gate_stdout(
         return "\n".join(lines).rstrip() + "\n"
     if decision.blocking_findings:
         lines.extend(_render_findings(decision.blocking_findings, config.max_stdout_findings))
-    if decision.partial_blocked and report.llm_coverage.coverage_todos:
+    if (decision.partial_blocked or decision.quality_gate_failed) and report.llm_coverage.coverage_todos:
         lines.extend(_render_continuations(report))
     if decision.blocked:
         lines.append("After fixing, commit the changes and run git push again.")
     else:
-        lines.append(f"Findings: {len(report.findings)}")
+        if decision.blocking_findings:
+            lines.append(f"Blocking findings in reviewed scope: {len(decision.blocking_findings)}")
+        else:
+            lines.append("No blocking findings in reviewed scope.")
+        lines.append(f"Findings: {len(report.findings)} in reviewed scope")
         lines.append(f"Coverage gate: {report.llm_coverage.quality_gate_status}")
         lines.append(f"Partial severity: {report.llm_coverage.partial_severity}")
     return "\n".join(lines).rstrip() + "\n"

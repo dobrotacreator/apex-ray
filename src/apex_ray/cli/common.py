@@ -1,8 +1,29 @@
+import stat
+import tempfile
 from pathlib import Path
 
 import typer
 
 from apex_ray.config import ConfigError, agent_artifact_refresh_warning, ensure_apex_gitignore
+
+
+def atomic_write_text(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        existing_mode = stat.S_IMODE(path.stat().st_mode)
+    except FileNotFoundError:
+        existing_mode = None
+
+    with tempfile.TemporaryDirectory(
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+    ) as temporary_directory:
+        temporary = Path(temporary_directory) / path.name
+        temporary.write_text(content, encoding="utf-8")
+        if existing_mode is not None:
+            temporary.chmod(existing_mode)
+        temporary.replace(path)
 
 
 def ensure_distinct_outputs(

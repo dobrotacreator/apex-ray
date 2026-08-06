@@ -72,7 +72,9 @@ The `src/apex_ray/pipeline/` package owns the end-to-end review orchestration:
 - consolidate findings;
 - continue review from partial reports.
 
-The package root `apex_ray.pipeline` re-exports the stable pipeline API. Implementation lives in `runner.py`, `selection.py`, and `findings.py`.
+The package root `apex_ray.pipeline` re-exports the stable pipeline API.
+Implementation lives in `runner.py`, `selection.py`, `findings.py`, and
+`coverage.py`; `snapshot.py` owns safe continuation identity checks.
 
 ### Analyzer Backends
 

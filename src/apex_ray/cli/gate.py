@@ -6,6 +6,7 @@ import typer
 
 from apex_ray import git
 from apex_ray.cli.common import (
+    atomic_write_text,
     ensure_apex_ignore_for_outputs,
     ensure_distinct_outputs,
     resolve_output_path,
@@ -40,6 +41,7 @@ from apex_ray.llm.providers import provider_from_config
 from apex_ray.local_data import LocalDataPathError, resolve_config_path, resolve_runtime_config_paths
 from apex_ray.models import Finding, PrePushGateConfig, ReviewReport, TargetMode
 from apex_ray.pipeline import continue_review_from_report, run_review_pipeline
+from apex_ray.pipeline.snapshot import ReviewInputSnapshotError, validate_review_input_snapshot
 from apex_ray.progress import NoopProgress, ProgressSink, StreamProgress, progress_enabled
 from apex_ray.report import (
     ReportArtifact,
@@ -50,6 +52,7 @@ from apex_ray.report import (
     render_markdown,
 )
 from apex_ray.report.coverage import continue_command_for_pack
+from apex_ray.report.coverage_breakdown import pack_residual_priority
 from apex_ray.resolution import (
     context_pack_resolution_paths,
     novel_resolution_file_is_reviewable,
@@ -71,6 +74,243 @@ from apex_ray.triage import (
 
 gate_app = typer.Typer(help="Run configured Apex Ray quality gates.")
 _RESOLUTION_CALL_BUDGET_REASON = "Resolution call budget exhausted for this retry; the finding remains blocking."
+
+
+def _coverage_followup_policy(
+    config: PrePushGateConfig,
+    report: ReviewReport | None,
+) -> tuple[bool, set[str], int]:
+    if config.auto_followup is None:
+        return (
+            config.auto_followup_p0,
+            {"p0"} if config.auto_followup_p0 else set(),
+            config.auto_followup_p0_max_pack_reviews,
+        )
+    threshold = config.fail_on_partial_severity
+    priorities = (
+        {
+            "critical": {"p0"},
+            "major": {"p0", "p1"},
+            "minor": {"p0", "p1", "p2"},
+            "none": set(),
+        }[threshold]
+        if threshold is not None
+        else set()
+    )
+    if report is not None:
+        blocking_pack_ids = _coverage_followup_blocking_pack_ids(config, report)
+        priorities.update(
+            todo.priority for todo in report.llm_coverage.coverage_todos if todo.context_pack_id in blocking_pack_ids
+        )
+        priorities.update(
+            status.priority
+            for status in report.llm_coverage.pack_statuses
+            if status.context_pack_id in blocking_pack_ids and status.priority is not None
+        )
+        archived_priorities = {
+            risk.context_pack_id: risk.priority for risk in report.llm_coverage.residual_risk_context_packs
+        }
+        priorities.update(
+            pack_residual_priority(pack, archived_priorities.get(pack.id))
+            for pack in report.context_packs
+            if pack.id in blocking_pack_ids
+        )
+    enabled = config.auto_followup and bool(priorities)
+    return (
+        enabled,
+        priorities if enabled else set(),
+        config.auto_followup_max_pack_reviews or config.auto_followup_p0_max_pack_reviews,
+    )
+
+
+def _coverage_followup_force_pack_ids(
+    config: PrePushGateConfig,
+    report: ReviewReport,
+) -> set[str]:
+    if config.auto_followup is None:
+        return set()
+    blocking_pack_ids = _coverage_followup_blocking_pack_ids(config, report)
+    return blocking_pack_ids.intersection(report.llm_coverage.shallow_only_high_risk_context_pack_ids)
+
+
+def _coverage_followup_reviewer_ids(
+    report: ReviewReport,
+    blocking_pack_ids: set[str],
+    *,
+    force_review_pack_ids: set[str] | None = None,
+    requested_reviewer_ids: list[str] | None = None,
+) -> list[str] | None:
+    forced_ids = set(force_review_pack_ids or ())
+    failed_required_ids = {
+        reviewer.reviewer_id
+        for reviewer in report.llm_coverage.reviewers
+        if reviewer.required and reviewer.status == "fail"
+    }
+    blocking_assignment_todos = [
+        todo
+        for todo in report.llm_coverage.coverage_todos
+        if todo.context_pack_id in blocking_pack_ids and todo.reviewer_id in failed_required_ids
+    ]
+    if (
+        blocking_pack_ids
+        and blocking_pack_ids == forced_ids
+        and (requested_reviewer_ids is not None or not blocking_assignment_todos)
+    ):
+        depth_requested_reviewer_ids = requested_reviewer_ids
+        if requested_reviewer_ids is not None and blocking_assignment_todos:
+            blocking_assignment_reviewer_ids = {
+                todo.reviewer_id for todo in blocking_assignment_todos if todo.reviewer_id is not None
+            }
+            requested_blocking_reviewer_ids = [
+                reviewer_id
+                for reviewer_id in dict.fromkeys(requested_reviewer_ids)
+                if reviewer_id in blocking_assignment_reviewer_ids
+            ]
+            if requested_blocking_reviewer_ids:
+                depth_requested_reviewer_ids = requested_blocking_reviewer_ids
+        depth_reviewer_id = _coverage_followup_depth_reviewer_id(
+            report,
+            forced_ids,
+            requested_reviewer_ids=depth_requested_reviewer_ids,
+        )
+        if depth_reviewer_id is not None:
+            return [depth_reviewer_id]
+    if requested_reviewer_ids is not None:
+        return list(dict.fromkeys(requested_reviewer_ids))
+
+    if not failed_required_ids:
+        return None
+    if not blocking_assignment_todos or blocking_pack_ids.difference(
+        todo.context_pack_id for todo in blocking_assignment_todos
+    ):
+        return None
+    configured_ids = {reviewer.id for reviewer in report.config.reviewers}
+    reviewer_ids = {
+        todo.reviewer_id
+        for todo in blocking_assignment_todos
+        if todo.reviewer_id is not None and todo.reviewer_id in configured_ids
+    }
+    if not reviewer_ids:
+        return None
+    ordered_ids = [
+        reviewer.reviewer_id for reviewer in report.llm_coverage.reviewers if reviewer.reviewer_id in reviewer_ids
+    ]
+    return ordered_ids or sorted(reviewer_ids)
+
+
+def _coverage_followup_depth_reviewer_id(
+    report: ReviewReport,
+    force_review_pack_ids: set[str],
+    *,
+    requested_reviewer_ids: list[str] | None,
+) -> str | None:
+    if not force_review_pack_ids:
+        return None
+    configured_order = [reviewer.id for reviewer in report.config.reviewers if reviewer.enabled]
+    candidate_order = (
+        list(dict.fromkeys(requested_reviewer_ids)) if requested_reviewer_ids is not None else configured_order
+    )
+    if not candidate_order:
+        return None
+    order_by_id = {reviewer_id: index for index, reviewer_id in enumerate(candidate_order)}
+    summaries = {
+        reviewer.reviewer_id: reviewer
+        for reviewer in report.llm_coverage.reviewers
+        if reviewer.reviewer_id in order_by_id
+        and force_review_pack_ids.intersection(reviewer.matching_context_pack_ids)
+    }
+    if not summaries:
+        return None
+    return min(
+        summaries,
+        key=lambda reviewer_id: (
+            -len(force_review_pack_ids.intersection(summaries[reviewer_id].matching_context_pack_ids)),
+            not summaries[reviewer_id].required,
+            order_by_id[reviewer_id],
+        ),
+    )
+
+
+def _coverage_followup_blocking_pack_ids(
+    config: PrePushGateConfig,
+    report: ReviewReport,
+) -> set[str]:
+    if config.auto_followup is None or not config.auto_followup:
+        return set()
+    decision = evaluate_pre_push_gate(report, config)
+    if not decision.quality_gate_failed and not decision.partial_blocked:
+        return set()
+
+    coverage = report.llm_coverage
+    priorities_for_partial_threshold = {
+        "critical": {"p0"},
+        "major": {"p0", "p1"},
+        "minor": {"p0", "p1", "p2"},
+        "none": set(),
+        None: set(),
+    }[config.fail_on_partial_severity]
+    blocking_ids: set[str] = set()
+    if decision.partial_blocked:
+        blocking_ids.update(
+            residual.context_pack_id
+            for residual in coverage.residual_risk_context_packs
+            if residual.priority in priorities_for_partial_threshold
+        )
+        blocking_ids.update(
+            status.context_pack_id for status in coverage.pack_statuses if status.status.startswith("failed_")
+        )
+        failed_reviewers = {reviewer.reviewer_id for reviewer in coverage.reviewers if reviewer.status == "fail"}
+        failed_reviewers.update(
+            reviewer.reviewer_id
+            for reviewer in coverage.reviewers
+            if reviewer.failed_review_runs or reviewer.failed_verify_runs
+        )
+        blocking_ids.update(
+            todo.context_pack_id for todo in coverage.coverage_todos if todo.reviewer_id in failed_reviewers
+        )
+        blocking_ids.update(coverage.shallow_only_high_risk_context_pack_ids)
+
+    if decision.quality_gate_failed:
+        blocking_ids.update(coverage.residual_risk_p0_context_pack_ids)
+        if (
+            report.config.llm.min_source_line_coverage
+            and coverage.source_changed_line_coverage_ratio < report.config.llm.min_source_line_coverage
+        ):
+            blocking_ids.update(
+                residual.context_pack_id
+                for residual in coverage.residual_risk_context_packs
+                if str(residual.file_kind) == "source"
+            )
+        if (
+            report.config.llm.min_high_risk_coverage
+            and coverage.high_risk_coverage_ratio < report.config.llm.min_high_risk_coverage
+        ):
+            unreviewed_ids = set(coverage.unreviewed_context_pack_ids)
+            blocking_ids.update(
+                todo.context_pack_id
+                for todo in coverage.coverage_todos
+                if todo.context_pack_id in unreviewed_ids and todo.slice == "high_risk"
+            )
+        blocking_ids.update(coverage.shallow_only_high_risk_context_pack_ids)
+        failed_required_reviewers = {
+            reviewer.reviewer_id for reviewer in coverage.reviewers if reviewer.required and reviewer.status == "fail"
+        }
+        blocking_ids.update(
+            todo.context_pack_id for todo in coverage.coverage_todos if todo.reviewer_id in failed_required_reviewers
+        )
+        if not report.config.reviewers:
+            general_has_unresolved_verification = any(
+                reviewer.reviewer_id == "general"
+                and any("verification" in reason.casefold() for reason in reviewer.reasons)
+                for reviewer in coverage.reviewers
+            )
+            if general_has_unresolved_verification:
+                blocking_ids.update(
+                    todo.context_pack_id
+                    for todo in coverage.coverage_todos
+                    if todo.reviewer_id == "general" and "verification" in todo.reason.casefold()
+                )
+    return blocking_ids
 
 
 @gate_app.command("pre-push")
@@ -148,6 +388,7 @@ def pre_push(
     resumed_resolution_retry = False
     coverage_retry_has_pending_delta = False
     coverage_report_fallback = False
+    followup_no_eligible_reason: str | None = None
     if gate_config.incremental_retry.enabled:
         try:
             current_head = git.rev_parse(root, "HEAD")
@@ -173,6 +414,7 @@ def pre_push(
         retry_coverage_report = _retry_coverage_report(
             retry_state,
             previous_report,
+            json_output=json_output,
             config_hash=config_hash,
             gate_config=gate_config,
             reviewer_ids=reviewer,
@@ -227,22 +469,109 @@ def pre_push(
                 config_path=config_path,
                 progress=progress,
                 reviewer_ids=reviewer,
+                snapshot_range_start_ref=(
+                    retry_state.head_sha if incremental_mode and retry_state is not None else None
+                ),
             )
-        if gate_config.auto_followup_p0 and report.llm_coverage.partial_severity == "critical":
-            report, selected_packs = continue_review_from_report(
+        followup_enabled, followup_priorities, followup_max_pack_reviews = _coverage_followup_policy(
+            gate_config,
+            report,
+        )
+        followup_decision = evaluate_pre_push_gate(report, gate_config)
+        generalized_coverage_blocked = gate_config.auto_followup is not None and (
+            followup_decision.quality_gate_failed or followup_decision.partial_blocked
+        )
+        should_attempt_followup = followup_enabled and (
+            generalized_coverage_blocked
+            if gate_config.auto_followup is not None
+            else report.llm_coverage.partial_severity == "critical"
+        )
+        followup_selected_packs = []
+        followup_runs = []
+        if should_attempt_followup:
+            blocking_pack_ids = _coverage_followup_blocking_pack_ids(gate_config, report)
+            force_review_pack_ids = _coverage_followup_force_pack_ids(gate_config, report)
+            followup_reviewer_ids = _coverage_followup_reviewer_ids(
+                report,
+                blocking_pack_ids,
+                force_review_pack_ids=force_review_pack_ids,
+                requested_reviewer_ids=reviewer,
+            )
+            llm_runs_before = len(report.llm_runs)
+            report, followup_selected_packs = continue_review_from_report(
                 report,
                 repo_root=root,
                 config=review_config,
-                residual_priorities={"p0"},
+                residual_priorities=followup_priorities,
+                pack_ids=blocking_pack_ids or None,
                 only_unreviewed=True,
-                max_pack_reviews=gate_config.auto_followup_p0_max_pack_reviews,
+                force_review_pack_ids=force_review_pack_ids,
+                max_pack_reviews=followup_max_pack_reviews,
                 review_depth="deep",
+                progress=progress,
+                reviewer_ids=followup_reviewer_ids,
+            )
+            followup_runs = report.llm_runs[llm_runs_before:]
+            followup_calls = len(followup_runs)
+            if followup_calls:
+                priority_label = "/".join(sorted(followup_priorities))
+                followed_pack_count = len({run.context_pack_id for run in followup_runs})
+                progress.event(
+                    f"auto-followup executed {followup_calls} residual {priority_label} review/verification call(s) "
+                    f"across {followed_pack_count} context pack(s)",
+                    force=True,
+                )
+            elif gate_config.auto_followup is not None:
+                followup_no_eligible_reason = (
+                    "Auto-followup made no progress: no review or verification call was executed for the "
+                    "blocking coverage debt. Inspect coverage_todos in the JSON report and run one of its "
+                    "suggested_command values; if no todo is eligible, fix the provider or reviewer "
+                    "configuration and run git push again."
+                )
+        elif gate_config.auto_followup and generalized_coverage_blocked:
+            followup_no_eligible_reason = (
+                "Auto-followup could not start: the blocking coverage debt has no eligible context-pack "
+                "priority in the report. Inspect coverage_todos in the JSON report and run one of its "
+                "suggested_command values; if no todo is present, fix the provider or reviewer configuration "
+                "and run git push again."
+            )
+        if (
+            resumed_coverage_retry
+            and coverage_retry_has_pending_delta
+            and not followup_selected_packs
+            and not followup_runs
+        ):
+            incremental_fallback_reason = "coverage retry made no progress while newer commits were pending"
+            progress.event(
+                f"{incremental_fallback_reason}; refreshing the full current review",
+                force=True,
+            )
+            # The saved coverage debt belongs to the prior full range. A
+            # delta-only report cannot authoritatively replace that scope.
+            diff_text = _load_base_diff(root, target_base)
+            report = run_review_pipeline(
+                root,
+                diff_text,
+                TargetMode.BASE,
+                review_config,
+                base=target_base,
+                config_path=config_path,
                 progress=progress,
                 reviewer_ids=reviewer,
             )
-            if selected_packs:
-                progress.event(f"auto-followup reviewed {len(selected_packs)} residual P0 context pack(s)", force=True)
-    except (DiscoveryError, LLMProviderError) as exc:
+            followup_no_eligible_reason = None
+            resumed_coverage_retry = False
+            coverage_retry_has_pending_delta = False
+            incremental_mode = False
+            coverage_report_fallback = True
+        if report.input_snapshot is not None and not resumed_coverage_retry and not resumed_resolution_retry:
+            validate_review_input_snapshot(
+                report.input_snapshot,
+                root,
+                expected_target_mode=report.diff.target_mode,
+                expected_base_ref=report.diff.base,
+            )
+    except (DiscoveryError, LLMProviderError, ReviewInputSnapshotError) as exc:
         raise typer.BadParameter(str(exc)) from exc
     duration_ms = round((time.monotonic() - started_monotonic) * 1000)
     report.config = report_config
@@ -323,6 +652,9 @@ def pre_push(
         reasons=current_decision.reasons,
     )
     decision = _combine_incremental_decision(current_decision, active_carried_findings, carried_coverage_debt)
+    # A productive retry may clear the saved coverage debt, but it must not
+    # authorize commits newer than the report snapshot. Keep the old state HEAD
+    # and fail closed here; the next attempt reviews old_head..HEAD.
     if coverage_retry_has_pending_delta:
         decision = _block_for_pending_incremental_delta(decision)
     if gate_config.incremental_retry.enabled:
@@ -357,13 +689,10 @@ def pre_push(
     json_text = report.model_dump_json(indent=2)
     html_text = render_html(report) if html_output is not None else None
     ensure_apex_ignore_for_outputs(root, output, json_output, html_output)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(markdown_text, encoding="utf-8")
-    json_output.parent.mkdir(parents=True, exist_ok=True)
-    json_output.write_text(json_text, encoding="utf-8")
+    atomic_write_text(output, markdown_text)
+    atomic_write_text(json_output, json_text)
     if html_output is not None:
-        html_output.parent.mkdir(parents=True, exist_ok=True)
-        html_output.write_text(html_text or "", encoding="utf-8")
+        atomic_write_text(html_output, html_text or "")
 
     artifacts = [
         ReportArtifact(output, markdown_text),
@@ -483,6 +812,8 @@ def pre_push(
         ),
         nl=False,
     )
+    if followup_no_eligible_reason is not None:
+        typer.echo(followup_no_eligible_reason)
     if telemetry_enabled:
         typer.echo(f"Appended telemetry: {effective_telemetry_path}")
     if archive_path:
@@ -519,12 +850,14 @@ def _load_previous_report(path: Path) -> ReviewReport | None:
 
 
 def _set_continue_commands(report: ReviewReport, json_output: Path) -> None:
+    depth_upgrade_ids = set(report.llm_coverage.shallow_only_high_risk_context_pack_ids)
     for todo in report.llm_coverage.coverage_todos:
         todo.suggested_command = continue_command_for_pack(
             todo.context_pack_id,
             str(json_output),
             todo.reviewer_id,
             json_output_path=str(json_output),
+            review_depth_upgrade=todo.context_pack_id in depth_upgrade_ids,
         )
 
 
@@ -532,6 +865,7 @@ def _retry_coverage_report(
     state: PrePushGateState | None,
     report: ReviewReport | None,
     *,
+    json_output: Path,
     config_hash: str,
     gate_config: PrePushGateConfig,
     reviewer_ids: list[str] | None,
@@ -542,6 +876,13 @@ def _retry_coverage_report(
     if not debt.quality_gate_failed and not debt.partial_blocked:
         return None
     if Path(report.project.root) != Path(state.repo_root):
+        return None
+    try:
+        if Path(state.json_path).resolve() != json_output.resolve():
+            return None
+    except (OSError, RuntimeError):  # fmt: skip
+        return None
+    if not _coverage_retry_snapshot_matches_state(state, report):
         return None
     if report.generated_at < state.generated_at:
         return None
@@ -566,6 +907,31 @@ def _retry_coverage_report(
     return report
 
 
+def _coverage_retry_snapshot_matches_state(state: PrePushGateState, report: ReviewReport) -> bool:
+    snapshot = report.input_snapshot
+    if snapshot is None:
+        return False
+    if (
+        not state.input_snapshot_fingerprint
+        or context_pack_fingerprint(snapshot.model_dump(mode="json")) != state.input_snapshot_fingerprint
+    ):
+        return False
+    target_mode = TargetMode(snapshot.target_mode)
+    if target_mode != TargetMode(report.diff.target_mode):
+        return False
+    if snapshot.base_ref != report.diff.base or snapshot.head_sha != state.head_sha:
+        return False
+    if target_mode == TargetMode.BASE:
+        return (
+            snapshot.base_ref == state.base_ref
+            and snapshot.merge_base_sha == state.merge_base_sha
+            and snapshot.range_start_sha is None
+        )
+    if target_mode == TargetMode.PATCH and snapshot.range_start_sha is not None:
+        return snapshot.merge_base_sha is None and report.diff.base == f"{snapshot.range_start_sha}..HEAD"
+    return False
+
+
 def _retry_resolution_report(
     state: PrePushGateState | None,
     report: ReviewReport | None,
@@ -588,7 +954,7 @@ def _retry_resolution_report(
     try:
         state_json_path = Path(state.json_path).resolve()
         current_json_path = json_output.resolve()
-    except OSError, RuntimeError:
+    except (OSError, RuntimeError):  # fmt: skip
         return None
     if state_json_path != current_json_path:
         return None

@@ -68,8 +68,8 @@ review:
       fail_on_partial_severity: critical
       max_stdout_findings: 10
       stdout_format: agent
-      auto_followup_p0: true
-      auto_followup_p0_max_pack_reviews: 16
+      auto_followup: true
+      auto_followup_max_pack_reviews: 16
       progress: auto
       progress_interval_seconds: 5
 ```
@@ -79,6 +79,13 @@ review:
 `review.local_data.root` defines where long-lived local artifacts are stored when a path starts with `${local_data}`. `apex-ray init` sets it to `git_common`, which resolves to an Apex Ray directory under the repository's shared git common directory. Linked worktrees from the same local clone then share telemetry, LLM cache entries, and archived report runs, even when individual worktree directories are deleted.
 
 Latest report outputs still stay at their configured `--output`, `--json`, and `--html` paths, usually under the current worktree's `.apex-ray/reports/`, so parallel worktrees do not overwrite each other's latest snapshots.
+
+For a `--worktree` target, in-repository report and writable cache paths must
+be untracked and Git-ignored. This keeps checkpoint, final-report, LLM-cache,
+and analyzer-cache writes outside the diff identity used by safe continuation.
+The check also covers relative `APEX_RAY_CACHE_HOME` and `XDG_CACHE_HOME`
+values. Commit the `.apex-ray/.gitignore` created by `apex-ray init`, then use
+its ignored paths or paths outside the repository.
 
 ## Agent Artifact Refresh
 
@@ -331,9 +338,18 @@ packs. `review_depth` is:
 - `shallow`: all selected packs receive the compact pass.
 
 Set `required: true` when that specialist must finish every selected
-reviewer-pack assignment for the coverage quality gate to pass. Unfinished
-assignments for an optional reviewer remain visible in reviewer coverage and
-continuation todos, but are warnings rather than blocking debt.
+reviewer-pack assignment for the coverage quality gate to pass. Matching packs
+deferred by selection limits remain visible in reviewer coverage and
+continuation todos for both required and optional reviewers, but do not turn a
+bounded, risk-based run into exhaustive review. Use `--strict-coverage`,
+`--until-complete`, or the Action's `coverage-policy: complete` when every
+matching assignment must finish.
+
+An applicable required reviewer that matches packs but selects none still
+fails closed: the gate has no successful reviewer assignment to trust. Once at
+least one pack is selected, additional matching packs deferred by bounded
+selection remain explicit completion debt rather than silently expanding that
+ordinary run.
 
 Run every enabled reviewer by default, or select one or more explicitly:
 
@@ -345,15 +361,52 @@ apex-ray gate pre-push --reviewer security
 Repeated `--reviewer` is useful for local investigation and CI matrices.
 Unknown and disabled reviewer IDs fail before provider calls.
 
+The top-level `review.llm` budget is the default for each reviewer, not one
+aggregate pool shared by all reviewers. Reviewer fields override that default
+for their own pass, and every enabled reviewer consumes an independent budget;
+the possible aggregate is therefore the sum of their effective budgets.
+Markdown and JSON coverage summaries record each reviewer's effective mode,
+depth, pack caps, and input-token cap.
+
+Per-invocation CLI budget overrides apply uniformly to every selected reviewer. When provided,
+`--llm-coverage-mode`, `--llm-max-packs`, `--llm-max-deep-packs`, and
+`--llm-max-input-tokens` replace the corresponding root value **and** every
+configured reviewer override for that run. Use reviewer YAML fields when
+specialists need different persistent budgets; use CLI overrides when every
+reviewer pass should use the same limits. The possible aggregate remains the
+sum of the selected reviewers' effective budgets; these flags do not create a
+shared invocation-wide envelope.
+
 ## Coverage
 
 `review.llm.coverage_mode` controls how much of a diff receives LLM review:
 
 - `fast`: capped deep review.
 - `balanced`: deep review for high-value packs plus shallow breadth under token budget.
-- `exhaustive`: review every reviewable pack when budget allows.
+- `exhaustive`: prioritize every reviewable pack, while still honoring all
+  configured pack, deep-review, input-token, and provider limits.
 
-Reports show partial severity, reviewed/unreviewed packs, residual P0/P1 work, and continuation commands.
+Reports show partial severity, reviewed/unreviewed packs, residual P0/P1 work,
+reviewer assignments, and continuation commands. Their completion status is:
+
+- `complete` when every scoped pack and matching reviewer assignment is
+  reviewed and no partial debt remains;
+- `partial` when work remains without a hard execution/budget failure;
+- `incomplete` when a pack is over budget, a reviewer execution or
+  verification fails, or required-reviewer policy debt prevents completion;
+- `disabled` when LLM review did not run.
+
+Findings and gate messages refer to the reviewed scope. A clean partial report
+is not evidence that unreviewed packs are clean.
+
+For ordinary runs, the completion status summarizes the report's global LLM
+scope. With `--until-complete --reviewer <id>`, the completion contract instead
+covers only packs matching that reviewer and its assignments. Its
+`coverage_completion` result may be `complete` while global coverage remains
+partial outside that matching scope. If no reviewer is named and exactly one
+configured reviewer is `required`, a fresh completion run executes only that
+baseline reviewer. Keep the baseline unfiltered when it is meant to represent
+the entire reviewable diff.
 
 Tune coverage with:
 
@@ -365,7 +418,11 @@ Tune coverage with:
   many consecutive infrastructure failures; auth and quota failures open it
   immediately.
 
-Prefer `balanced` for normal team use. Use `fast` for cheap smoke review and `exhaustive` for high-risk changes when provider cost and latency are acceptable.
+Prefer `balanced` for normal team use. Use `fast` for cheap smoke review and
+`exhaustive` for high-risk changes when provider cost and latency are
+acceptable. Because `exhaustive` still obeys caps, use
+`apex-ray review --until-complete` (and `--strict-coverage` when a non-complete
+result must fail) for an explicit completion contract.
 
 Token estimates include provider-specific prompt/scaffold overhead. They are
 deliberately conservative for CLI providers because observed CLI usage
@@ -419,15 +476,38 @@ Default behavior:
 - block on `critical` partial coverage;
 - print live progress to stderr and a compact, agent-readable summary to stdout.
 
-When `auto_followup_p0` is enabled, the gate can make one deep continuation
-pass over residual P0 work. `auto_followup_p0_max_pack_reviews` limits primary
-reviewer-pack assignments in that pass (the default is `16`), including when
-several reviewers match the same context pack. Globally unreviewed P0 work and
-deferred assignments for reviewers marked `required: true` remain blocking
-coverage debt. Deferred optional-specialist assignments remain visible as
-warnings and continuation todos. This bounds API or subscription use without
-hiding unfinished work. Provider retries, fallbacks, and finding verification
-can add requests beyond this primary-review cap.
+Use the canonical automatic follow-up keys for new configurations:
+
+```yaml
+review:
+  gates:
+    pre_push:
+      fail_on_partial_severity: critical
+      auto_followup: true
+      auto_followup_max_pack_reviews: 16
+```
+
+The gate makes at most one deep continuation pass over the concrete packs that
+caused the current blocking coverage decision. The partial threshold supplies
+the baseline residual scope (`critical` P0, `major` P0/P1, `minor` P0/P1/P2),
+while failed review/verification calls, required-reviewer debt, configured
+source/high-risk thresholds, and high-risk depth debt add their exact blocking
+pack IDs even when their pack priority is lower. `none` (or `null`) disables
+threshold-only residual selection. `auto_followup_max_pack_reviews` limits
+primary reviewer-pack assignments. Provider retries, fallbacks, and finding
+verification can add requests beyond this cap.
+
+Existing configurations remain compatible. When `auto_followup` is omitted,
+the legacy `auto_followup_p0` and `auto_followup_p0_max_pack_reviews` keys keep
+their original P0-only behavior, regardless of the partial-severity threshold.
+Set the canonical key explicitly when adopting the generalized policy.
+
+Globally unreviewed work at the blocking threshold and unfinished selected
+assignments for reviewers marked `required: true` remain blocking coverage
+debt. Matching assignments deferred by reviewer limits remain visible as
+warnings and continuation todos; explicit strict/complete coverage policies
+promote them to required work. This bounds API or subscription use without
+hiding unfinished work.
 
 Set `review.gates.pre_push.enabled: false` in local config to skip the hook gate. Prefer local config for personal cost/model/provider differences instead of editing the shared hook command.
 

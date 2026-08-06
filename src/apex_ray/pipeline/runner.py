@@ -57,6 +57,7 @@ from apex_ray.pipeline.selection import (
     select_continuation_context_packs,
     select_llm_context_packs,
 )
+from apex_ray.pipeline.snapshot import capture_review_input_snapshot
 from apex_ray.progress import NoopProgress, ProgressSink
 from apex_ray.report import build_report
 from apex_ray.report.run_state import reduce_llm_pack_run_states
@@ -78,10 +79,18 @@ def run_review_pipeline(
     provider: LLMProvider | None = None,
     progress: ProgressSink | None = None,
     reviewer_ids: list[str] | None = None,
+    snapshot_range_start_ref: str | None = None,
 ) -> ReviewReport:
     pipeline_started = time.monotonic()
     stage_durations_ms: dict[str, int] = {}
     progress = progress or NoopProgress()
+    input_snapshot = capture_review_input_snapshot(
+        repo_root,
+        diff_text,
+        target_mode,
+        base_ref=base,
+        range_start_ref=snapshot_range_start_ref,
+    )
     resolved_reviewers = effective_reviewers(config.reviewers, reviewer_ids) if reviewer_ids is not None else None
     reviewer_scope_ids = [reviewer.id for reviewer in resolved_reviewers] if resolved_reviewers is not None else None
     stage_started = time.monotonic()
@@ -274,6 +283,7 @@ def run_review_pipeline(
         reviewer_selections=reviewer_selections,
         stage_durations_ms=stage_durations_ms,
         reviewer_scope_ids=reviewer_scope_ids,
+        input_snapshot=input_snapshot,
     )
     stage_durations_ms["report"] = _elapsed_ms(stage_started)
     stage_durations_ms["total"] = _elapsed_ms(pipeline_started)
@@ -436,7 +446,9 @@ def continue_review_from_report(
     slices: set[str] | None = None,
     pack_ids: set[str] | None = None,
     only_unreviewed: bool = True,
+    force_review_pack_ids: set[str] | None = None,
     max_pack_reviews: int | None = None,
+    respect_config_budgets: bool = False,
     review_depth: Literal["deep", "shallow"] = "deep",
     reviewer_id: str | None = None,
     reviewer_ids: list[str] | None = None,
@@ -586,6 +598,20 @@ def continue_review_from_report(
         pack_ids=pack_ids,
         only_unreviewed=only_unreviewed and reviewers == [None],
     )
+    forced_ids = set(force_review_pack_ids or ())
+    if pack_ids is not None:
+        forced_ids.intersection_update(pack_ids)
+    if forced_ids:
+        forced_candidates = select_continuation_context_packs(
+            report,
+            residual_priorities=residual_priorities,
+            slices=slices,
+            pack_ids=forced_ids,
+            only_unreviewed=False,
+        )
+        candidate_ids = {pack.id for pack in candidate_packs}
+        candidate_ids.update(pack.id for pack in forced_candidates)
+        candidate_packs = [pack for pack in report.context_packs if pack.id in candidate_ids]
     verification_candidate_packs = select_continuation_context_packs(
         report,
         residual_priorities=residual_priorities,
@@ -652,15 +678,31 @@ def continue_review_from_report(
                     recoverable_verification_pack_ids.get(reviewer.id, set())
                 )
             )
+            retry_ids.update(forced_ids)
             matching = [pack for pack in matching if pack.id in retry_ids]
         scoped_packs.append((reviewer, matching))
-    eligible_pack_reviews = sum(len(packs) for _reviewer, packs in scoped_packs)
-    eligible_scoped_packs = scoped_packs
     archived_priority_by_pack_id = {
         status.context_pack_id: status.priority
         for status in report.llm_coverage.pack_statuses
         if status.priority is not None
     }
+    if respect_config_budgets:
+        scoped_packs = [
+            (
+                reviewer,
+                _budget_continuation_reviewer_packs(
+                    reviewer_packs,
+                    report.diff.files,
+                    effective_config,
+                    reviewer,
+                    review_depth=review_depth,
+                    priority_by_pack_id=archived_priority_by_pack_id,
+                ),
+            )
+            for reviewer, reviewer_packs in scoped_packs
+        ]
+    eligible_pack_reviews = sum(len(packs) for _reviewer, packs in scoped_packs)
+    eligible_scoped_packs = scoped_packs
     scoped_packs = _limit_continuation_pack_reviews(
         scoped_packs,
         report.diff.files,
@@ -829,6 +871,7 @@ def continue_review_from_report(
                 llm_selection=rebased_llm_selection,
                 reviewer_selections=reviewer_selections,
                 reviewer_scope_ids=reviewer_scope_ids,
+                input_snapshot=report.input_snapshot,
             ),
             [],
         )
@@ -851,6 +894,7 @@ def continue_review_from_report(
                 llm_selection=rebased_llm_selection,
                 reviewer_selections=reviewer_selections,
                 reviewer_scope_ids=reviewer_scope_ids,
+                input_snapshot=report.input_snapshot,
             ),
             selected_packs,
         )
@@ -1062,6 +1106,7 @@ def continue_review_from_report(
             llm_selection=llm_selection,
             reviewer_selections=reviewer_selections,
             reviewer_scope_ids=reviewer_scope_ids,
+            input_snapshot=report.input_snapshot,
         ),
         selected_packs,
     )
@@ -1117,6 +1162,34 @@ def _limit_continuation_pack_reviews(
         )
         for index, (reviewer, packs) in enumerate(scoped_packs)
     ]
+
+
+def _budget_continuation_reviewer_packs(
+    packs: list[ContextPack],
+    changed_files: list[ChangedFile],
+    config: ReviewConfig,
+    reviewer: ReviewerConfig | None,
+    *,
+    review_depth: Literal["deep", "shallow"],
+    priority_by_pack_id: dict[str, str],
+) -> list[ContextPack]:
+    if not packs:
+        return []
+    llm_config = llm_config_for_reviewer(config.llm, reviewer) if reviewer is not None else config.llm
+    budgeted_packs = [pack_for_reviewer(pack, reviewer) for pack in packs] if reviewer is not None else packs
+    selection = plan_llm_context_selection(
+        budgeted_packs,
+        changed_files,
+        max_packs=llm_config.max_packs,
+        max_deep_packs=llm_config.max_deep_packs if review_depth == "deep" else 0,
+        max_input_tokens=llm_config.max_input_tokens,
+        max_pack_chars=config.context.max_pack_chars,
+        coverage_mode=LLMCoverageMode.FAST if review_depth == "deep" else LLMCoverageMode.BALANCED,
+        provider=lambda pack: review_config_for_pack(llm_config, pack)[0].provider,
+        priority_by_pack_id=priority_by_pack_id,
+    )
+    selected_ids = set(selection.selected_context_pack_ids)
+    return [pack for pack in packs if pack.id in selected_ids]
 
 
 def _reviewer_failed_retry_pack_ids(

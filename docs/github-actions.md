@@ -257,14 +257,73 @@ Line-addressable findings are published as escaped workflow annotations
 (`error` for critical/high, `warning` for medium, and `notice` for low), capped
 at 50 annotations per invocation; the full set remains in JSON and SARIF. The
 action also exposes stable machine outputs: `findings-count` plus per-severity
-counts, `partial-coverage`, `partial-coverage-severity`, `reviewer-statuses`
-(a compact JSON object), `quality-gate-status`, and the enforced
-`gate-outcome`. Report path outputs are described below.
+counts, `partial-coverage`, `partial-coverage-severity`, `coverage-status`
+(`disabled`, `complete`, `partial`, or `incomplete`), `reviewer-statuses` (a
+compact JSON object), `quality-gate-status`, and the enforced `gate-outcome`.
+Report path outputs are described below. Findings and annotations cover only
+the packs/reviewer assignments that actually ran; inspect `coverage-status`
+before treating a zero-finding report as whole-diff evidence.
 
 For an advisory rollout, set `fail-on-quality-gate: "false"`. Reports, the job
 summary, and the `quality-gate-status` action output still expose the failed
 coverage gate, but it does not change the step's exit status. Keep the default
 for reviewers whose coverage is a merge requirement.
+
+## Require complete coverage
+
+The default `coverage-policy: configured` runs the budgets in the repository
+configuration and enforces the configured quality gate. It can legitimately
+finish with partial coverage. Use `complete` for a job whose selected reviewer
+scope must be fully reviewed:
+
+```yaml
+- name: Complete correctness review
+  uses: dobrotacreator/apex-ray/.github/actions/apex-ray-review@<full-release-commit-sha>
+  env:
+    OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+  with:
+    reviewers: correctness
+    llm: auto
+    coverage-policy: complete
+    followup-max-pack-reviews: "16"
+    max-followup-passes: "8"
+    artifact-name: apex-ray-correctness
+    sarif-category: apex-ray-correctness
+```
+
+The action adds `--until-complete`, reviews at most
+`followup-max-pack-reviews` reviewer-pack assignments per follow-up batch, and
+runs at most `max-followup-passes` batches. The job fails unless the final
+`coverage-status` is `complete`; `fail-on-quality-gate: "false"` makes only the
+configured quality gate advisory and does not disable this completion policy.
+Reports and SARIF are still finalized when the bounded loop reaches its limit.
+
+Completion is evaluated against packs matching the selected reviewer, not
+unrelated global debt outside that reviewer's filters. Consequently a focused
+reviewer job can return `coverage-status: complete` even though another scope
+would still be partial. Use a broad, unfiltered correctness reviewer for a
+whole-diff merge requirement, and keep focused specialist jobs as separate
+contracts.
+
+Make the reviewer scope explicit, preferably as one reviewer per matrix job.
+When `reviewers` is omitted and several reviewers are enabled, the config must
+identify exactly one reviewer marked as required; a single enabled reviewer is
+also unambiguous. Apex Ray rejects any other implicit multi-reviewer completion
+scope before provider calls. On a fresh run, the uniquely required reviewer is
+the only reviewer executed; the action does not spend budget on the other
+configured reviewers before draining the baseline.
+
+Complete coverage requires trusted LLM access. In the restricted PR workflow,
+that means an API provider, protected credentials, and a same-repository
+trusted run. Fork and Dependabot runs are forced to `--no-llm`, so they cannot
+satisfy `coverage-policy: complete`; use the default `configured` policy for
+those deterministic runs or condition the complete-coverage job to trusted
+same-repository pull requests. With the default `llm: auto`, the Action honors
+the trusted config and does not enable LLM review merely because
+`coverage-policy` is `complete`; the config must set `review.llm.enabled: true`.
+Use `llm: "true"` when this Action job should explicitly override that setting
+and enable the configured provider. Keep batch limits conservative and increase
+them only from measured residual coverage and cost.
 
 ## API credentials
 

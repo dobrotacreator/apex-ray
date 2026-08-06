@@ -582,12 +582,14 @@ def _replace_output_directory(source: Path, destination: Path) -> None:
 
 
 def _set_report_continue_commands(report: ReviewReport, report_json_path: Path) -> None:
+    depth_upgrade_ids = set(report.llm_coverage.shallow_only_high_risk_context_pack_ids)
     for todo in report.llm_coverage.coverage_todos:
         todo.suggested_command = continue_command_for_pack(
             todo.context_pack_id,
             str(report_json_path),
             todo.reviewer_id,
             json_output_path=str(report_json_path),
+            review_depth_upgrade=todo.context_pack_id in depth_upgrade_ids,
         )
 
 

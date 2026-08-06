@@ -136,6 +136,13 @@ The gate reviews `review.base...HEAD`, writes `.apex-ray/reports/pre-push.md` an
 
 Large diffs can exceed the configured LLM coverage budget. Reports include reviewed and unreviewed pack IDs plus continuation commands.
 
+Read findings as results for the reviewed scope. `complete` means every scoped
+pack and matching reviewer assignment was reviewed; `partial` means work
+remains without a hard failure; `incomplete` means an over-budget pack, a
+reviewer execution/verification failure, or required-reviewer policy debt
+prevented completion. Zero findings in a partial or incomplete report is not a
+whole-diff clean result.
+
 Continue the highest-priority unreviewed work:
 
 ```bash
@@ -153,6 +160,38 @@ apex-ray review \
   --only-pack "<pack-id>" \
   --llm
 ```
+
+Drain an explicit baseline reviewer in bounded batches, and exit non-zero if
+the limits are reached before completion:
+
+```bash
+apex-ray review \
+  --continue-from .apex-ray/reports/review.json \
+  --reviewer correctness \
+  --until-complete \
+  --strict-coverage \
+  --followup-max-pack-reviews 16 \
+  --max-followup-passes 8 \
+  --llm
+```
+
+Use an existing reviewer id. With multiple configured reviewers and no
+explicit `--reviewer`, exactly one must be marked `required: true` to act as
+the baseline; on a fresh review, only that baseline reviewer runs. Explicit
+completion covers only packs matching the selected reviewer, so it can finish
+while unrelated global coverage remains partial. Use an unfiltered baseline
+for a full-diff requirement. `exhaustive` mode still obeys normal budgets, so
+it does not replace this completion contract. Markdown and JSON latest reports
+are atomically updated after every completed batch and can be used to resume an
+interrupted loop.
+
+New reports also fingerprint their review input. Continuation rejects a base,
+staged, or worktree report when its saved Git target or diff changed. Supplied
+`--diff` reports are the only detached immutable snapshots and print a notice;
+incremental pre-push Git ranges remain live, validated targets. Reports from
+older Apex Ray versions have no snapshot: ordinary continuation remains
+allowed with a warning, but `--until-complete` and `--strict-coverage` reject
+them and require a fresh review.
 
 ## Next Steps
 
