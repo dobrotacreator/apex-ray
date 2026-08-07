@@ -1,3 +1,4 @@
+import shutil
 from pathlib import Path
 
 import pytest
@@ -5,6 +6,7 @@ import pytest
 from apex_ray import git
 from apex_ray.config import (
     AGENT_ARTIFACT_TEMPLATE_VERSION,
+    APEX_RAY_SKILL_TEXT,
     ConfigError,
     _detect_agent_skill_from_block,
     agent_artifact_statuses,
@@ -559,12 +561,144 @@ def test_init_project_creates_team_setup_files(tmp_path: Path) -> None:
 def test_init_project_codex_agent_files_use_agents_skill_directory(tmp_path: Path) -> None:
     init_project(tmp_path, hooks="none", agent_files="codex")
 
+    skill_alias = tmp_path / ".agents" / "skills" / "apex-ray"
     assert (tmp_path / "AGENTS.md").exists()
     assert (tmp_path / ".apex-ray" / "skills" / "apex-ray" / "SKILL.md").exists()
-    assert (tmp_path / ".agents" / "skills" / "apex-ray" / "SKILL.md").exists()
+    assert skill_alias.is_symlink()
+    assert skill_alias.readlink() == Path("../../.apex-ray/skills/apex-ray")
+    assert (skill_alias / "SKILL.md").exists()
     assert (tmp_path / ".agents" / "skills" / "apex-ray-improve" / "SKILL.md").exists()
     assert not (tmp_path / ".codex").exists()
     assert not (tmp_path / ".claude").exists()
+
+
+def test_init_project_copies_codex_skill_directory_when_symlinks_are_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def unavailable_symlink(
+        _path: Path,
+        _target: str | Path,
+        target_is_directory: bool = False,
+    ) -> None:
+        assert target_is_directory
+        raise OSError("symlinks unavailable")
+
+    monkeypatch.setattr(Path, "symlink_to", unavailable_symlink)
+
+    init_project(tmp_path, hooks="none", agent_files="codex")
+
+    canonical = tmp_path / ".apex-ray" / "skills" / "apex-ray"
+    alias = tmp_path / ".agents" / "skills" / "apex-ray"
+    assert alias.is_dir()
+    assert not alias.is_symlink()
+    assert (alias / "SKILL.md").read_text(encoding="utf-8") == (canonical / "SKILL.md").read_text(encoding="utf-8")
+
+    written = refresh_agent_artifacts(tmp_path, agent_files="codex")
+
+    assert alias not in written
+    assert alias.is_dir()
+    assert not alias.is_symlink()
+    assert all(status.status == "current" for status in agent_artifact_statuses(tmp_path, agent_files="codex"))
+
+
+def test_refresh_agent_artifacts_updates_managed_codex_skill_copy_without_replacing_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def unavailable_symlink(
+        _path: Path,
+        _target: str | Path,
+        target_is_directory: bool = False,
+    ) -> None:
+        assert target_is_directory
+        raise OSError("symlinks unavailable")
+
+    monkeypatch.setattr(Path, "symlink_to", unavailable_symlink)
+    init_project(tmp_path, hooks="none", agent_files="codex")
+    canonical = tmp_path / ".apex-ray" / "skills" / "apex-ray" / "SKILL.md"
+    alias = tmp_path / ".agents" / "skills" / "apex-ray"
+    copied_skill = alias / "SKILL.md"
+    old_text = copied_skill.read_text(encoding="utf-8").replace(
+        f"apex_ray_template_version: {AGENT_ARTIFACT_TEMPLATE_VERSION}",
+        "apex_ray_template_version: 1",
+    )
+    canonical.write_text(old_text, encoding="utf-8")
+    copied_skill.write_text(old_text, encoding="utf-8")
+    custom_note = alias / "TEAM-NOTES.md"
+    custom_note.write_text("preserve me\n", encoding="utf-8")
+
+    written = refresh_agent_artifacts(tmp_path, agent_files="codex")
+
+    assert alias in written
+    assert alias.is_dir()
+    assert not alias.is_symlink()
+    assert copied_skill.read_text(encoding="utf-8") == canonical.read_text(encoding="utf-8")
+    assert f"apex_ray_template_version: {AGENT_ARTIFACT_TEMPLATE_VERSION}" in copied_skill.read_text(encoding="utf-8")
+    assert custom_note.read_text(encoding="utf-8") == "preserve me\n"
+
+    written = refresh_agent_artifacts(tmp_path, agent_files="codex")
+
+    assert alias not in written
+    assert alias.is_dir()
+    assert not alias.is_symlink()
+
+
+def test_refresh_agent_artifacts_migrates_legacy_codex_skill_file_symlink(tmp_path: Path) -> None:
+    canonical = tmp_path / ".apex-ray" / "skills" / "apex-ray" / "SKILL.md"
+    alias = tmp_path / ".agents" / "skills" / "apex-ray"
+    canonical.parent.mkdir(parents=True)
+    canonical.write_text("---\nname: apex-ray\napex_ray_template_version: 1\n---\n", encoding="utf-8")
+    alias.mkdir(parents=True)
+    try:
+        (alias / "SKILL.md").symlink_to("../../../.apex-ray/skills/apex-ray/SKILL.md")
+    except OSError as exc:
+        pytest.skip(f"symlink creation is unavailable: {exc}")
+
+    statuses = agent_artifact_statuses(tmp_path, agent_files="codex")
+
+    assert any(
+        status.path == alias and status.status == "outdated" and "file-level" in status.reason for status in statuses
+    )
+
+    written = refresh_agent_artifacts(tmp_path, agent_files="codex")
+
+    assert alias in written
+    assert alias.is_symlink()
+    assert alias.readlink() == Path("../../.apex-ray/skills/apex-ray")
+    assert f"apex_ray_template_version: {AGENT_ARTIFACT_TEMPLATE_VERSION}" in canonical.read_text(encoding="utf-8")
+
+
+def test_refresh_agent_artifacts_migrates_legacy_codex_alias_without_deleting_extra_files(tmp_path: Path) -> None:
+    canonical = tmp_path / ".apex-ray" / "skills" / "apex-ray" / "SKILL.md"
+    alias = tmp_path / ".agents" / "skills" / "apex-ray"
+    canonical.parent.mkdir(parents=True)
+    canonical.write_text("---\nname: apex-ray\napex_ray_template_version: 1\n---\n", encoding="utf-8")
+    alias.mkdir(parents=True)
+    try:
+        (alias / "SKILL.md").symlink_to("../../../.apex-ray/skills/apex-ray/SKILL.md")
+    except OSError as exc:
+        pytest.skip(f"symlink creation is unavailable: {exc}")
+    custom_note = alias / "TEAM-NOTES.md"
+    custom_note.write_text("preserve me\n", encoding="utf-8")
+
+    written = refresh_agent_artifacts(tmp_path, agent_files="codex")
+
+    assert alias in written
+    assert alias.is_dir()
+    assert not alias.is_symlink()
+    assert not (alias / "SKILL.md").is_symlink()
+    assert custom_note.read_text(encoding="utf-8") == "preserve me\n"
+
+
+def test_refresh_agent_artifacts_preserves_current_codex_skill_directory_symlink(tmp_path: Path) -> None:
+    init_project(tmp_path, hooks="none", agent_files="codex")
+    alias = tmp_path / ".agents" / "skills" / "apex-ray"
+    original_target = alias.readlink()
+
+    written = refresh_agent_artifacts(tmp_path, agent_files="codex")
+
+    assert alias not in written
+    assert alias.is_symlink()
+    assert alias.readlink() == original_target
 
 
 def test_init_project_deprecates_update_gitignore_without_touching_root(tmp_path: Path) -> None:
@@ -784,12 +918,27 @@ def test_agent_artifact_statuses_checks_all_existing_claude_files(tmp_path: Path
     assert any(status.path == nested_claude_path and status.status == "outdated" for status in statuses)
 
 
-def test_agent_artifact_statuses_reports_missing_canonical_skill_alias(tmp_path: Path) -> None:
-    alias_path = tmp_path / ".agents" / "skills" / "apex-ray" / "SKILL.md"
-    canonical_path = tmp_path / ".apex-ray" / "skills" / "apex-ray" / "SKILL.md"
+def test_agent_artifact_statuses_reports_missing_managed_codex_skill_alias(tmp_path: Path) -> None:
+    init_project(tmp_path, hooks="none", agent_files="codex")
+    alias_path = tmp_path / ".agents" / "skills" / "apex-ray"
+    if alias_path.is_symlink():
+        alias_path.unlink()
+    else:
+        shutil.rmtree(alias_path)
+
+    statuses = agent_artifact_statuses(tmp_path, agent_files="codex")
+
+    assert any(
+        status.path == alias_path and status.status == "missing" and "directory" in status.reason for status in statuses
+    )
+
+
+def test_agent_artifact_statuses_reports_codex_alias_with_missing_canonical_directory(tmp_path: Path) -> None:
+    alias_path = tmp_path / ".agents" / "skills" / "apex-ray"
+    canonical_path = tmp_path / ".apex-ray" / "skills" / "apex-ray"
     alias_path.parent.mkdir(parents=True)
     try:
-        alias_path.symlink_to(canonical_path)
+        alias_path.symlink_to(canonical_path, target_is_directory=True)
     except OSError as exc:
         pytest.skip(f"symlink creation is unavailable: {exc}")
 
@@ -799,6 +948,166 @@ def test_agent_artifact_statuses_reports_missing_canonical_skill_alias(tmp_path:
         status.path == alias_path and status.status == "outdated" and "canonical skill" in status.reason
         for status in statuses
     )
+
+
+def test_refresh_agent_artifacts_rejects_conflicting_codex_skill_directory(tmp_path: Path) -> None:
+    init_project(tmp_path, hooks="none", agent_files="codex")
+    alias = tmp_path / ".agents" / "skills" / "apex-ray"
+    if alias.is_symlink():
+        alias.unlink()
+    else:
+        shutil.rmtree(alias)
+    alias.mkdir()
+    custom_skill = alias / "SKILL.md"
+    custom_skill.write_text("---\nname: custom-review\n---\n\n# Keep me\n", encoding="utf-8")
+
+    with pytest.raises(ConfigError, match="Conflicting Codex skill directory"):
+        refresh_agent_artifacts(tmp_path, agent_files="codex")
+
+    assert custom_skill.read_text(encoding="utf-8") == "---\nname: custom-review\n---\n\n# Keep me\n"
+
+
+def test_init_project_rejects_conflicting_codex_skill_directory_before_writing(tmp_path: Path) -> None:
+    custom_skill = tmp_path / ".agents" / "skills" / "apex-ray" / "SKILL.md"
+    custom_skill.parent.mkdir(parents=True)
+    custom_skill.write_text("---\nname: custom-review\n---\n\n# Keep me\n", encoding="utf-8")
+
+    with pytest.raises(ConfigError, match="Conflicting Codex skill directory"):
+        init_project(tmp_path, hooks="none", agent_files="codex")
+
+    assert custom_skill.read_text(encoding="utf-8") == "---\nname: custom-review\n---\n\n# Keep me\n"
+    assert not (tmp_path / ".apex-ray").exists()
+    assert not (tmp_path / "AGENTS.md").exists()
+
+
+def test_refresh_agent_artifacts_rejects_external_codex_skill_symlink(tmp_path: Path) -> None:
+    init_project(tmp_path, hooks="none", agent_files="codex")
+    alias = tmp_path / ".agents" / "skills" / "apex-ray"
+    if alias.is_symlink():
+        alias.unlink()
+    else:
+        shutil.rmtree(alias)
+    outside = tmp_path.with_name(f"{tmp_path.name}-outside-skill")
+    outside.mkdir()
+    try:
+        alias.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink creation is unavailable: {exc}")
+    original_target = alias.readlink()
+
+    statuses = agent_artifact_statuses(tmp_path, agent_files="codex")
+
+    assert any(
+        status.path == alias and status.status == "outdated" and "outside" in status.reason for status in statuses
+    )
+    with pytest.raises(ConfigError, match="outside the repository"):
+        refresh_agent_artifacts(tmp_path, agent_files="codex")
+    assert alias.is_symlink()
+    assert alias.readlink() == original_target
+    assert list(outside.iterdir()) == []
+
+
+def test_refresh_agent_artifacts_rejects_broken_wrong_codex_skill_symlink(tmp_path: Path) -> None:
+    init_project(tmp_path, hooks="none", agent_files="codex")
+    alias = tmp_path / ".agents" / "skills" / "apex-ray"
+    if alias.is_symlink():
+        alias.unlink()
+    else:
+        shutil.rmtree(alias)
+    wrong_target = Path("../../custom-skills/missing-apex-ray")
+    try:
+        alias.symlink_to(wrong_target, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink creation is unavailable: {exc}")
+
+    statuses = agent_artifact_statuses(tmp_path, agent_files="codex")
+
+    assert any(
+        status.path == alias and status.status == "outdated" and "canonical skill directory" in status.reason
+        for status in statuses
+    )
+    with pytest.raises(ConfigError, match="symlink does not point"):
+        refresh_agent_artifacts(tmp_path, agent_files="codex")
+    assert alias.is_symlink()
+    assert alias.readlink() == wrong_target
+
+
+def test_refresh_agent_artifacts_rejects_codex_skill_path_through_external_parent_symlink(tmp_path: Path) -> None:
+    outside = tmp_path.with_name(f"{tmp_path.name}-outside-agents")
+    outside.mkdir()
+    try:
+        (tmp_path / ".agents").symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink creation is unavailable: {exc}")
+
+    statuses = agent_artifact_statuses(tmp_path, agent_files="codex", include_missing=True)
+
+    assert any(status.status == "outdated" and "outside" in status.reason for status in statuses)
+    with pytest.raises(ConfigError, match="outside the repository"):
+        refresh_agent_artifacts(tmp_path, agent_files="codex")
+    assert list(outside.iterdir()) == []
+
+
+def test_init_project_rejects_external_canonical_skill_directory_before_writing(tmp_path: Path) -> None:
+    outside = tmp_path.with_name(f"{tmp_path.name}-outside-canonical-skill")
+    outside.mkdir()
+    outside_skill = outside / "SKILL.md"
+    outside_skill.write_text("outside\n", encoding="utf-8")
+    canonical = tmp_path / ".apex-ray" / "skills" / "apex-ray"
+    canonical.parent.mkdir(parents=True)
+    try:
+        canonical.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink creation is unavailable: {exc}")
+
+    with pytest.raises(ConfigError, match="outside the repository"):
+        init_project(tmp_path, hooks="none", agent_files="codex")
+
+    assert outside_skill.read_text(encoding="utf-8") == "outside\n"
+    assert not (tmp_path / "AGENTS.md").exists()
+    assert not (tmp_path / ".apex-ray" / "config.yml").exists()
+
+
+def test_agent_artifact_statuses_rejects_external_canonical_skill_directory(tmp_path: Path) -> None:
+    outside = tmp_path.with_name(f"{tmp_path.name}-outside-canonical-status")
+    outside.mkdir()
+    (outside / "SKILL.md").write_text(APEX_RAY_SKILL_TEXT, encoding="utf-8")
+    canonical = tmp_path / ".apex-ray" / "skills" / "apex-ray"
+    canonical.parent.mkdir(parents=True)
+    try:
+        canonical.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink creation is unavailable: {exc}")
+
+    statuses = agent_artifact_statuses(tmp_path, agent_files="codex")
+
+    assert any(
+        status.path == canonical / "SKILL.md"
+        and status.status == "outdated"
+        and "outside the repository" in status.reason
+        for status in statuses
+    )
+
+
+def test_refresh_agent_artifacts_reports_non_utf8_codex_skill_as_unmanaged(tmp_path: Path) -> None:
+    init_project(tmp_path, hooks="none", agent_files="codex")
+    alias = tmp_path / ".agents" / "skills" / "apex-ray"
+    if alias.is_symlink():
+        alias.unlink()
+    else:
+        shutil.rmtree(alias)
+    alias.mkdir()
+    skill = alias / "SKILL.md"
+    skill.write_bytes(b"\xff\xfe\x00")
+
+    statuses = agent_artifact_statuses(tmp_path, agent_files="codex")
+
+    assert any(
+        status.path == alias and status.status == "outdated" and "unmanaged" in status.reason for status in statuses
+    )
+    with pytest.raises(ConfigError, match="Conflicting Codex skill directory"):
+        refresh_agent_artifacts(tmp_path, agent_files="codex")
+    assert skill.read_bytes() == b"\xff\xfe\x00"
 
 
 def test_detect_agent_skill_requires_standalone_apex_ray_token() -> None:

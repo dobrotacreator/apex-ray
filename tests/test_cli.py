@@ -284,6 +284,26 @@ def test_doctor_reports_outdated_agent_artifacts(tmp_path: Path, monkeypatch) ->
     assert "Run: apex-ray init --refresh-agent-artifacts" in result.stdout
 
 
+def test_doctor_reports_missing_managed_codex_skill_directory(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    runner.invoke(app, ["init", "--hooks", "none", "--agent-files", "codex"], catch_exceptions=False)
+    alias = tmp_path / ".agents" / "skills" / "apex-ray"
+    if alias.is_symlink():
+        alias.unlink()
+    else:
+        for child in alias.iterdir():
+            child.unlink()
+        alias.rmdir()
+
+    result = runner.invoke(app, ["doctor"], catch_exceptions=False)
+
+    assert result.exit_code == 0
+    assert "- Agent artifacts: outdated" in result.stdout
+    assert str(alias) in result.stdout
+    assert "skill directory does not exist" in result.stdout
+    assert "Run: apex-ray init --refresh-agent-artifacts" in result.stdout
+
+
 def test_telemetry_summary_uses_configured_local_data_path(tmp_path: Path, monkeypatch) -> None:
     subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
     config = tmp_path / ".apex-ray" / "config.yml"

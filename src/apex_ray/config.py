@@ -1,4 +1,5 @@
 import re
+import shutil
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,7 +16,7 @@ from apex_ray.rules import RuleError, load_rule_definitions
 DEFAULT_BASE_BRANCH = "main"
 HOOK_MODES = {"lefthook", "git", "none"}
 AGENT_FILE_MODES = {"none", "codex", "claude", "both"}
-AGENT_ARTIFACT_TEMPLATE_VERSION = 2
+AGENT_ARTIFACT_TEMPLATE_VERSION = 3
 
 
 @dataclass(frozen=True)
@@ -299,7 +300,13 @@ def init_project(
             stacklevel=2,
         )
     _validate_init_options(hooks=hooks, agent_files=agent_files)
-    _preflight_init_targets(root, hooks=hooks, agent_files=agent_files, overwrite=overwrite)
+    _preflight_init_targets(
+        root,
+        hooks=hooks,
+        agent_files=agent_files,
+        agent_skill=agent_skill,
+        overwrite=overwrite,
+    )
     written: list[Path] = []
     config_exists = default_config_path(root).exists()
     default_base = detect_default_base(root)
@@ -351,6 +358,10 @@ def refresh_agent_artifacts(
         if not agent_skill:
             statuses = [status for status in statuses if status.kind != "agent_skill"]
         return _dedupe_paths([status.path for status in statuses if status.needs_refresh])
+    if agent_skill and agent_files in {"codex", "both"}:
+        _preflight_codex_skill_aliases(root)
+    if agent_skill and agent_files != "none":
+        _preflight_canonical_skills(root)
     written = _write_agent_files(root, agent_files=agent_files, agent_skill=agent_skill, overwrite=True)
     if agent_skill:
         written.extend(_write_agent_skill_files(root, agent_files=agent_files, overwrite=True))
@@ -381,13 +392,18 @@ def agent_artifact_statuses(
             continue
         seen.add(resolved)
         statuses.append(status)
-    for path, skill_name, expected in _agent_skill_status_targets(
+    for path, skill_name, expected, layout in _agent_skill_status_targets(
         root,
         agent_files=agent_files,
         include_missing=include_missing,
     ):
         status = _agent_skill_status(
-            root, path, skill_name=skill_name, expected=expected, include_missing=include_missing
+            root,
+            path,
+            skill_name=skill_name,
+            expected=expected,
+            include_missing=include_missing,
+            layout=layout,
         )
         if status is not None:
             statuses.append(status)
@@ -395,11 +411,11 @@ def agent_artifact_statuses(
 
 
 def agent_artifact_refresh_warning(root: Path) -> str | None:
-    outdated = [status for status in agent_artifact_statuses(root) if status.status == "outdated"]
-    if not outdated:
+    stale = [status for status in agent_artifact_statuses(root) if status.status in {"missing", "outdated"}]
+    if not stale:
         return None
-    paths = ", ".join(str(status.path.relative_to(root)) for status in outdated[:5])
-    suffix = "" if len(outdated) <= 5 else f", and {len(outdated) - 5} more"
+    paths = ", ".join(str(status.path.relative_to(root)) for status in stale[:5])
+    suffix = "" if len(stale) <= 5 else f", and {len(stale) - 5} more"
     return (
         f"Apex Ray agent artifacts are outdated: {paths}{suffix}. "
         "Run `apex-ray init --refresh-agent-artifacts` to update managed AGENTS/CLAUDE blocks and skills."
@@ -413,7 +429,14 @@ def _validate_init_options(*, hooks: str, agent_files: str) -> None:
         raise ConfigError("Unsupported agent-files value. Use none, codex, claude, or both.")
 
 
-def _preflight_init_targets(root: Path, *, hooks: str, agent_files: str, overwrite: bool) -> None:
+def _preflight_init_targets(
+    root: Path,
+    *,
+    hooks: str,
+    agent_files: str,
+    agent_skill: bool,
+    overwrite: bool,
+) -> None:
     if hooks == "lefthook":
         _validate_lefthook_target(root / "lefthook.yml", overwrite=overwrite)
     elif hooks == "git":
@@ -424,6 +447,10 @@ def _preflight_init_targets(root: Path, *, hooks: str, agent_files: str, overwri
         for candidate in (root / "CLAUDE.md", root / ".claude" / "CLAUDE.md"):
             if candidate.is_symlink():
                 _safe_repo_symlink_target(root, candidate)
+    if agent_skill and agent_files in {"codex", "both"}:
+        _preflight_codex_skill_aliases(root)
+    if agent_skill and agent_files != "none":
+        _preflight_canonical_skills(root)
 
 
 def load_config(root: Path, explicit_path: Path | None = None) -> tuple[ReviewConfig, Path | None]:
@@ -632,21 +659,22 @@ def _agent_skill_status_targets(
     *,
     agent_files: str,
     include_missing: bool,
-) -> list[tuple[Path, str, str]]:
-    targets: list[tuple[Path, str, str]] = []
+) -> list[tuple[Path, str, str, str]]:
+    targets: list[tuple[Path, str, str, str]] = []
+    codex_skills_expected = include_missing or _codex_skills_are_managed(root)
     for skill_name, skill_text in (
         ("apex-ray", APEX_RAY_SKILL_TEXT),
         ("apex-ray-improve", APEX_RAY_IMPROVE_SKILL_TEXT),
     ):
         canonical = root / ".apex-ray" / "skills" / skill_name / "SKILL.md"
         if include_missing or canonical.exists() or canonical.is_symlink():
-            targets.append((canonical, skill_name, skill_text))
+            targets.append((canonical, skill_name, skill_text, "file"))
         codex = _codex_skill_alias_path(root, skill_name)
-        if agent_files in {"codex", "both"} and (include_missing or codex.exists() or codex.is_symlink()):
-            targets.append((codex, skill_name, skill_text))
+        if agent_files in {"codex", "both"} and (codex_skills_expected or codex.exists() or codex.is_symlink()):
+            targets.append((codex, skill_name, skill_text, "codex_directory"))
         claude = root / ".claude" / "skills" / skill_name / "SKILL.md"
         if agent_files in {"claude", "both"} and (include_missing or claude.exists() or claude.is_symlink()):
-            targets.append((claude, skill_name, skill_text))
+            targets.append((claude, skill_name, skill_text, "file"))
     return targets
 
 
@@ -657,7 +685,20 @@ def _agent_skill_status(
     skill_name: str,
     expected: str,
     include_missing: bool,
+    layout: str = "file",
 ) -> AgentArtifactStatus | None:
+    try:
+        _safe_repo_write_path(root, path)
+    except (ConfigError, OSError) as exc:
+        return AgentArtifactStatus(path, "agent_skill", "outdated", str(exc))
+    if layout == "codex_directory":
+        return _codex_skill_directory_status(
+            root,
+            path,
+            skill_name=skill_name,
+            expected=expected,
+            include_missing=include_missing,
+        )
     if not path.exists() and not path.is_symlink():
         return AgentArtifactStatus(path, "agent_skill", "missing", "file does not exist") if include_missing else None
     canonical = (root / ".apex-ray" / "skills" / skill_name / "SKILL.md").resolve(strict=False)
@@ -678,10 +719,109 @@ def _agent_skill_status(
                 return AgentArtifactStatus(path, "agent_skill", "current")
             return AgentArtifactStatus(path, "agent_skill", "outdated", "canonical skill is not current")
         return AgentArtifactStatus(path, "agent_skill", "outdated", "symlink does not point to canonical skill")
-    text = path.read_text(encoding="utf-8")
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        return AgentArtifactStatus(path, "agent_skill", "outdated", f"unable to read skill file: {exc}")
     if _normalize_artifact_text(text) == _normalize_artifact_text(expected):
         return AgentArtifactStatus(path, "agent_skill", "current")
     return AgentArtifactStatus(path, "agent_skill", "outdated", "skill file differs from current template")
+
+
+def _codex_skills_are_managed(root: Path) -> bool:
+    for skill_name in ("apex-ray", "apex-ray-improve"):
+        alias = _codex_skill_alias_path(root, skill_name)
+        if alias.exists() or alias.is_symlink():
+            return True
+    agents_path = root / "AGENTS.md"
+    if not agents_path.exists() and not agents_path.is_symlink():
+        return False
+    read_path = _safe_repo_symlink_target(root, agents_path) if agents_path.is_symlink() else agents_path
+    block = _extract_agent_block(read_path.read_text(encoding="utf-8"))
+    return block is not None and _detect_agent_skill_from_block(block)
+
+
+def _codex_skill_directory_status(
+    root: Path,
+    path: Path,
+    *,
+    skill_name: str,
+    expected: str,
+    include_missing: bool,
+) -> AgentArtifactStatus | None:
+    try:
+        _safe_repo_write_path(root, path)
+    except (ConfigError, OSError) as exc:
+        return AgentArtifactStatus(path, "agent_skill", "outdated", str(exc))
+    if not path.exists() and not path.is_symlink():
+        return (
+            AgentArtifactStatus(path, "agent_skill", "missing", "skill directory does not exist")
+            if include_missing or _codex_skills_are_managed(root)
+            else None
+        )
+    canonical_directory = root / ".apex-ray" / "skills" / skill_name
+    if path.is_symlink():
+        try:
+            target = _safe_repo_symlink_target(root, path)
+        except (ConfigError, OSError) as exc:
+            return AgentArtifactStatus(path, "agent_skill", "outdated", str(exc))
+        if target.resolve(strict=False) != canonical_directory.resolve(strict=False):
+            return AgentArtifactStatus(
+                path,
+                "agent_skill",
+                "outdated",
+                "skill directory symlink does not point to the canonical skill directory",
+            )
+        canonical_status = _agent_skill_status(
+            root,
+            canonical_directory / "SKILL.md",
+            skill_name=skill_name,
+            expected=expected,
+            include_missing=True,
+        )
+        if canonical_status is not None and canonical_status.status == "current":
+            return AgentArtifactStatus(path, "agent_skill", "current")
+        return AgentArtifactStatus(path, "agent_skill", "outdated", "canonical skill is not current")
+    if not path.is_dir():
+        return AgentArtifactStatus(path, "agent_skill", "outdated", "Codex skill alias is not a directory")
+    skill_path = path / "SKILL.md"
+    if skill_path.is_symlink():
+        try:
+            target = _safe_repo_symlink_target(root, skill_path)
+        except (ConfigError, OSError) as exc:
+            return AgentArtifactStatus(path, "agent_skill", "outdated", str(exc))
+        canonical_skill = canonical_directory / "SKILL.md"
+        if target.resolve(strict=False) == canonical_skill.resolve(strict=False):
+            return AgentArtifactStatus(
+                path,
+                "agent_skill",
+                "outdated",
+                "legacy file-level SKILL.md symlink must be migrated to a skill-directory alias",
+            )
+        return AgentArtifactStatus(
+            path,
+            "agent_skill",
+            "outdated",
+            "SKILL.md symlink does not point to the canonical skill",
+        )
+    if not skill_path.is_file():
+        return AgentArtifactStatus(path, "agent_skill", "outdated", "copied skill directory has no SKILL.md file")
+    canonical_status = _agent_skill_status(
+        root,
+        canonical_directory / "SKILL.md",
+        skill_name=skill_name,
+        expected=expected,
+        include_missing=True,
+    )
+    if (
+        canonical_status is not None
+        and canonical_status.status == "current"
+        and _skill_directories_match(canonical_directory, path)
+    ):
+        return AgentArtifactStatus(path, "agent_skill", "current")
+    if _is_managed_skill_copy(path, skill_name):
+        return AgentArtifactStatus(path, "agent_skill", "outdated", "copied skill directory is not current")
+    return AgentArtifactStatus(path, "agent_skill", "outdated", "conflicting unmanaged Codex skill directory")
 
 
 def _extract_agent_block(text: str) -> str | None:
@@ -931,10 +1071,11 @@ def _write_agent_skill(
     canonical = root / ".apex-ray" / "skills" / skill_name / "SKILL.md"
     if _write_if_missing_or_overwrite(canonical, skill_text, overwrite=overwrite):
         written.append(canonical)
-    if agent_files in {"codex", "both"} and _write_skill_alias(
+    if agent_files in {"codex", "both"} and _write_codex_skill_alias(
+        root,
         _codex_skill_alias_path(root, skill_name),
-        canonical,
-        skill_text,
+        canonical.parent,
+        skill_name,
         overwrite=overwrite,
     ):
         written.append(_codex_skill_alias_path(root, skill_name))
@@ -949,7 +1090,179 @@ def _write_agent_skill(
 
 
 def _codex_skill_alias_path(root: Path, skill_name: str) -> Path:
-    return root / CODEX_REPO_SKILL_DIR / "skills" / skill_name / "SKILL.md"
+    return root / CODEX_REPO_SKILL_DIR / "skills" / skill_name
+
+
+def _preflight_codex_skill_aliases(root: Path) -> None:
+    for skill_name in ("apex-ray", "apex-ray-improve"):
+        path = _codex_skill_alias_path(root, skill_name)
+        _safe_repo_write_path(root, path)
+        if not path.exists() and not path.is_symlink():
+            continue
+        canonical_directory = root / ".apex-ray" / "skills" / skill_name
+        if path.is_symlink():
+            target = _safe_repo_symlink_target(root, path)
+            if target.resolve(strict=False) != canonical_directory.resolve(strict=False):
+                raise ConfigError(
+                    f"Conflicting Codex skill directory at {path}: symlink does not point to {canonical_directory}."
+                )
+            continue
+        if not path.is_dir():
+            raise ConfigError(f"Conflicting Codex skill directory at {path}: expected a directory or symlink.")
+        skill_path = path / "SKILL.md"
+        if skill_path.is_symlink():
+            target = _safe_repo_symlink_target(root, skill_path)
+            canonical_skill = canonical_directory / "SKILL.md"
+            if target.resolve(strict=False) != canonical_skill.resolve(strict=False):
+                raise ConfigError(
+                    f"Conflicting Codex skill directory at {path}: SKILL.md symlink does not point to "
+                    f"{canonical_skill}."
+                )
+            continue
+        if not _is_managed_skill_copy(path, skill_name):
+            raise ConfigError(
+                f"Conflicting Codex skill directory at {path}. Move or rename it before refreshing Apex Ray "
+                "agent artifacts."
+            )
+
+
+def _preflight_canonical_skills(root: Path) -> None:
+    for skill_name in ("apex-ray", "apex-ray-improve"):
+        canonical_directory = root / ".apex-ray" / "skills" / skill_name
+        _safe_repo_write_path(root, canonical_directory)
+        _safe_repo_write_path(root, canonical_directory / "SKILL.md")
+        if canonical_directory.is_dir() and not canonical_directory.is_symlink():
+            for child in canonical_directory.rglob("*"):
+                if child.is_symlink():
+                    raise ConfigError(f"Canonical Apex Ray skill directory contains a symlink: {child}.")
+                _safe_repo_write_path(root, child)
+
+
+def _write_codex_skill_alias(
+    root: Path,
+    path: Path,
+    canonical_directory: Path,
+    skill_name: str,
+    *,
+    overwrite: bool,
+) -> bool:
+    _safe_repo_write_path(root, path)
+    if path.is_symlink():
+        target = _safe_repo_symlink_target(root, path)
+        if target.resolve(strict=False) != canonical_directory.resolve(strict=False):
+            raise ConfigError(
+                f"Conflicting Codex skill directory at {path}: symlink does not point to {canonical_directory}."
+            )
+        return False
+    if path.exists():
+        if not path.is_dir():
+            raise ConfigError(f"Conflicting Codex skill directory at {path}: expected a directory or symlink.")
+        legacy_skill_link = path / "SKILL.md"
+        if legacy_skill_link.is_symlink():
+            target = _safe_repo_symlink_target(root, legacy_skill_link)
+            if target.resolve(strict=False) != (canonical_directory / "SKILL.md").resolve(strict=False):
+                raise ConfigError(
+                    f"Conflicting Codex skill directory at {path}: SKILL.md symlink does not point to the "
+                    "canonical skill."
+                )
+            if not overwrite:
+                return False
+            extra_entries = [entry for entry in path.iterdir() if entry.name != "SKILL.md"]
+            legacy_skill_link.unlink()
+            if extra_entries:
+                _copy_skill_directory(root, canonical_directory, path)
+            else:
+                path.rmdir()
+                _create_codex_skill_alias(root, path, canonical_directory)
+            return True
+        if _skill_directories_match(canonical_directory, path):
+            return False
+        if not _is_managed_skill_copy(path, skill_name):
+            raise ConfigError(
+                f"Conflicting Codex skill directory at {path}. Move or rename it before refreshing Apex Ray "
+                "agent artifacts."
+            )
+        if not overwrite:
+            return False
+        _copy_skill_directory(root, canonical_directory, path)
+        return True
+    _create_codex_skill_alias(root, path, canonical_directory)
+    return True
+
+
+def _create_codex_skill_alias(root: Path, path: Path, canonical_directory: Path) -> None:
+    _safe_repo_write_path(root, path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        path.symlink_to(
+            _relative_symlink_target(path, canonical_directory),
+            target_is_directory=True,
+        )
+    except OSError:
+        if path.exists() or path.is_symlink():
+            raise
+        _copy_skill_directory(root, canonical_directory, path)
+
+
+def _copy_skill_directory(root: Path, source: Path, destination: Path) -> None:
+    _safe_repo_write_path(root, source)
+    _safe_repo_write_path(root, destination)
+    for source_path in source.rglob("*"):
+        if source_path.is_symlink():
+            raise ConfigError(f"Canonical Apex Ray skill directory contains a symlink: {source_path}.")
+        _safe_repo_write_path(root, source_path)
+    if destination.exists():
+        for source_path in source.rglob("*"):
+            relative = source_path.relative_to(source)
+            destination_path = destination / relative
+            if destination_path.is_symlink():
+                raise ConfigError(f"Conflicting Codex skill directory at {destination}: {relative} is a symlink.")
+            if source_path.is_dir() and destination_path.exists() and not destination_path.is_dir():
+                raise ConfigError(f"Conflicting Codex skill directory at {destination}: {relative} is not a directory.")
+            if source_path.is_file() and destination_path.exists() and not destination_path.is_file():
+                raise ConfigError(f"Conflicting Codex skill directory at {destination}: {relative} is not a file.")
+    shutil.copytree(source, destination, dirs_exist_ok=True)
+
+
+def _skill_directories_match(canonical: Path, copy: Path) -> bool:
+    if not canonical.is_dir() or not copy.is_dir():
+        return False
+    for canonical_path in canonical.rglob("*"):
+        if canonical_path.is_symlink():
+            return False
+        relative = canonical_path.relative_to(canonical)
+        copy_path = copy / relative
+        if canonical_path.is_dir():
+            if not copy_path.is_dir() or copy_path.is_symlink():
+                return False
+            continue
+        if not canonical_path.is_file() or not copy_path.is_file() or copy_path.is_symlink():
+            return False
+        if canonical_path.read_bytes() != copy_path.read_bytes():
+            return False
+    return True
+
+
+def _is_managed_skill_copy(path: Path, skill_name: str) -> bool:
+    skill_path = path / "SKILL.md"
+    if not skill_path.is_file() or skill_path.is_symlink():
+        return False
+    try:
+        text = skill_path.read_text(encoding="utf-8")
+    except OSError, UnicodeError:
+        return False
+    if not text.startswith("---\n"):
+        return False
+    try:
+        frontmatter_text, _body = text[4:].split("\n---\n", 1)
+        frontmatter = yaml.safe_load(frontmatter_text)
+    except ValueError, yaml.YAMLError:
+        return False
+    return (
+        isinstance(frontmatter, dict)
+        and frontmatter.get("name") == skill_name
+        and isinstance(frontmatter.get("apex_ray_template_version"), int)
+    )
 
 
 def _write_skill_alias(path: Path, target: Path, fallback_text: str, *, overwrite: bool) -> bool:
