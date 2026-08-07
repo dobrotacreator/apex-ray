@@ -498,6 +498,11 @@ Default behavior:
 - block on `critical` partial coverage;
 - print live progress to stderr and a compact, agent-readable summary to stdout.
 
+The base-ref precedence is explicit `--base`, then `APEX_RAY_BASE`, then
+`TURBO_SCM_BASE`, then `review.base`. The environment fallbacks let generated
+hooks share the same temporary base override as stacked-branch and monorepo
+tooling without replacing Apex Ray's version-pinned command.
+
 Use the canonical automatic follow-up keys for new configurations:
 
 ```yaml

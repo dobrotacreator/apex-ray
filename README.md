@@ -117,7 +117,10 @@ Run the same gate that `apex-ray init` wires into pre-push:
 apex-ray gate pre-push
 ```
 
-The gate reviews `review.base...HEAD`, writes `.apex-ray/reports/pre-push.md` and `.apex-ray/reports/pre-push.json`, prints an agent-friendly blocking summary, and exits non-zero when the configured policy fails.
+The gate reviews `review.base...HEAD`, with optional `APEX_RAY_BASE` or
+`TURBO_SCM_BASE` hook overrides, writes `.apex-ray/reports/pre-push.md` and
+`.apex-ray/reports/pre-push.json`, prints an agent-friendly blocking summary,
+and exits non-zero when the configured policy fails.
 
 See the full [Quick Start](https://dobrotacreator.github.io/apex-ray/quickstart/) and [Review Workflow](https://dobrotacreator.github.io/apex-ray/review-workflow/) docs for installation requirements, provider setup, report interpretation, continuation commands, cache behavior, and troubleshooting.
 
