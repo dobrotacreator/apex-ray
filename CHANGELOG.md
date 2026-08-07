@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.16](https://github.com/dobrotacreator/apex-ray/compare/v0.1.15...v0.1.16) (2026-08-07)
+
+
+### Bug Fixes
+
+* **agents:** repair Git symlink placeholders ([#102](https://github.com/dobrotacreator/apex-ray/issues/102)) ([ecf376e](https://github.com/dobrotacreator/apex-ray/commit/ecf376e7d864575dd21393fb27d04d16fcb8fa87))
+* **gate:** support stacked pre-push bases ([#100](https://github.com/dobrotacreator/apex-ray/issues/100)) ([38050e1](https://github.com/dobrotacreator/apex-ray/commit/38050e1078fd811df742a04fa2eaf64f7e5d1270))
+
 ## [0.1.15](https://github.com/dobrotacreator/apex-ray/compare/v0.1.14...v0.1.15) (2026-08-07)
 
 
