@@ -102,7 +102,7 @@ apex-ray init --refresh-agent-artifacts --dry-run
 apex-ray init --refresh-agent-artifacts
 ```
 
-The refresh preserves user-authored text outside the `<!-- APEX_RAY_START -->` / `<!-- APEX_RAY_END -->` block and refreshes generated skills. For Codex, it also migrates legacy file-level `SKILL.md` symlinks to discoverable skill-directory symlinks, with a full directory-copy fallback on systems where symlinks are unavailable. Conflicting unmanaged skill directories are reported instead of overwritten. Refresh does not run automatically during review or pre-push, so Apex Ray never changes the working tree while evaluating a diff.
+The refresh preserves user-authored text outside the `<!-- APEX_RAY_START -->` / `<!-- APEX_RAY_END -->` block and refreshes generated skills. For Codex, it also migrates legacy file-level `SKILL.md` symlinks to discoverable skill-directory symlinks, with a full directory-copy fallback on systems where symlinks are unavailable. If Git checks out a tracked directory symlink as its regular-file placeholder (`core.symlinks=false`), refresh repairs only an exact managed target whose index mode is still `120000`; unrelated regular files remain conflicts and are never overwritten. Refresh does not run automatically during review or pre-push, so Apex Ray never changes the working tree while evaluating a diff.
 
 To migrate all managed launchers, or to upgrade a repository to the package version being run, use the explicit managed refresh:
 

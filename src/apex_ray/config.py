@@ -3,7 +3,7 @@ import shlex
 import shutil
 import warnings
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePath
 from typing import Any
 
 import yaml
@@ -1010,6 +1010,13 @@ def _codex_skill_directory_status(
         if canonical_status is not None and canonical_status.status == "current":
             return AgentArtifactStatus(path, "agent_skill", "current")
         return AgentArtifactStatus(path, "agent_skill", "outdated", "canonical skill is not current")
+    if _is_git_materialized_codex_skill_symlink(root, path, canonical_directory):
+        return AgentArtifactStatus(
+            path,
+            "agent_skill",
+            "outdated",
+            "Git materialized the Codex skill directory symlink as a regular file",
+        )
     if not path.is_dir():
         return AgentArtifactStatus(path, "agent_skill", "outdated", "Codex skill alias is not a directory")
     skill_path = path / "SKILL.md"
@@ -1764,6 +1771,8 @@ def _preflight_codex_skill_aliases(root: Path) -> None:
                     f"Conflicting Codex skill directory at {path}: symlink does not point to {canonical_directory}."
                 )
             continue
+        if _is_git_materialized_codex_skill_symlink(root, path, canonical_directory):
+            continue
         if not path.is_dir():
             raise ConfigError(f"Conflicting Codex skill directory at {path}: expected a directory or symlink.")
         skill_path = path / "SKILL.md"
@@ -1811,6 +1820,12 @@ def _write_codex_skill_alias(
                 f"Conflicting Codex skill directory at {path}: symlink does not point to {canonical_directory}."
             )
         return False
+    if _is_git_materialized_codex_skill_symlink(root, path, canonical_directory):
+        if not overwrite:
+            return False
+        path.unlink()
+        _create_codex_skill_alias(root, path, canonical_directory)
+        return True
     if path.exists():
         if not path.is_dir():
             raise ConfigError(f"Conflicting Codex skill directory at {path}: expected a directory or symlink.")
@@ -1859,6 +1874,39 @@ def _create_codex_skill_alias(root: Path, path: Path, canonical_directory: Path)
         if path.exists() or path.is_symlink():
             raise
         _copy_skill_directory(root, canonical_directory, path)
+
+
+def _is_git_materialized_codex_skill_symlink(root: Path, path: Path, canonical_directory: Path) -> bool:
+    if path.is_symlink() or not path.is_file():
+        return False
+    expected_target = _relative_symlink_target(path, canonical_directory)
+    expected_targets = {expected_target.encode(), expected_target.replace("/", "\\").encode()}
+    max_target_bytes = max(len(target) for target in expected_targets)
+    try:
+        with path.open("rb") as placeholder:
+            materialized_target = placeholder.read(max_target_bytes + 1)
+    except OSError:
+        return False
+    if materialized_target not in expected_targets:
+        return False
+    if not git.is_git_repo(root):
+        return False
+    relative_path = path.relative_to(root).as_posix()
+    pathspec = f":(top,literal){relative_path}"
+    index_entry = git.run_git(["ls-files", "--stage", "--", pathspec], cwd=root, check=False)
+    if index_entry.returncode != 0:
+        return False
+    matching_entries: list[list[str]] = []
+    for line in index_entry.stdout.splitlines():
+        metadata, separator, tracked_path = line.partition("\t")
+        if separator and tracked_path == relative_path:
+            matching_entries.append(metadata.split())
+    return (
+        len(matching_entries) == 1
+        and len(matching_entries[0]) == 3
+        and matching_entries[0][0] == "120000"
+        and matching_entries[0][2] == "0"
+    )
 
 
 def _copy_skill_directory(root: Path, source: Path, destination: Path) -> None:
@@ -1935,5 +1983,5 @@ def _write_skill_alias(path: Path, target: Path, fallback_text: str, *, overwrit
     return True
 
 
-def _relative_symlink_target(link_path: Path, target: Path) -> str:
-    return str(target.relative_to(link_path.parent, walk_up=True))
+def _relative_symlink_target(link_path: PurePath, target: PurePath) -> str:
+    return target.relative_to(link_path.parent, walk_up=True).as_posix()
