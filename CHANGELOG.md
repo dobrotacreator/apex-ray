@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.17](https://github.com/dobrotacreator/apex-ray/compare/v0.1.16...v0.1.17) (2026-08-07)
+
+
+### Bug Fixes
+
+* **agents:** preserve skills through shared alias roots ([9af3499](https://github.com/dobrotacreator/apex-ray/commit/9af34990cdd64bdbce79334b4e4542b4230387fc))
+
 ## [0.1.16](https://github.com/dobrotacreator/apex-ray/compare/v0.1.15...v0.1.16) (2026-08-07)
 
 
