@@ -35,6 +35,7 @@ classifiers = [
     "Topic :: Software Development :: Testing",
 ]
 dependencies = [
+    "packaging>=25",
     "pydantic>=2.12",
     "pyyaml>=6.0",
     "typer>=0.26.2",

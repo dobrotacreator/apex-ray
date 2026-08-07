@@ -89,7 +89,11 @@ its ignored paths or paths outside the repository.
 
 ## Agent Artifact Refresh
 
-`apex-ray init` writes managed agent guidance to `AGENTS.md`, Claude instruction files, and generated Apex Ray skills. These artifacts are version-marked. When a newer Apex Ray package has updated templates, `apex-ray doctor`, `apex-ray review`, and `apex-ray gate pre-push` emit a non-blocking local warning if existing managed artifacts are outdated.
+`apex-ray init` writes `.apex-ray/version` as the repository's single Apex Ray version lock. Generated hooks and agent instructions embed that exact version with `uvx --python 3.14 apex-ray@<version> ...`; they never evaluate the lock as shell code. A matching lock is enforced before operational commands start. Legacy repositories without a lock continue to run for backward compatibility until they are migrated, while malformed and mismatched locks fail with an exact `uvx` remediation command.
+
+`uvx` downloads a cold exact tool version from the package index, then reuses uv's tool cache on later runs. Install `uv` on developer and CI machines and pre-warm the pinned command where cold-start latency or offline pushes matter.
+
+Managed agent guidance in `AGENTS.md`, Claude instruction files, and generated Apex Ray skills is also template-versioned. When a newer Apex Ray package has updated templates, `apex-ray doctor`, `apex-ray review`, and `apex-ray gate pre-push` emit a non-blocking local warning if existing managed agent artifacts are outdated.
 
 Refresh only the managed agent artifacts without touching config or hooks:
 
@@ -99,6 +103,24 @@ apex-ray init --refresh-agent-artifacts
 ```
 
 The refresh preserves user-authored text outside the `<!-- APEX_RAY_START -->` / `<!-- APEX_RAY_END -->` block and refreshes generated skills. For Codex, it also migrates legacy file-level `SKILL.md` symlinks to discoverable skill-directory symlinks, with a full directory-copy fallback on systems where symlinks are unavailable. Conflicting unmanaged skill directories are reported instead of overwritten. Refresh does not run automatically during review or pre-push, so Apex Ray never changes the working tree while evaluating a diff.
+
+To migrate all managed launchers, or to upgrade a repository to the package version being run, use the explicit managed refresh:
+
+```bash
+# Adopt a lock without changing its existing version.
+APEX_RAY_TARGET_VERSION=0.1.13
+uvx --python 3.14 apex-ray@"${APEX_RAY_TARGET_VERSION}" init --refresh-managed-artifacts --dry-run
+uvx --python 3.14 apex-ray@"${APEX_RAY_TARGET_VERSION}" init --refresh-managed-artifacts
+
+# Upgrade the one lock and every recognized derived artifact together.
+APEX_RAY_TARGET_VERSION=0.1.14
+uvx --python 3.14 apex-ray@"${APEX_RAY_TARGET_VERSION}" init \
+  --refresh-managed-artifacts --update-version-lock
+```
+
+The upgrade preflights the lock, hook, agent blocks, and skills before writing; it updates the lock last. It preserves the repository's existing Apex Ray Git or Lefthook mode when `--hooks` is omitted, and exact legacy generated hooks are migrated automatically. Custom, ambiguous, or duplicate Apex Ray hooks fail closed with manual-remediation guidance instead of being overwritten or causing two reviews. `doctor` checks lock/runtime agreement, exact managed hooks, `uvx` availability, and agent artifact freshness.
+
+Apex Ray versions released before version-lock support cannot enforce a future lock themselves. The generated exact `uvx` hook is therefore the execution guarantee after migration. Publish the target Apex Ray version before merging downstream lock/hook updates that reference it.
 
 ## Local Override Example
 

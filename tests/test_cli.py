@@ -3,6 +3,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import stat
 import subprocess
 from datetime import timedelta
@@ -111,6 +112,39 @@ def test_version_option() -> None:
     assert result.stdout.strip() == __version__
 
 
+def test_version_option_remains_available_when_project_lock_mismatches(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    lock = tmp_path / ".apex-ray" / "version"
+    lock.parent.mkdir(parents=True)
+    lock.write_text("999.0.0\n", encoding="utf-8")
+
+    result = runner.invoke(app, ["--version"], catch_exceptions=False)
+
+    assert result.exit_code == 0
+    assert result.stdout.strip() == __version__
+
+
+def test_operational_command_rejects_mismatched_project_version_before_work(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    lock = tmp_path / ".apex-ray" / "version"
+    lock.parent.mkdir(parents=True)
+    lock.write_text("999.0.0\n", encoding="utf-8")
+    telemetry = tmp_path / "telemetry.jsonl"
+    telemetry.write_text("", encoding="utf-8")
+
+    result = runner.invoke(
+        app,
+        ["telemetry-summary", "--telemetry-path", str(telemetry)],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 2
+    plain_output = _plain_cli_output(result.output)
+    assert "requires Apex Ray 999.0.0" in plain_output
+    assert f"running version is {__version__}" in plain_output
+    assert "uvx --python 3.14 apex-ray@999.0.0" in plain_output
+
+
 def test_init_creates_config(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
 
@@ -118,6 +152,7 @@ def test_init_creates_config(tmp_path: Path, monkeypatch) -> None:
 
     assert result.exit_code == 0
     assert (tmp_path / ".apex-ray" / "config.yml").exists()
+    assert (tmp_path / ".apex-ray" / "version").read_text(encoding="utf-8") == f"{__version__}\n"
     assert (tmp_path / ".apex-ray" / ".gitignore").exists()
     assert (tmp_path / "lefthook.yml").exists()
     assert (tmp_path / "AGENTS.md").exists()
@@ -130,7 +165,9 @@ def test_init_creates_config(tmp_path: Path, monkeypatch) -> None:
     assert (tmp_path / ".claude" / "skills" / "apex-ray" / "SKILL.md").exists()
     assert (tmp_path / ".claude" / "skills" / "apex-ray-improve" / "SKILL.md").exists()
     assert "apex-ray-review" in (tmp_path / "lefthook.yml").read_text(encoding="utf-8")
-    assert "apex-ray gate pre-push" in (tmp_path / "lefthook.yml").read_text(encoding="utf-8")
+    assert f"uvx --python 3.14 apex-ray@{__version__} gate pre-push" in (tmp_path / "lefthook.yml").read_text(
+        encoding="utf-8"
+    )
     assert "--no-llm" not in (tmp_path / "lefthook.yml").read_text(encoding="utf-8")
     config_text = (tmp_path / ".apex-ray" / "config.yml").read_text(encoding="utf-8")
     assert "max_packs: 48" in config_text
@@ -140,6 +177,31 @@ def test_init_creates_config(tmp_path: Path, monkeypatch) -> None:
     assert "auto_followup_max_pack_reviews: 16" in config_text
     assert "progress: auto" in config_text
     assert "Next: inspect and commit Apex Ray setup files" in result.stdout
+
+
+def test_init_rejects_a_mismatched_existing_lock_without_mutating_artifacts(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    apex_dir = tmp_path / ".apex-ray"
+    apex_dir.mkdir()
+    lock = apex_dir / "version"
+    lock.write_text("999.0.0\n", encoding="utf-8")
+    hook = tmp_path / "lefthook.yml"
+    hook.write_text(
+        "pre-push:\n  commands:\n    apex-ray-review:\n      run: apex-ray gate pre-push\n",
+        encoding="utf-8",
+    )
+    before = hook.read_bytes()
+
+    result = runner.invoke(app, ["init"], catch_exceptions=False)
+
+    assert result.exit_code == 2
+    assert "requires Apex Ray 999.0.0" in _plain_cli_output(result.output)
+    assert lock.read_text(encoding="utf-8") == "999.0.0\n"
+    assert hook.read_bytes() == before
+    assert not (apex_dir / "config.yml").exists()
 
 
 def test_init_can_skip_hooks_and_agent_files(tmp_path: Path, monkeypatch) -> None:
@@ -187,6 +249,43 @@ def test_init_refresh_agent_artifacts_dry_run_then_write(tmp_path: Path, monkeyp
     assert "apex-ray-agent-artifacts: version=" in agents_path.read_text(encoding="utf-8")
 
 
+def test_init_update_version_lock_requires_managed_refresh(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["init", "--update-version-lock"], catch_exceptions=False)
+
+    assert result.exit_code == 2
+    assert "only with --refresh-managed-artifacts" in _plain_cli_output(result.output)
+    assert not (tmp_path / ".apex-ray").exists()
+
+
+def test_init_refresh_managed_artifacts_explicitly_updates_a_mismatched_lock(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    initialized = runner.invoke(app, ["init"], catch_exceptions=False)
+    lock = tmp_path / ".apex-ray" / "version"
+    lock.write_text("999.0.0\n", encoding="utf-8")
+
+    agent_refresh = runner.invoke(app, ["init", "--refresh-agent-artifacts"], catch_exceptions=False)
+    rejected = runner.invoke(app, ["init", "--refresh-managed-artifacts"], catch_exceptions=False)
+    updated = runner.invoke(
+        app,
+        ["init", "--refresh-managed-artifacts", "--update-version-lock"],
+        catch_exceptions=False,
+    )
+
+    assert initialized.exit_code == 0
+    assert agent_refresh.exit_code == 2
+    assert "requires Apex Ray 999.0.0" in _plain_cli_output(agent_refresh.output)
+    assert rejected.exit_code == 2
+    assert "requires Apex Ray 999.0.0" in _plain_cli_output(rejected.output)
+    assert updated.exit_code == 0
+    assert "managed artifacts refreshed" in updated.stdout
+    assert lock.read_text(encoding="utf-8") == f"{__version__}\n"
+
+
 def test_doctor_reports_local_config(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
     (tmp_path / ".apex-ray").mkdir()
@@ -203,6 +302,90 @@ def test_doctor_reports_local_config(tmp_path: Path, monkeypatch) -> None:
     assert "- Go available:" in result.stdout
     assert "- Go analyzer:" in result.stdout
     assert "- Go analyzer available:" in result.stdout
+
+
+def test_doctor_reports_mismatched_version_lock_and_exits_nonzero(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    apex_dir = tmp_path / ".apex-ray"
+    apex_dir.mkdir()
+    (apex_dir / "config.yml").write_text("review:\n", encoding="utf-8")
+    (apex_dir / "version").write_text("999.0.0\n", encoding="utf-8")
+
+    result = runner.invoke(app, ["doctor"], catch_exceptions=False)
+
+    assert result.exit_code == 1
+    assert "- Version lock: mismatch" in result.stdout
+    assert "- Required version: 999.0.0" in result.stdout
+    assert f"- Running version: {__version__}" in result.stdout
+    assert "- Agent artifacts: not checked (rerun doctor with the repository-pinned version)" in result.stdout
+
+
+def test_doctor_reports_version_lock_before_an_invalid_config(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    apex_dir = tmp_path / ".apex-ray"
+    apex_dir.mkdir()
+    (apex_dir / "version").write_text(f"{__version__}\n", encoding="utf-8")
+    (apex_dir / "config.yml").write_text("review:\n  unknown: true\n", encoding="utf-8")
+
+    result = runner.invoke(app, ["doctor"], catch_exceptions=False)
+
+    assert result.exit_code == 2
+    assert "- Version lock: current" in result.stdout
+    assert f"- Required version: {__version__}" in result.stdout
+    assert "- Config: invalid" in result.stdout
+
+
+def test_doctor_rejects_a_managed_hook_that_disagrees_with_the_lock(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    assert runner.invoke(app, ["init"], catch_exceptions=False).exit_code == 0
+    hook = tmp_path / "lefthook.yml"
+    hook.write_text(
+        hook.read_text(encoding="utf-8").replace(
+            f"apex-ray@{__version__}",
+            "apex-ray@999.0.0",
+        ),
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(app, ["doctor"], catch_exceptions=False)
+
+    assert result.exit_code == 1
+    assert "- Managed hooks: inconsistent (1)" in result.stdout
+    assert f"uvx --python 3.14 apex-ray@{__version__} init --refresh-managed-artifacts" in result.stdout
+
+
+def test_doctor_rejects_a_managed_hook_when_uvx_is_unavailable(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    assert runner.invoke(app, ["init"], catch_exceptions=False).exit_code == 0
+    real_which = shutil.which
+    monkeypatch.setattr(
+        "apex_ray.cli.main.shutil.which",
+        lambda command: None if command == "uvx" else real_which(command),
+    )
+
+    result = runner.invoke(app, ["doctor"], catch_exceptions=False)
+
+    assert result.exit_code == 1
+    assert "- uvx available: false" in result.stdout
+    assert "- Managed hooks: current" in result.stdout
+
+
+def test_doctor_rejects_multiple_apex_hook_modes(tmp_path: Path, monkeypatch) -> None:
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    monkeypatch.chdir(tmp_path)
+    assert runner.invoke(app, ["init", "--hooks", "git"], catch_exceptions=False).exit_code == 0
+    (tmp_path / "lefthook.yml").write_text(
+        "pre-push:\n"
+        "  commands:\n"
+        "    apex-ray-review:\n"
+        f'      run: "uvx --python 3.14 apex-ray@{__version__} gate pre-push"\n',
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(app, ["doctor"], catch_exceptions=False)
+
+    assert result.exit_code == 1
+    assert "- Managed hooks: inconsistent (multiple Apex Ray hook modes)" in result.stdout
 
 
 def test_doctor_reports_discovery_error_without_traceback(tmp_path: Path, monkeypatch) -> None:
@@ -281,7 +464,7 @@ def test_doctor_reports_outdated_agent_artifacts(tmp_path: Path, monkeypatch) ->
 
     assert result.exit_code == 0
     assert "- Agent artifacts: outdated" in result.stdout
-    assert "Run: apex-ray init --refresh-agent-artifacts" in result.stdout
+    assert f"Run: uvx --python 3.14 apex-ray@{__version__} init --refresh-agent-artifacts" in result.stdout
 
 
 def test_doctor_reports_missing_managed_codex_skill_directory(tmp_path: Path, monkeypatch) -> None:
@@ -301,7 +484,7 @@ def test_doctor_reports_missing_managed_codex_skill_directory(tmp_path: Path, mo
     assert "- Agent artifacts: outdated" in result.stdout
     assert str(alias) in result.stdout
     assert "skill directory does not exist" in result.stdout
-    assert "Run: apex-ray init --refresh-agent-artifacts" in result.stdout
+    assert f"Run: uvx --python 3.14 apex-ray@{__version__} init --refresh-agent-artifacts" in result.stdout
 
 
 def test_telemetry_summary_uses_configured_local_data_path(tmp_path: Path, monkeypatch) -> None:
@@ -484,7 +667,7 @@ def test_review_warns_for_outdated_agent_artifacts(tmp_path: Path, monkeypatch) 
     assert result.exit_code == 0
     assert "Wrote" in result.stdout
     assert "Warning: Apex Ray agent artifacts are outdated" in result.stderr
-    assert "apex-ray init --refresh-agent-artifacts" in result.stderr
+    assert f"uvx --python 3.14 apex-ray@{__version__} init --refresh-agent-artifacts" in result.stderr
 
 
 def test_review_patch_defaults_to_apex_reports_dir(tmp_path: Path, monkeypatch) -> None:
@@ -1107,7 +1290,7 @@ def test_gate_pre_push_warns_for_outdated_agent_artifacts(tmp_path: Path, monkey
     assert result.exit_code == 0
     assert "APEX RAY GATE: PASSED" in result.stdout
     assert "Warning: Apex Ray agent artifacts are outdated" in result.stderr
-    assert "apex-ray init --refresh-agent-artifacts" in result.stderr
+    assert f"uvx --python 3.14 apex-ray@{__version__} init --refresh-agent-artifacts" in result.stderr
 
 
 def test_gate_pre_push_does_not_block_unverified_finding_by_default(tmp_path: Path, monkeypatch) -> None:
@@ -4629,6 +4812,85 @@ def test_review_continue_from_resolves_explicit_config_against_report_root(
         "root": project_root,
         "rules": ["continuation-root"],
     }
+
+
+def test_review_continue_from_enforces_version_lock_from_report_root(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    caller_root = tmp_path / "caller"
+    project_root = tmp_path / "project"
+    caller_root.mkdir()
+    lock = project_root / ".apex-ray" / "version"
+    lock.parent.mkdir(parents=True)
+    lock.write_text("999.0.0\n", encoding="utf-8")
+    prior = build_report(
+        ProjectProfile(root=str(project_root), is_git_repo=True),
+        ReviewConfig(),
+        DiffSummary(target_mode=TargetMode.PATCH, stats=DiffStats(files_changed=1)),
+    )
+    report_path = tmp_path / "review.json"
+    report_path.write_text(prior.model_dump_json(indent=2), encoding="utf-8")
+    monkeypatch.setattr("apex_ray.cli.main.discover_repo_root", lambda _cwd: caller_root)
+    monkeypatch.setattr(
+        "apex_ray.cli.main.continue_review_from_report",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("continuation must not start")),
+    )
+
+    result = runner.invoke(
+        app,
+        ["review", "--continue-from", str(report_path)],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 2
+    plain_output = _plain_cli_output(result.output)
+    assert "requires Apex Ray 999.0.0" in plain_output
+    assert str(project_root / ".apex-ray" / "version") not in plain_output
+
+
+def test_review_continue_from_ignores_the_caller_repository_version_lock(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    caller_root = tmp_path / "caller"
+    project_root = tmp_path / "project"
+    caller_lock = caller_root / ".apex-ray" / "version"
+    project_lock = project_root / ".apex-ray" / "version"
+    caller_lock.parent.mkdir(parents=True)
+    project_lock.parent.mkdir(parents=True)
+    caller_lock.write_text("999.0.0\n", encoding="utf-8")
+    project_lock.write_text(f"{__version__}\n", encoding="utf-8")
+    prior = build_report(
+        ProjectProfile(root=str(project_root), is_git_repo=True),
+        ReviewConfig(),
+        DiffSummary(target_mode=TargetMode.PATCH, stats=DiffStats(files_changed=1)),
+    )
+    report_path = tmp_path / "review.json"
+    report_path.write_text(prior.model_dump_json(indent=2), encoding="utf-8")
+    monkeypatch.setattr("apex_ray.cli.main.git.repo_root", lambda _cwd: caller_root)
+    monkeypatch.setattr("apex_ray.cli.main.discover_repo_root", lambda _cwd: caller_root)
+    monkeypatch.setattr(
+        "apex_ray.cli.main.continue_review_from_report",
+        lambda *_args, **_kwargs: (prior, [object()]),
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "review",
+            "--continue-from",
+            str(report_path),
+            "--output",
+            str(project_root / "continued.md"),
+            "--json",
+            str(project_root / "continued.json"),
+        ],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert "requires Apex Ray 999.0.0" not in _plain_cli_output(result.output)
 
 
 def test_review_auto_followup_preserves_explicit_reviewer_scope(tmp_path: Path, monkeypatch) -> None:
