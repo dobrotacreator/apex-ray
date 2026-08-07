@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.1.13](https://github.com/dobrotacreator/apex-ray/compare/v0.1.12...v0.1.13) (2026-08-07)
+
+
+### Features
+
+* **review:** make coverage completion explicit and resumable ([#90](https://github.com/dobrotacreator/apex-ray/issues/90)) ([0e33a95](https://github.com/dobrotacreator/apex-ray/commit/0e33a9589c1d8769755d0e07fda90a7174ca9bfe))
+
+
+### Bug Fixes
+
+* **analyzer:** compact warnings and expose coverage metrics ([#92](https://github.com/dobrotacreator/apex-ray/issues/92)) ([ea4da66](https://github.com/dobrotacreator/apex-ray/commit/ea4da66b6d69fa1bae325fb76c7af3c507db5f08))
+* **gate:** harden pre-push portability ([#94](https://github.com/dobrotacreator/apex-ray/issues/94)) ([72bf3db](https://github.com/dobrotacreator/apex-ray/commit/72bf3db3f6b59e419543beeb3c9ef39b14a48cdc))
+* **init:** generate discoverable Codex skill directories ([#93](https://github.com/dobrotacreator/apex-ray/issues/93)) ([559dc72](https://github.com/dobrotacreator/apex-ray/commit/559dc72c09a83a80c356d57022b77a27707a73aa))
+* **init:** pin managed Apex Ray runtime artifacts ([#95](https://github.com/dobrotacreator/apex-ray/issues/95)) ([45000c8](https://github.com/dobrotacreator/apex-ray/commit/45000c8169934840fb2f464b2f01b165c65f3f6c))
+* **llm:** keep provider workers saturated ([#91](https://github.com/dobrotacreator/apex-ray/issues/91)) ([7f7e516](https://github.com/dobrotacreator/apex-ray/commit/7f7e516f9e3f8563807a66ea520360904a33bcf6))
+
+
+### Tests
+
+* **dart:** derive expected language server version ([#83](https://github.com/dobrotacreator/apex-ray/issues/83)) ([da073d9](https://github.com/dobrotacreator/apex-ray/commit/da073d9c6238f772977abf733cb67a81b7f116db))
+
 ## [0.1.12](https://github.com/dobrotacreator/apex-ray/compare/v0.1.11...v0.1.12) (2026-08-02)
 
 

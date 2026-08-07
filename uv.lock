@@ -22,7 +22,7 @@ wheels = [
 
 [[package]]
 name = "apex-ray"
-version = "0.1.12"
+version = "0.1.13"
 source = { editable = "." }
 dependencies = [
     { name = "packaging" },
