@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.14](https://github.com/dobrotacreator/apex-ray/compare/v0.1.13...v0.1.14) (2026-08-07)
+
+
+### Bug Fixes
+
+* **init:** distinguish Lefthook wrappers from Apex hooks ([#96](https://github.com/dobrotacreator/apex-ray/issues/96)) ([07243c3](https://github.com/dobrotacreator/apex-ray/commit/07243c342a24cf16b1f3fc79d0e0f70b6a22a808))
+
 ## [0.1.13](https://github.com/dobrotacreator/apex-ray/compare/v0.1.12...v0.1.13) (2026-08-07)
 
 
