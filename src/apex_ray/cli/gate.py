@@ -315,7 +315,14 @@ def _coverage_followup_blocking_pack_ids(
 
 @gate_app.command("pre-push")
 def pre_push(
-    base: Annotated[str | None, typer.Option("--base", help="Base ref for git diff <base>...HEAD.")] = None,
+    base: Annotated[
+        str | None,
+        typer.Option(
+            "--base",
+            envvar=["APEX_RAY_BASE", "TURBO_SCM_BASE"],
+            help="Base ref for git diff <base>...HEAD; CLI, hook environment, then review.base.",
+        ),
+    ] = None,
     output: Annotated[Path, typer.Option("--output", help="Markdown report path.")] = Path(
         ".apex-ray/reports/pre-push.md"
     ),

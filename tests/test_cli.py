@@ -1500,6 +1500,64 @@ def test_gate_pre_push_fetch_base_is_explicit_and_precedes_diff(
     assert events == expected_events
 
 
+@pytest.mark.parametrize(
+    ("environment", "arguments", "expected_base"),
+    [
+        ({"APEX_RAY_BASE": "origin/apex", "TURBO_SCM_BASE": "origin/turbo"}, [], "origin/apex"),
+        ({"TURBO_SCM_BASE": "origin/turbo"}, [], "origin/turbo"),
+        ({"APEX_RAY_BASE": "", "TURBO_SCM_BASE": "origin/turbo"}, [], "origin/turbo"),
+        (
+            {"APEX_RAY_BASE": "origin/apex", "TURBO_SCM_BASE": "origin/turbo"},
+            ["--base", "origin/explicit"],
+            "origin/explicit",
+        ),
+    ],
+)
+def test_gate_pre_push_base_precedence_supports_hook_environment_overrides(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    environment: dict[str, str],
+    arguments: list[str],
+    expected_base: str,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    config_path = tmp_path / ".apex-ray" / "config.yml"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(
+        "review:\n  base: origin/config\n  gates:\n    pre_push:\n      fetch_base: true\n",
+        encoding="utf-8",
+    )
+    fetched_bases: list[str] = []
+    reviewed_bases: list[str] = []
+
+    def fake_run_review_pipeline(root, diff_text, target_mode, config, **kwargs):
+        reviewed_bases.append(kwargs["base"])
+        return build_report(
+            ProjectProfile(root=str(root), is_git_repo=True),
+            config,
+            parse_unified_diff(diff_text, target_mode=target_mode, base=kwargs["base"]),
+        )
+
+    monkeypatch.setattr("apex_ray.cli.gate.git.repo_root", lambda _cwd, **_kwargs: tmp_path)
+    monkeypatch.setattr("apex_ray.cli.gate.git.is_git_repo", lambda _root: True)
+    monkeypatch.setattr(
+        "apex_ray.cli.gate.git.fetch_remote_tracking_ref",
+        lambda _root, base: fetched_bases.append(base),
+    )
+    monkeypatch.setattr(
+        "apex_ray.cli.gate.git.diff_base",
+        lambda _root, base: _diff_for("src/orders.ts", f"old-{base}", f"new-{base}"),
+    )
+    monkeypatch.setattr("apex_ray.cli.gate.run_review_pipeline", fake_run_review_pipeline)
+    monkeypatch.setattr("apex_ray.cli.gate.continue_review_from_report", lambda report, **_kwargs: (report, []))
+
+    result = runner.invoke(app, ["gate", "pre-push", *arguments], env=environment, catch_exceptions=False)
+
+    assert result.exit_code == 0
+    assert fetched_bases == [expected_base]
+    assert reviewed_bases == [expected_base]
+
+
 def test_gate_pre_push_fetch_base_failure_is_blocking(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
