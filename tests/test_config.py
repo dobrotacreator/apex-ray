@@ -836,6 +836,104 @@ def test_refresh_agent_artifacts_preserves_current_codex_skill_directory_symlink
     assert alias.readlink() == original_target
 
 
+def test_refresh_agent_artifacts_preserves_canonical_skills_through_shared_claude_root(tmp_path: Path) -> None:
+    init_project(tmp_path, hooks="none", agent_files="codex")
+    claude_dir = tmp_path / ".claude"
+    claude_dir.mkdir()
+    try:
+        (claude_dir / "skills").symlink_to("../.agents/skills", target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"directory symlink creation is unavailable: {exc}")
+
+    refresh_agent_artifacts(tmp_path, agent_files="both")
+
+    for skill_name in ("apex-ray", "apex-ray-improve"):
+        canonical = tmp_path / ".apex-ray" / "skills" / skill_name / "SKILL.md"
+        claude_alias = claude_dir / "skills" / skill_name / "SKILL.md"
+        assert canonical.is_file()
+        assert not canonical.is_symlink()
+        assert claude_alias.resolve() == canonical.resolve()
+    assert all(status.status == "current" for status in agent_artifact_statuses(tmp_path, agent_files="both"))
+    refresh_agent_artifacts(tmp_path, agent_files="both")
+    assert all(
+        (tmp_path / ".apex-ray" / "skills" / skill_name / "SKILL.md").is_file()
+        and not (tmp_path / ".apex-ray" / "skills" / skill_name / "SKILL.md").is_symlink()
+        for skill_name in ("apex-ray", "apex-ray-improve")
+    )
+
+
+def test_refresh_agent_artifacts_preserves_codex_copies_through_shared_claude_root(tmp_path: Path) -> None:
+    init_project(tmp_path, hooks="none", agent_files="codex")
+    for skill_name in ("apex-ray", "apex-ray-improve"):
+        canonical = tmp_path / ".apex-ray" / "skills" / skill_name
+        alias = tmp_path / ".agents" / "skills" / skill_name
+        if alias.is_symlink():
+            alias.unlink()
+        else:
+            shutil.rmtree(alias)
+        shutil.copytree(canonical, alias)
+    claude_dir = tmp_path / ".claude"
+    claude_dir.mkdir()
+    try:
+        (claude_dir / "skills").symlink_to("../.agents/skills", target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"directory symlink creation is unavailable: {exc}")
+
+    refresh_agent_artifacts(tmp_path, agent_files="both")
+
+    for skill_name in ("apex-ray", "apex-ray-improve"):
+        alias = tmp_path / ".agents" / "skills" / skill_name
+        assert alias.is_dir()
+        assert not alias.is_symlink()
+        assert (alias / "SKILL.md").is_file()
+        assert not (alias / "SKILL.md").is_symlink()
+    assert all(status.status == "current" for status in agent_artifact_statuses(tmp_path, agent_files="both"))
+
+
+def test_refresh_agent_artifacts_rejects_claude_skill_path_through_external_parent_symlink(tmp_path: Path) -> None:
+    init_project(tmp_path, hooks="none", agent_files="codex")
+    canonical = tmp_path / ".apex-ray" / "skills" / "apex-ray" / "SKILL.md"
+    canonical_before = canonical.read_text(encoding="utf-8")
+    outside = tmp_path.with_name(f"{tmp_path.name}-outside-claude-skills")
+    outside_skill = outside / "apex-ray" / "SKILL.md"
+    outside_skill.parent.mkdir(parents=True)
+    outside_skill.write_text("outside\n", encoding="utf-8")
+    claude_dir = tmp_path / ".claude"
+    claude_dir.mkdir()
+    try:
+        (claude_dir / "skills").symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"directory symlink creation is unavailable: {exc}")
+
+    with pytest.raises(ConfigError, match="outside the repository"):
+        refresh_agent_artifacts(tmp_path, agent_files="both")
+
+    assert outside_skill.read_text(encoding="utf-8") == "outside\n"
+    assert canonical.read_text(encoding="utf-8") == canonical_before
+    assert not (claude_dir / "CLAUDE.md").exists()
+
+
+def test_init_project_rejects_external_claude_skill_root_before_writing(tmp_path: Path) -> None:
+    outside = tmp_path.with_name(f"{tmp_path.name}-outside-claude-init")
+    outside_skill = outside / "apex-ray" / "SKILL.md"
+    outside_skill.parent.mkdir(parents=True)
+    outside_skill.write_text("outside\n", encoding="utf-8")
+    claude_dir = tmp_path / ".claude"
+    claude_dir.mkdir()
+    try:
+        (claude_dir / "skills").symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"directory symlink creation is unavailable: {exc}")
+
+    with pytest.raises(ConfigError, match="outside the repository"):
+        init_project(tmp_path, hooks="none", agent_files="both")
+
+    assert outside_skill.read_text(encoding="utf-8") == "outside\n"
+    assert not (tmp_path / ".apex-ray").exists()
+    assert not (tmp_path / "AGENTS.md").exists()
+    assert not (claude_dir / "CLAUDE.md").exists()
+
+
 def test_init_project_deprecates_update_gitignore_without_touching_root(tmp_path: Path) -> None:
     with pytest.warns(UserWarning, match="root .gitignore"):
         init_project(tmp_path, update_gitignore=True, hooks="none", agent_files="none")

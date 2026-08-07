@@ -420,6 +420,8 @@ def refresh_agent_artifacts(
         return _dedupe_paths([status.path for status in statuses if status.needs_refresh])
     if agent_skill and agent_files in {"codex", "both"}:
         _preflight_codex_skill_aliases(root)
+    if agent_skill and agent_files in {"claude", "both"}:
+        _preflight_claude_skill_aliases(root)
     if agent_skill and agent_files != "none":
         _preflight_canonical_skills(root)
     written = _write_agent_files(
@@ -675,6 +677,8 @@ def _preflight_init_targets(
                 _safe_repo_symlink_target(root, candidate)
     if agent_skill and agent_files in {"codex", "both"}:
         _preflight_codex_skill_aliases(root)
+    if agent_skill and agent_files in {"claude", "both"}:
+        _preflight_claude_skill_aliases(root)
     if agent_skill and agent_files != "none":
         _preflight_canonical_skills(root)
 
@@ -1792,6 +1796,11 @@ def _preflight_codex_skill_aliases(root: Path) -> None:
             )
 
 
+def _preflight_claude_skill_aliases(root: Path) -> None:
+    for skill_name in ("apex-ray", "apex-ray-improve"):
+        _safe_repo_write_path(root, root / ".claude" / "skills" / skill_name / "SKILL.md")
+
+
 def _preflight_canonical_skills(root: Path) -> None:
     for skill_name in ("apex-ray", "apex-ray-improve"):
         canonical_directory = root / ".apex-ray" / "skills" / skill_name
@@ -1971,6 +1980,15 @@ def _is_managed_skill_copy(path: Path, skill_name: str) -> bool:
 
 
 def _write_skill_alias(path: Path, target: Path, fallback_text: str, *, overwrite: bool) -> bool:
+    # A symlinked parent may already expose the canonical file at the alias path.
+    if path.exists() and path.resolve(strict=False) == target.resolve(strict=False):
+        return False
+    if path.is_file() and not path.is_symlink():
+        try:
+            if _normalize_artifact_text(path.read_text(encoding="utf-8")) == _normalize_artifact_text(fallback_text):
+                return False
+        except OSError, UnicodeError:
+            pass
     if path.exists() and not overwrite:
         return False
     path.parent.mkdir(parents=True, exist_ok=True)
