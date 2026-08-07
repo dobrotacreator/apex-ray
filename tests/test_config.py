@@ -1,5 +1,5 @@
 import shutil
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 import pytest
 
@@ -9,6 +9,7 @@ from apex_ray.config import (
     APEX_RAY_SKILL_TEXT,
     ConfigError,
     _detect_agent_skill_from_block,
+    _relative_symlink_target,
     agent_artifact_statuses,
     ensure_apex_gitignore,
     find_local_config,
@@ -20,6 +21,13 @@ from apex_ray.config import (
     refresh_managed_artifacts,
 )
 from apex_ray.version_lock import VersionLockError
+
+
+def test_relative_symlink_target_uses_portable_forward_slashes() -> None:
+    link = PureWindowsPath("C:/repo/.agents/skills/apex-ray")
+    target = PureWindowsPath("C:/repo/.apex-ray/skills/apex-ray")
+
+    assert _relative_symlink_target(link, target) == "../../.apex-ray/skills/apex-ray"
 
 
 def test_load_config_defaults_when_missing(tmp_path: Path) -> None:
@@ -624,6 +632,108 @@ def test_init_project_copies_codex_skill_directory_when_symlinks_are_unavailable
     assert alias.is_dir()
     assert not alias.is_symlink()
     assert all(status.status == "current" for status in agent_artifact_statuses(tmp_path, agent_files="codex"))
+
+
+def test_refresh_agent_artifacts_repairs_git_symlink_placeholder_with_directory_copy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    git.run_git(["init"], cwd=tmp_path)
+    init_project(tmp_path, hooks="none", agent_files="codex")
+    canonical = tmp_path / ".apex-ray" / "skills" / "apex-ray"
+    alias = tmp_path / ".agents" / "skills" / "apex-ray"
+    relative_alias = alias.relative_to(tmp_path).as_posix()
+    expected_target = "../../.apex-ray/skills/apex-ray"
+    if alias.is_symlink():
+        alias.unlink()
+    else:
+        shutil.rmtree(alias)
+    alias.write_text(expected_target, encoding="utf-8")
+    object_id = git.run_git(["hash-object", "-w", "--", relative_alias], cwd=tmp_path).stdout.strip()
+    git.run_git(["update-index", "--add", "--cacheinfo", "120000", object_id, relative_alias], cwd=tmp_path)
+
+    statuses = agent_artifact_statuses(tmp_path, agent_files="codex")
+
+    assert any(
+        status.path == alias and status.status == "outdated" and "materialized" in status.reason for status in statuses
+    )
+    assert alias in refresh_agent_artifacts(tmp_path, agent_files="codex", dry_run=True)
+    assert alias.is_file()
+    assert alias.read_text(encoding="utf-8") == expected_target
+
+    def unavailable_symlink(
+        _path: Path,
+        _target: str | Path,
+        target_is_directory: bool = False,
+    ) -> None:
+        assert target_is_directory
+        raise OSError("symlinks unavailable")
+
+    monkeypatch.setattr(Path, "symlink_to", unavailable_symlink)
+
+    written = refresh_agent_artifacts(tmp_path, agent_files="codex")
+
+    assert alias in written
+    assert alias.is_dir()
+    assert not alias.is_symlink()
+    assert (alias / "SKILL.md").read_text(encoding="utf-8") == (canonical / "SKILL.md").read_text(encoding="utf-8")
+    assert all(status.status == "current" for status in agent_artifact_statuses(tmp_path, agent_files="codex"))
+
+
+def test_refresh_agent_artifacts_repairs_git_symlink_placeholder_with_directory_symlink(tmp_path: Path) -> None:
+    git.run_git(["init"], cwd=tmp_path)
+    init_project(tmp_path, hooks="none", agent_files="codex")
+    alias = tmp_path / ".agents" / "skills" / "apex-ray"
+    if not alias.is_symlink():
+        pytest.skip("directory symlink creation is unavailable")
+    relative_alias = alias.relative_to(tmp_path).as_posix()
+    expected_target = alias.readlink().as_posix()
+    alias.unlink()
+    alias.write_text(expected_target, encoding="utf-8")
+    object_id = git.run_git(["hash-object", "-w", "--", relative_alias], cwd=tmp_path).stdout.strip()
+    git.run_git(["update-index", "--add", "--cacheinfo", "120000", object_id, relative_alias], cwd=tmp_path)
+
+    written = refresh_agent_artifacts(tmp_path, agent_files="codex")
+
+    assert alias in written
+    assert alias.is_symlink()
+    assert alias.readlink() == Path(expected_target)
+    assert all(status.status == "current" for status in agent_artifact_statuses(tmp_path, agent_files="codex"))
+
+
+@pytest.mark.parametrize(
+    ("content", "index_mode"),
+    [
+        ("../../.apex-ray/skills/apex-ray", None),
+        ("../../.apex-ray/skills/apex-ray", "100644"),
+        ("../../.apex-ray/skills/apex-ray\n", "120000"),
+    ],
+)
+def test_refresh_agent_artifacts_rejects_regular_file_that_only_looks_like_symlink_placeholder(
+    tmp_path: Path,
+    content: str,
+    index_mode: str | None,
+) -> None:
+    git.run_git(["init"], cwd=tmp_path)
+    init_project(tmp_path, hooks="none", agent_files="codex")
+    alias = tmp_path / ".agents" / "skills" / "apex-ray"
+    if alias.is_symlink():
+        alias.unlink()
+    else:
+        shutil.rmtree(alias)
+    alias.write_text(content, encoding="utf-8")
+    relative_alias = alias.relative_to(tmp_path).as_posix()
+    if index_mode == "100644":
+        git.run_git(["add", "--", relative_alias], cwd=tmp_path)
+    elif index_mode == "120000":
+        object_id = git.run_git(["hash-object", "-w", "--", relative_alias], cwd=tmp_path).stdout.strip()
+        git.run_git(["update-index", "--add", "--cacheinfo", index_mode, object_id, relative_alias], cwd=tmp_path)
+
+    with pytest.raises(ConfigError, match="expected a directory or symlink"):
+        refresh_agent_artifacts(tmp_path, agent_files="codex")
+
+    assert alias.is_file()
+    assert alias.read_text(encoding="utf-8") == content
 
 
 def test_refresh_agent_artifacts_updates_managed_codex_skill_copy_without_replacing_it(
