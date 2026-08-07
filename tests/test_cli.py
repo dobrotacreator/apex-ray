@@ -1484,8 +1484,8 @@ def test_gate_pre_push_fetch_base_is_explicit_and_precedes_diff(
     monkeypatch.setattr("apex_ray.cli.gate.git.repo_root", lambda _cwd, **_kwargs: tmp_path)
     monkeypatch.setattr("apex_ray.cli.gate.git.is_git_repo", lambda _root: True)
     monkeypatch.setattr(
-        "apex_ray.cli.gate.git.fetch_remote_tracking_ref",
-        lambda _root, base: events.append(f"fetch:{base}"),
+        "apex_ray.cli.gate.git.resolve_pre_push_base",
+        lambda _root, base: events.append(f"fetch:{base}") or base,
     )
     monkeypatch.setattr(
         "apex_ray.cli.gate.git.diff_base",
@@ -1541,8 +1541,8 @@ def test_gate_pre_push_base_precedence_supports_hook_environment_overrides(
     monkeypatch.setattr("apex_ray.cli.gate.git.repo_root", lambda _cwd, **_kwargs: tmp_path)
     monkeypatch.setattr("apex_ray.cli.gate.git.is_git_repo", lambda _root: True)
     monkeypatch.setattr(
-        "apex_ray.cli.gate.git.fetch_remote_tracking_ref",
-        lambda _root, base: fetched_bases.append(base),
+        "apex_ray.cli.gate.git.resolve_pre_push_base",
+        lambda _root, base: fetched_bases.append(base) or base,
     )
     monkeypatch.setattr(
         "apex_ray.cli.gate.git.diff_base",
@@ -1570,11 +1570,11 @@ def test_gate_pre_push_fetch_base_failure_is_blocking(
         encoding="utf-8",
     )
 
-    def fail_fetch(_root: Path, _base: str) -> None:
+    def fail_fetch(_root: Path, _base: str) -> str:
         raise git.GitError(["fetch"], "network unavailable", 1)
 
     monkeypatch.setattr("apex_ray.cli.gate.git.repo_root", lambda _cwd, **_kwargs: tmp_path)
-    monkeypatch.setattr("apex_ray.cli.gate.git.fetch_remote_tracking_ref", fail_fetch)
+    monkeypatch.setattr("apex_ray.cli.gate.git.resolve_pre_push_base", fail_fetch)
     monkeypatch.setattr(
         "apex_ray.cli.gate.run_review_pipeline",
         lambda *_args, **_kwargs: pytest.fail("review must not start after a configured fetch failure"),
@@ -1584,6 +1584,66 @@ def test_gate_pre_push_fetch_base_failure_is_blocking(
 
     assert result.exit_code == 2
     assert "network unavailable" in _plain_cli_output(result.output)
+
+
+def test_gate_pre_push_uses_canonical_resolved_base_for_review(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    config_path = tmp_path / ".apex-ray" / "config.yml"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(
+        "review:\n"
+        "  base: refs/remotes/origin/main\n"
+        "  gates:\n"
+        "    pre_push:\n"
+        "      fetch_base: true\n"
+        "      incremental_retry:\n"
+        "        enabled: true\n",
+        encoding="utf-8",
+    )
+    resolved_bases: list[str] = []
+    diff_bases: list[str] = []
+    merge_bases: list[str] = []
+    reviewed_bases: list[str] = []
+
+    def fake_run_review_pipeline(root, diff_text, target_mode, config, **kwargs):
+        reviewed_bases.append(kwargs["base"])
+        return build_report(
+            ProjectProfile(root=str(root), is_git_repo=True),
+            config,
+            parse_unified_diff(diff_text, target_mode=target_mode, base=kwargs["base"]),
+        )
+
+    def fake_resolve(_root: Path, base: str) -> str:
+        resolved_bases.append(base)
+        return "origin/main"
+
+    monkeypatch.setattr("apex_ray.cli.gate.git.repo_root", lambda _cwd, **_kwargs: tmp_path)
+    monkeypatch.setattr("apex_ray.cli.gate.git.is_git_repo", lambda _root: True)
+    monkeypatch.setattr("apex_ray.cli.gate.git.resolve_pre_push_base", fake_resolve)
+    monkeypatch.setattr("apex_ray.cli.gate.git.rev_parse", lambda _root, _ref: _GATE_HEAD_1)
+    monkeypatch.setattr(
+        "apex_ray.cli.gate.git.merge_base",
+        lambda _root, base, _head: merge_bases.append(base) or _GATE_MERGE_BASE,
+    )
+    monkeypatch.setattr(
+        "apex_ray.cli.gate.git.diff_base",
+        lambda _root, base: diff_bases.append(base) or _diff_for("src/orders.ts", "old", "new"),
+    )
+    monkeypatch.setattr("apex_ray.cli.gate.run_review_pipeline", fake_run_review_pipeline)
+    monkeypatch.setattr("apex_ray.cli.gate.continue_review_from_report", lambda report, **_kwargs: (report, []))
+
+    result = runner.invoke(app, ["gate", "pre-push"], catch_exceptions=False)
+
+    assert result.exit_code == 0
+    assert resolved_bases == ["refs/remotes/origin/main"]
+    assert merge_bases == ["origin/main"]
+    assert diff_bases == ["origin/main"]
+    assert reviewed_bases == ["origin/main"]
+    state = json.loads((tmp_path / ".apex-ray" / "reports" / "pre-push-state.json").read_text(encoding="utf-8"))
+    assert state["base_ref"] == "origin/main"
 
 
 def test_gate_pre_push_incremental_retry_tracks_reviewer_set_not_order(

@@ -342,6 +342,8 @@ def is_ancestor(cwd: Path, ancestor: str, descendant: str = "HEAD") -> bool:
 
 
 def object_exists(cwd: Path, ref: str) -> bool:
+    """Return whether the ref resolves and peels to a commit object."""
+
     proc = run_git(["cat-file", "-e", "--end-of-options", f"{ref}^{{commit}}"], cwd=cwd, check=False)
     return proc.returncode == 0
 
@@ -350,12 +352,48 @@ def fetch_remote_tracking_ref(cwd: Path, ref: str) -> None:
     """Fetch one exact remote branch into its matching remote-tracking ref."""
 
     remote, branch = _split_remote_tracking_ref(cwd, ref)
-    source_ref = f"refs/heads/{branch}"
-    target_ref = f"refs/remotes/{remote}/{branch}"
-    for candidate in (source_ref, target_ref):
-        validation = run_git(["check-ref-format", candidate], cwd=cwd, check=False)
-        if validation.returncode != 0:
-            raise GitRemoteRefError(f"Configured pre-push base {ref!r} is not a valid remote-tracking ref.")
+    _fetch_remote_branch(cwd, remote, branch, configured_ref=ref)
+
+
+def resolve_pre_push_base(cwd: Path, ref: str) -> str:
+    """Refresh a remote base when possible, or validate an existing local commit."""
+
+    remotes = _configured_remotes(cwd)
+    remote_branch = _match_remote_tracking_ref(ref, remotes)
+    if remote_branch is not None:
+        remote, branch = remote_branch
+        _fetch_remote_branch(cwd, remote, branch, configured_ref=ref)
+        return f"{remote}/{branch}"
+    if ref.startswith("refs/remotes/"):
+        raise GitRemoteRefError(f"Configured pre-push base {ref!r} does not name a configured remote-tracking ref.")
+    if ref.startswith("origin/") and "origin" not in remotes:
+        raise GitRemoteRefError(f"Configured pre-push base {ref!r} requires configured remote 'origin'.")
+    full_object_id = _is_full_object_id(cwd, ref)
+    if full_object_id and object_exists(cwd, ref):
+        return ref
+
+    if "origin" in remotes and not ref.startswith("refs/"):
+        validated_refs = _validated_remote_branch_refs(cwd, "origin", ref)
+        if validated_refs is not None:
+            source_ref, _ = validated_refs
+            args = ["ls-remote", "--exit-code", "--heads", "--", "origin", source_ref]
+            remote_match = run_git(args, cwd=cwd, check=False)
+            if remote_match.returncode == 0 and _ls_remote_contains_ref(remote_match.stdout, source_ref):
+                _fetch_remote_branch(cwd, "origin", ref, configured_ref=ref)
+                return f"origin/{ref}"
+            if remote_match.returncode not in {0, 2}:
+                raise GitError(args, remote_match.stderr, remote_match.returncode)
+
+    if not full_object_id and object_exists(cwd, ref):
+        return ref
+    raise GitRemoteRefError(f"Configured pre-push base {ref!r} does not resolve to a commit.")
+
+
+def _fetch_remote_branch(cwd: Path, remote: str, branch: str, *, configured_ref: str) -> None:
+    validated_refs = _validated_remote_branch_refs(cwd, remote, branch)
+    if validated_refs is None:
+        raise GitRemoteRefError(f"Configured pre-push base {configured_ref!r} is not a valid remote-tracking ref.")
+    source_ref, target_ref = validated_refs
     run_git(
         [
             "fetch",
@@ -371,13 +409,47 @@ def fetch_remote_tracking_ref(cwd: Path, ref: str) -> None:
     )
 
 
+def _validated_remote_branch_refs(
+    cwd: Path,
+    remote: str,
+    branch: str,
+) -> tuple[str, str] | None:
+    source_ref = f"refs/heads/{branch}"
+    target_ref = f"refs/remotes/{remote}/{branch}"
+    for candidate in (source_ref, target_ref):
+        validation = run_git(["check-ref-format", candidate], cwd=cwd, check=False)
+        if validation.returncode != 0:
+            return None
+    return source_ref, target_ref
+
+
+def _ls_remote_contains_ref(stdout: str, expected_ref: str) -> bool:
+    return any(line.partition("\t")[2] == expected_ref for line in stdout.splitlines())
+
+
+def _is_full_object_id(cwd: Path, ref: str) -> bool:
+    object_format = run_git(["rev-parse", "--show-object-format"], cwd=cwd).stdout.strip()
+    object_id_length = {"sha1": 40, "sha256": 64}.get(object_format)
+    return object_id_length == len(ref) and all(character in "0123456789abcdefABCDEF" for character in ref)
+
+
+def _configured_remotes(cwd: Path) -> list[str]:
+    return [line for line in run_git(["remote"], cwd=cwd).stdout.splitlines() if line]
+
+
 def _split_remote_tracking_ref(cwd: Path, ref: str) -> tuple[str, str]:
-    remotes = [line for line in run_git(["remote"], cwd=cwd).stdout.splitlines() if line]
-    for remote in sorted(remotes, key=len, reverse=True):
-        for prefix in (f"refs/remotes/{remote}/", f"{remote}/"):
-            if ref.startswith(prefix) and len(ref) > len(prefix):
-                return remote, ref[len(prefix) :]
+    remote_branch = _match_remote_tracking_ref(ref, _configured_remotes(cwd))
+    if remote_branch is not None:
+        return remote_branch
     raise GitRemoteRefError(
         f"Configured pre-push base {ref!r} is not an exact remote-tracking ref. "
         "Use '<remote>/<branch>' or 'refs/remotes/<remote>/<branch>'."
     )
+
+
+def _match_remote_tracking_ref(ref: str, remotes: list[str]) -> tuple[str, str] | None:
+    for remote in sorted(remotes, key=len, reverse=True):
+        for prefix in (f"refs/remotes/{remote}/", f"{remote}/"):
+            if ref.startswith(prefix) and len(ref) > len(prefix):
+                return remote, ref[len(prefix) :]
+    return None
