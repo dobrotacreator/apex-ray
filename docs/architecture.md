@@ -260,9 +260,11 @@ Managed agent blocks and generated skills carry an Apex Ray template version. Re
 
 ## Pre-Push Gate Flow
 
-`apex-ray gate pre-push` is the hook-friendly wrapper around the review pipeline. It reviews the configured base branch diff, writes the same Markdown/JSON report artifacts as normal review, evaluates `review.gates.pre_push`, prints live progress to stderr, prints a short blocking summary to stdout, and exits `1` when the gate blocks.
+`apex-ray gate pre-push` is the hook-friendly wrapper around the review pipeline. It reviews the configured base branch diff, writes the same Markdown/JSON report artifacts as normal review, evaluates `review.gates.pre_push`, prints live progress to stderr, prints a short blocking summary to stdout, and exits `1` when the gate blocks. Git command output is decoded as UTF-8 independently of the host locale, with invalid bytes replaced rather than crashing the gate.
 
-The gate does not narrow the diff after a failed push. It keeps reviewing `base...HEAD` for correctness and relies on the LLM response cache plus analyzer caches where available to make repeated fix-and-push attempts cheaper. When a previous pre-push JSON report exists, stdout includes a small delta for new, still blocking, and resolved blocking findings.
+The optional `review.gates.pre_push.fetch_base` policy refreshes one explicit remote-tracking branch before any merge-base or diff calculation and fails closed if that fetch cannot complete. It is disabled by default, so ordinary review never introduces network access.
+
+With incremental retry disabled, the gate keeps reviewing `base...HEAD` and relies on the LLM response cache plus analyzer caches to make repeated attempts cheaper. With incremental retry enabled, eligible retries review `previous_gate_head..HEAD` and carry unresolved debt. Eligibility requires the saved HEAD to be an ancestor of the captured current HEAD; branch switches and rebases therefore fall back to a new full base review before replacing state. When a previous pre-push JSON report exists, stdout includes a small delta for new, still blocking, and resolved blocking findings.
 
 ## Configuration Flow
 

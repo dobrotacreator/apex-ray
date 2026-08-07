@@ -376,6 +376,12 @@ def pre_push(
 
     previous_report = _load_previous_report(json_output)
     target_base = base or review_config.base
+    if gate_config.fetch_base:
+        progress.event(f"fetching remote base {target_base}", force=True)
+        try:
+            git.fetch_remote_tracking_ref(root, target_base)
+        except (git.GitError, git.GitRemoteRefError) as exc:
+            raise typer.BadParameter(str(exc)) from exc
     state_path = resolve_state_path(root, gate_config)
     retry_state = None
     retry_summary: PrePushRetrySummary | None = None
@@ -398,6 +404,12 @@ def pre_push(
         config_hash = config_fingerprint(report_config, gate_config, reviewer_ids=reviewer)
         retry_state = load_pre_push_state(state_path)
         previous_head_exists = bool(retry_state and git.object_exists(root, retry_state.head_sha))
+        try:
+            previous_head_is_ancestor = bool(
+                retry_state and previous_head_exists and git.is_ancestor(root, retry_state.head_sha, current_head)
+            )
+        except git.GitError as exc:
+            raise typer.BadParameter(str(exc)) from exc
         eligibility = check_incremental_eligibility(
             retry_state,
             repo_root=root,
@@ -405,6 +417,7 @@ def pre_push(
             merge_base_sha=merge_base_sha,
             config_hash=config_hash,
             previous_head_exists=previous_head_exists,
+            previous_head_is_ancestor=previous_head_is_ancestor,
         )
         incremental_mode = eligibility.eligible
         incremental_fallback_reason = eligibility.reason

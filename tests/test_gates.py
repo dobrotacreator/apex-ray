@@ -1,3 +1,4 @@
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -24,6 +25,7 @@ from apex_ray.gate_retry import (
     config_fingerprint,
     load_pre_push_state,
     relevant_files_for_finding,
+    stale_carried_finding_reason,
 )
 from apex_ray.gates import PrePushGateDecision, evaluate_pre_push_gate, render_pre_push_gate_stdout
 from apex_ray.llm.providers import FakeLLMProvider
@@ -1616,6 +1618,31 @@ def test_incremental_retry_uses_resolution_surface_globs(tmp_path: Path) -> None
     )
 
 
+def test_incremental_retry_keeps_carried_finding_when_head_content_is_not_utf8(tmp_path: Path) -> None:
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.email", "apex@example.test"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "Apex Test"], cwd=tmp_path, check=True)
+    source = tmp_path / "src" / "orders.ts"
+    source.parent.mkdir()
+    source.write_bytes(b"\xff\xfeinvalid source")
+    subprocess.run(["git", "add", "src/orders.ts"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "invalid utf8 fixture"], cwd=tmp_path, check=True)
+    finding = Finding(
+        title="Missing tenant predicate",
+        severity=FindingSeverity.HIGH,
+        confidence=FindingConfidence.HIGH,
+        file="src/orders.ts",
+        failure_mode="The lookup can return another tenant's order.",
+        evidence="The query no longer includes `tenantId`.",
+        suggested_fix="Restore the tenant predicate.",
+        suggested_test="Add a cross-tenant lookup regression test.",
+    )
+
+    reason = stale_carried_finding_reason(CarriedFinding(finding=finding), tmp_path)
+
+    assert reason is None
+
+
 def test_incremental_retry_resolves_carried_finding_for_unanchored_new_file(
     tmp_path: Path,
 ) -> None:
@@ -2115,6 +2142,7 @@ review:
     monkeypatch.setattr("apex_ray.cli.gate.git.rev_parse", lambda _root, _ref: next(heads))
     monkeypatch.setattr("apex_ray.cli.gate.git.merge_base", lambda _root, _base, _head: "base-1")
     monkeypatch.setattr("apex_ray.cli.gate.git.object_exists", lambda _root, _ref: True)
+    monkeypatch.setattr("apex_ray.cli.gate.git.is_ancestor", lambda _root, _ancestor, _descendant: True)
     monkeypatch.setattr("apex_ray.cli.gate.git.diff_base", lambda _root, _base: full_diff)
     monkeypatch.setattr("apex_ray.cli.gate.git.diff_range", lambda _root, _old, _new: next(range_diffs))
     monkeypatch.setattr("apex_ray.cli.gate.run_review_pipeline", fake_run_review_pipeline)

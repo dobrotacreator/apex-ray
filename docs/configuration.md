@@ -513,6 +513,26 @@ Set `review.gates.pre_push.enabled: false` in local config to skip the hook gate
 
 Set `review.llm.enabled: false` in local config when a machine should keep normal review and pre-push gate runs deterministic and offline.
 
+By default the gate never contacts a Git remote. Repositories that require a
+fresh remote base before every push can opt in explicitly:
+
+```yaml
+review:
+  base: origin/main
+  gates:
+    pre_push:
+      fetch_base: true
+```
+
+`fetch_base` accepts only an exact remote-tracking base such as `origin/main`
+or `refs/remotes/origin/main`. Apex Ray resolves the remote name from the
+repository's configured remotes and fetches only that branch into its matching
+remote-tracking ref, without tags or submodules. A local branch such as `main`
+is intentionally not inferred or moved; use its explicit remote-tracking ref.
+When fetching or ref validation fails, the gate exits before reading the diff
+or starting review rather than reviewing a stale base. Leave this option
+disabled for offline operation or when another hook already refreshes the base.
+
 ### Local Finding Triage
 
 When a pre-push finding is a confirmed local false positive, do not bypass the hook. Suppress the specific finding locally:
@@ -595,7 +615,14 @@ Incremental retry is fail-closed:
   cannot bypass review;
 - a missing or mismatched coverage-debt report falls back to a full
   `review.base...HEAD` review while retaining prior blocking findings;
-- missing state, missing previous HEAD, merge-base changes, or config/rule/memory/model/prompt/gate-policy changes fall back to a full `review.base...HEAD` review.
+- missing state, missing previous HEAD, a previous HEAD outside the current
+  HEAD's ancestry, merge-base changes, or config/rule/memory/model/prompt/gate-policy
+  changes fall back to a full `review.base...HEAD` review.
+
+The ancestry check makes the state file safe to reuse across normal worktree
+branch switches and rebases. A divergent state is not deleted before review;
+the full fallback must finish first, then its current HEAD becomes the new
+incremental baseline.
 
 Except for the coverage-debt recovery case above, a full fallback is a new
 authoritative review for its target and configuration and replaces the prior

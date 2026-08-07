@@ -176,6 +176,7 @@ def check_incremental_eligibility(
     merge_base_sha: str,
     config_hash: str,
     previous_head_exists: bool,
+    previous_head_is_ancestor: bool,
 ) -> IncrementalEligibility:
     if state is None:
         return IncrementalEligibility(False, "no previous pre-push state")
@@ -194,6 +195,8 @@ def check_incremental_eligibility(
         )
     if not previous_head_exists:
         return IncrementalEligibility(False, "previous gate HEAD is not available locally")
+    if not previous_head_is_ancestor:
+        return IncrementalEligibility(False, "previous gate HEAD is not an ancestor of current HEAD")
     return IncrementalEligibility(True)
 
 
@@ -356,7 +359,10 @@ def stale_carried_finding_reason(carried: CarriedFinding, repo_root: Path) -> st
         return None
     readable_files = 0
     for file, anchors in anchors_by_file.items():
-        source = _read_repo_head_text(repo_root, file)
+        try:
+            source = _read_repo_head_text(repo_root, file)
+        except UnicodeDecodeError:
+            return None
         if source is None:
             continue
         readable_files += 1
@@ -425,8 +431,13 @@ def _read_repo_head_text(repo_root: Path, file: str) -> str | None:
     if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
         return None
     try:
-        proc = git.run_git(["show", f"HEAD:{path.as_posix()}"], cwd=repo_root, check=False)
-    except OSError, UnicodeDecodeError:
+        proc = git.run_git(
+            ["show", f"HEAD:{path.as_posix()}"],
+            cwd=repo_root,
+            check=False,
+            errors="strict",
+        )
+    except OSError:
         return None
     if proc.returncode != 0:
         return None
