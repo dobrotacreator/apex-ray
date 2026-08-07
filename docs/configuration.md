@@ -551,14 +551,25 @@ review:
       fetch_base: true
 ```
 
-`fetch_base` accepts only an exact remote-tracking base such as `origin/main`
-or `refs/remotes/origin/main`. Apex Ray resolves the remote name from the
-repository's configured remotes and fetches only that branch into its matching
-remote-tracking ref, without tags or submodules. A local branch such as `main`
-is intentionally not inferred or moved; use its explicit remote-tracking ref.
-When fetching or ref validation fails, the gate exits before reading the diff
-or starting review rather than reviewing a stale base. Leave this option
-disabled for offline operation or when another hook already refreshes the base.
+For an exact remote-tracking base such as `origin/main` or
+`refs/remotes/origin/main`, `fetch_base` resolves the configured remote and
+fetches only that branch into its matching remote-tracking ref, without tags or
+submodules. The latter spelling is canonicalized to `origin/main` before
+merge-base, retry-state, and diff calculations.
+
+Hook overrides may also use a short branch name such as `feature/stack`. When
+`origin` is configured and contains that exact branch, Apex Ray refreshes it and
+uses `origin/feature/stack`. A same-named local branch or tag is used unchanged
+only when `origin` reports that the exact short branch is absent.
+
+Unambiguous local commit-ish values are validated without a remote lookup. Use
+a full SHA-1/SHA-256 object ID, a revision expression such as `HEAD~1`, or an
+explicit ref such as `refs/heads/feature/stack` for an offline base.
+Authentication, transport, and other failures while resolving an ambiguous
+short name remain blocking, even when a same-named local ref exists. Unknown
+refs always stop the gate before reading the diff or starting review. Leave
+`fetch_base` disabled for fully offline operation or when another hook already
+resolves and refreshes the base.
 
 ### Local Finding Triage
 

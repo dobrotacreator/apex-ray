@@ -8,6 +8,56 @@ import pytest
 from apex_ray import git
 
 
+def _stub_pre_push_git(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    remotes: str = "origin\n",
+    ls_remote_returncode: int = 2,
+    ls_remote_stdout: str = "",
+    ls_remote_stderr: str = "",
+    object_returncode: int = 1,
+    object_format: str = "sha1",
+) -> list[list[str]]:
+    calls: list[list[str]] = []
+
+    def fake_run_git(
+        args: list[str],
+        cwd: Path,
+        check: bool = True,
+        *,
+        timeout: float | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        del timeout
+        assert cwd == tmp_path
+        calls.append(args)
+        if args == ["remote"]:
+            result = subprocess.CompletedProcess(["git", *args], 0, stdout=remotes, stderr="")
+        elif args == ["rev-parse", "--show-object-format"]:
+            result = subprocess.CompletedProcess(["git", *args], 0, stdout=f"{object_format}\n", stderr="")
+        elif args[:1] == ["check-ref-format"]:
+            result = subprocess.CompletedProcess(["git", *args], 0, stdout="", stderr="")
+        elif args[:1] == ["ls-remote"]:
+            result = subprocess.CompletedProcess(
+                ["git", *args],
+                ls_remote_returncode,
+                stdout=ls_remote_stdout,
+                stderr=ls_remote_stderr,
+            )
+        elif args[:1] == ["fetch"]:
+            result = subprocess.CompletedProcess(["git", *args], 0, stdout="", stderr="")
+        elif args[:1] == ["cat-file"]:
+            result = subprocess.CompletedProcess(["git", *args], object_returncode, stdout="", stderr="")
+        else:
+            raise AssertionError(f"unexpected git call: {args}")
+        if check and result.returncode != 0:
+            raise git.GitError(args, result.stderr, result.returncode)
+        return result
+
+    monkeypatch.setattr("apex_ray.git.run_git", fake_run_git)
+    return calls
+
+
 def test_run_git_decodes_output_as_utf8_without_locale_dependency(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -108,6 +158,267 @@ def test_fetch_remote_tracking_ref_rejects_non_remote_base(
 
     with pytest.raises(git.GitRemoteRefError, match="exact remote-tracking ref"):
         git.fetch_remote_tracking_ref(tmp_path, "main")
+
+
+def test_resolve_pre_push_base_fetches_and_canonicalizes_exact_remote_ref(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _stub_pre_push_git(tmp_path, monkeypatch, remotes="origin\nteam/upstream\n")
+
+    resolved = git.resolve_pre_push_base(tmp_path, "refs/remotes/team/upstream/main")
+
+    assert resolved == "team/upstream/main"
+    assert calls[-1] == [
+        "fetch",
+        "--quiet",
+        "--no-tags",
+        "--no-recurse-submodules",
+        "--no-write-fetch-head",
+        "--",
+        "team/upstream",
+        "+refs/heads/main:refs/remotes/team/upstream/main",
+    ]
+
+
+def test_resolve_pre_push_base_fetches_exact_short_origin_branch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _stub_pre_push_git(
+        tmp_path,
+        monkeypatch,
+        ls_remote_returncode=0,
+        ls_remote_stdout="1234567890abcdef\trefs/heads/feature/stack\n",
+    )
+
+    resolved = git.resolve_pre_push_base(tmp_path, "feature/stack")
+
+    assert resolved == "origin/feature/stack"
+    assert ["ls-remote", "--exit-code", "--heads", "--", "origin", "refs/heads/feature/stack"] in calls
+    assert calls[-1] == [
+        "fetch",
+        "--quiet",
+        "--no-tags",
+        "--no-recurse-submodules",
+        "--no-write-fetch-head",
+        "--",
+        "origin",
+        "+refs/heads/feature/stack:refs/remotes/origin/feature/stack",
+    ]
+
+
+def test_resolve_pre_push_base_preserves_existing_local_ref_when_origin_branch_is_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _stub_pre_push_git(
+        tmp_path,
+        monkeypatch,
+        object_returncode=0,
+    )
+
+    assert git.resolve_pre_push_base(tmp_path, "local-only") == "local-only"
+    assert not any(call[:1] == ["fetch"] for call in calls)
+
+
+def test_resolve_pre_push_base_rejects_remote_lookup_failure_before_local_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _stub_pre_push_git(
+        tmp_path,
+        monkeypatch,
+        ls_remote_returncode=128,
+        ls_remote_stderr="network unavailable",
+        object_returncode=0,
+    )
+
+    with pytest.raises(git.GitError, match="network unavailable"):
+        git.resolve_pre_push_base(tmp_path, "local-only")
+    assert not any(call[:1] == ["fetch"] for call in calls)
+
+
+@pytest.mark.parametrize(("commit_sha", "object_format"), [("a" * 40, "sha1"), ("b" * 64, "sha256")])
+def test_resolve_pre_push_base_uses_full_commit_id_without_remote_lookup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    commit_sha: str,
+    object_format: str,
+) -> None:
+    calls = _stub_pre_push_git(
+        tmp_path,
+        monkeypatch,
+        ls_remote_returncode=128,
+        ls_remote_stderr="network unavailable",
+        object_returncode=0,
+        object_format=object_format,
+    )
+
+    assert git.resolve_pre_push_base(tmp_path, commit_sha) == commit_sha
+    assert not any(call[:1] in (["ls-remote"], ["fetch"]) for call in calls)
+
+
+@pytest.mark.parametrize(("branch", "object_format"), [("a" * 64, "sha1"), ("b" * 40, "sha256")])
+def test_resolve_pre_push_base_fetches_hex_branch_with_non_oid_length(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    branch: str,
+    object_format: str,
+) -> None:
+    calls = _stub_pre_push_git(
+        tmp_path,
+        monkeypatch,
+        ls_remote_returncode=0,
+        ls_remote_stdout=f"1234567890abcdef\trefs/heads/{branch}\n",
+        object_format=object_format,
+    )
+
+    assert git.resolve_pre_push_base(tmp_path, branch) == f"origin/{branch}"
+    assert any(call[:1] == ["fetch"] for call in calls)
+
+
+@pytest.mark.parametrize(("branch", "object_format"), [("a" * 40, "sha1"), ("b" * 64, "sha256")])
+def test_resolve_pre_push_base_fetches_hash_shaped_branch_when_no_local_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    branch: str,
+    object_format: str,
+) -> None:
+    calls = _stub_pre_push_git(
+        tmp_path,
+        monkeypatch,
+        ls_remote_returncode=0,
+        ls_remote_stdout=f"1234567890abcdef\trefs/heads/{branch}\n",
+        object_format=object_format,
+        object_returncode=1,
+    )
+
+    assert git.resolve_pre_push_base(tmp_path, branch) == f"origin/{branch}"
+    assert any(call[:1] == ["cat-file"] for call in calls)
+    assert any(call[:1] == ["fetch"] for call in calls)
+
+
+def test_resolve_pre_push_base_ignores_ls_remote_suffix_match(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _stub_pre_push_git(
+        tmp_path,
+        monkeypatch,
+        ls_remote_returncode=0,
+        ls_remote_stdout="1234567890abcdef\trefs/heads/nested/refs/heads/main\n",
+        object_returncode=0,
+    )
+
+    assert git.resolve_pre_push_base(tmp_path, "main") == "main"
+    assert not any(call[:1] == ["fetch"] for call in calls)
+
+
+def test_resolve_pre_push_base_rejects_unknown_ref(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_pre_push_git(tmp_path, monkeypatch)
+
+    with pytest.raises(git.GitRemoteRefError, match="does not resolve to a commit"):
+        git.resolve_pre_push_base(tmp_path, "missing")
+
+
+def test_resolve_pre_push_base_uses_local_ref_without_origin(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _stub_pre_push_git(tmp_path, monkeypatch, remotes="upstream\n", object_returncode=0)
+
+    assert git.resolve_pre_push_base(tmp_path, "local-only") == "local-only"
+    assert not any(call[:1] in (["ls-remote"], ["fetch"]) for call in calls)
+
+
+@pytest.mark.parametrize("ref", ["origin/main", "refs/remotes/origin/main"])
+def test_resolve_pre_push_base_rejects_explicit_origin_ref_without_origin_remote(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ref: str,
+) -> None:
+    _stub_pre_push_git(tmp_path, monkeypatch, remotes="upstream\n", object_returncode=0)
+
+    with pytest.raises(git.GitRemoteRefError, match="configured remote"):
+        git.resolve_pre_push_base(tmp_path, ref)
+
+
+def test_resolve_pre_push_base_keeps_option_like_branch_operands_after_separator(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _stub_pre_push_git(
+        tmp_path,
+        monkeypatch,
+        ls_remote_returncode=0,
+        ls_remote_stdout="1234567890abcdef\trefs/heads/-n\n",
+    )
+
+    assert git.resolve_pre_push_base(tmp_path, "-n") == "origin/-n"
+    assert ["ls-remote", "--exit-code", "--heads", "--", "origin", "refs/heads/-n"] in calls
+    fetch_call = next(call for call in calls if call[:1] == ["fetch"])
+    assert fetch_call[5:7] == ["--", "origin"]
+
+
+def test_resolve_pre_push_base_with_real_local_remote(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name in tuple(os.environ):
+        if name.startswith("GIT_"):
+            monkeypatch.delenv(name)
+    global_config = tmp_path / "global.gitconfig"
+    global_config.write_text("", encoding="utf-8")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(global_config))
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+
+    remote = tmp_path / "remote.git"
+    worktree = tmp_path / "worktree"
+    empty_hooks = tmp_path / "empty-hooks"
+    empty_hooks.mkdir()
+    subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "core.hooksPath", str(empty_hooks)], cwd=remote, check=True)
+    subprocess.run(["git", "init", str(worktree)], check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.email", "apex@example.test"], cwd=worktree, check=True)
+    subprocess.run(["git", "config", "user.name", "Apex Test"], cwd=worktree, check=True)
+    subprocess.run(["git", "config", "commit.gpgSign", "false"], cwd=worktree, check=True)
+    subprocess.run(["git", "config", "push.gpgSign", "false"], cwd=worktree, check=True)
+    subprocess.run(["git", "config", "core.hooksPath", str(empty_hooks)], cwd=worktree, check=True)
+    (worktree / "tracked.txt").write_text("base\n", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=worktree, check=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=worktree, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "remote", "add", "origin", str(remote)], cwd=worktree, check=True)
+    subprocess.run(
+        ["git", "push", "origin", "HEAD:refs/heads/feature/stack"],
+        cwd=worktree,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "update-ref", "-d", "refs/remotes/origin/feature/stack"],
+        cwd=worktree,
+        check=True,
+    )
+    head_sha = git.rev_parse(worktree, "HEAD")
+
+    assert git.resolve_pre_push_base(worktree, "feature/stack") == "origin/feature/stack"
+    assert git.rev_parse(worktree, "origin/feature/stack") == head_sha
+    assert git.resolve_pre_push_base(worktree, head_sha) == head_sha
+    blob_sha = subprocess.run(
+        ["git", "hash-object", "-w", "--stdin"],
+        cwd=worktree,
+        input="not a commit\n",
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    with pytest.raises(git.GitRemoteRefError, match="does not resolve to a commit"):
+        git.resolve_pre_push_base(worktree, blob_sha)
 
 
 def test_diff_worktree_includes_untracked_files(tmp_path: Path) -> None:

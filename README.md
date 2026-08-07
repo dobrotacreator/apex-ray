@@ -120,7 +120,9 @@ apex-ray gate pre-push
 The gate reviews `review.base...HEAD`, with optional `APEX_RAY_BASE` or
 `TURBO_SCM_BASE` hook overrides, writes `.apex-ray/reports/pre-push.md` and
 `.apex-ray/reports/pre-push.json`, prints an agent-friendly blocking summary,
-and exits non-zero when the configured policy fails.
+and exits non-zero when the configured policy fails. With `fetch_base` enabled,
+those overrides may name an exact remote-tracking branch, a short branch on
+`origin`, or an existing local ref/SHA used by stacked-branch tooling.
 
 See the full [Quick Start](https://dobrotacreator.github.io/apex-ray/quickstart/) and [Review Workflow](https://dobrotacreator.github.io/apex-ray/review-workflow/) docs for installation requirements, provider setup, report interpretation, continuation commands, cache behavior, and troubleshooting.
 

@@ -384,9 +384,9 @@ def pre_push(
     previous_report = _load_previous_report(json_output)
     target_base = base or review_config.base
     if gate_config.fetch_base:
-        progress.event(f"fetching remote base {target_base}", force=True)
+        progress.event(f"preparing review base {target_base}", force=True)
         try:
-            git.fetch_remote_tracking_ref(root, target_base)
+            target_base = git.resolve_pre_push_base(root, target_base)
         except (git.GitError, git.GitRemoteRefError) as exc:
             raise typer.BadParameter(str(exc)) from exc
     state_path = resolve_state_path(root, gate_config)
