@@ -1400,6 +1400,63 @@ def test_refresh_managed_artifacts_preserves_existing_git_hook_mode(tmp_path: Pa
     assert [(status.kind, status.status) for status in statuses] == [("git", "current")]
 
 
+@pytest.mark.parametrize(
+    "lefthook_binary",
+    [
+        "/tmp/apex-ray-0-1-13-artifacts/node_modules/.bin/lefthook",
+        "/tmp/Apex Ray/apex-ray-release/bin/lefthook",
+        "/tmp/apex-ray artifacts/node_modules/.bin/lefthook",
+        r"C:\worktrees\apex-ray-release\lefthook.exe",
+    ],
+)
+def test_managed_hook_statuses_ignore_apex_ray_text_in_a_lefthook_wrapper_path(
+    tmp_path: Path,
+    lefthook_binary: str,
+) -> None:
+    git.run_git(["init"], cwd=tmp_path)
+    (tmp_path / "lefthook.yml").write_text(
+        'pre-push:\n  commands:\n    apex-ray-review:\n      run: "uvx --python 3.14 apex-ray@0.1.13 gate pre-push"\n',
+        encoding="utf-8",
+    )
+    git_hook = tmp_path / ".git" / "hooks" / "pre-push"
+    git_hook.write_text(
+        f'#!/bin/sh\nLEFTHOOK_BIN="{lefthook_binary}"\nexec "$LEFTHOOK_BIN" run pre-push "$@"\n',
+        encoding="utf-8",
+    )
+
+    statuses = managed_hook_statuses(tmp_path, runtime_version="0.1.13")
+
+    assert [(status.kind, status.status) for status in statuses] == [("lefthook", "current")]
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "/usr/local/bin/apex-ray gate pre-push",
+        "uvx --python 3.14 apex-ray@0.1.12 gate pre-push",
+        "bash scripts/apex-ray-pre-push.sh",
+    ],
+)
+def test_managed_hook_statuses_keep_detecting_custom_apex_ray_git_hooks(tmp_path: Path, command: str) -> None:
+    git.run_git(["init"], cwd=tmp_path)
+    git_hook = tmp_path / ".git" / "hooks" / "pre-push"
+    git_hook.write_text(f"#!/bin/sh\n{command}\n", encoding="utf-8")
+
+    statuses = managed_hook_statuses(tmp_path, runtime_version="0.1.13")
+
+    assert [(status.kind, status.status) for status in statuses] == [("git", "unmanaged")]
+
+
+def test_managed_hook_statuses_fail_closed_for_malformed_apex_ray_git_hook(tmp_path: Path) -> None:
+    git.run_git(["init"], cwd=tmp_path)
+    git_hook = tmp_path / ".git" / "hooks" / "pre-push"
+    git_hook.write_text('#!/bin/sh\nbash "scripts/apex-ray-pre-push.sh\n', encoding="utf-8")
+
+    statuses = managed_hook_statuses(tmp_path, runtime_version="0.1.13")
+
+    assert [(status.kind, status.status) for status in statuses] == [("git", "unmanaged")]
+
+
 def test_refresh_managed_artifacts_rejects_multiple_apex_hook_modes_before_writing(tmp_path: Path) -> None:
     git.run_git(["init"], cwd=tmp_path)
     init_project(tmp_path, hooks="git", runtime_version="0.1.12")

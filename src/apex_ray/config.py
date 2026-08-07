@@ -26,6 +26,7 @@ DEFAULT_BASE_BRANCH = "main"
 HOOK_MODES = {"lefthook", "git", "none"}
 AGENT_FILE_MODES = {"none", "codex", "claude", "both"}
 AGENT_ARTIFACT_TEMPLATE_VERSION = 4
+_LEFTHOOK_EXECUTABLE_NAMES = {"lefthook", "lefthook.bat", "lefthook.cmd", "lefthook.exe"}
 
 
 @dataclass(frozen=True)
@@ -1308,6 +1309,26 @@ def _managed_gate_command_state(command: Any, *, expected: str) -> str:
     return "unmanaged"
 
 
+def _contains_non_lefthook_apex_ray_reference(body: str) -> bool:
+    if "apex-ray" not in body.lower():
+        return False
+    lexer = shlex.shlex(body, posix=True, punctuation_chars=";&|()")
+    lexer.whitespace_split = True
+    lexer.commenters = ""
+    try:
+        tokens = list(lexer)
+    except ValueError:
+        return True
+    for token in tokens:
+        if "apex-ray" not in token.lower():
+            continue
+        executable_name = token.strip("\"'").replace("\\", "/").rsplit("/", 1)[-1].lower()
+        if executable_name in _LEFTHOOK_EXECUTABLE_NAMES:
+            continue
+        return True
+    return False
+
+
 def _replace_lefthook_run_scalar(path: Path, raw: str, command: str) -> str | None:
     try:
         document = yaml.compose(raw)
@@ -1519,11 +1540,12 @@ def _git_hook_status(root: Path, path: Path, *, expected: str) -> ManagedHookSta
     except (OSError, UnicodeError) as exc:
         return ManagedHookStatus(path, "git", "invalid", expected, reason=str(exc))
     expected_body = _managed_git_hook_body(expected)
+    has_apex_ray_reference = _contains_non_lefthook_apex_ray_reference(body)
     if (
         body != expected_body
         and body != LEGACY_GIT_HOOK_BODY
         and not _is_managed_git_hook(body)
-        and "apex-ray" not in body.lower()
+        and not has_apex_ray_reference
     ):
         return None
     try:
@@ -1552,7 +1574,7 @@ def _git_hook_status(root: Path, path: Path, *, expected: str) -> ManagedHookSta
             actual_command=actual,
             reason="managed command does not match the repository version lock" if state == "outdated" else "",
         )
-    if "apex-ray" in body.lower():
+    if has_apex_ray_reference:
         return ManagedHookStatus(
             path,
             "git",
