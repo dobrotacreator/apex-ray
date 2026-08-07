@@ -1,3 +1,4 @@
+import re
 import shutil
 from pathlib import Path, PureWindowsPath
 
@@ -579,6 +580,19 @@ def test_init_project_creates_team_setup_files(tmp_path: Path) -> None:
         "`uvx --python 3.14 apex-ray@0.1.13 gate pre-push`"
     ) in skill_text
     assert "uvx --python 3.14 apex-ray@0.1.13 review --continue-from .apex-ray/reports/review.json" in skill_text
+    assert "`llm_coverage.completion_status`" in skill_text
+    assert "`llm_coverage.coverage_todos`" in skill_text
+    assert "zero findings does not mean the whole diff was reviewed cleanly" in skill_text
+    assert "--only-pack" in skill_text
+    assert "--residual-priority" in skill_text
+    assert "--only-slice" in skill_text
+    assert "--until-complete --strict-coverage --llm" in skill_text
+    assert "--continue-from .apex-ray/reports/review.json" in skill_text
+    assert "--json .apex-ray/reports/review.json" in skill_text
+    assert "<report.json>" not in skill_text
+    assert "Completion covers only the selected reviewer" in skill_text
+    assert "run a fresh review" in skill_text
+    assert "do not raise caps or drain optional reviewer scopes solely to turn the status green" in skill_text
     assert "Do not bypass the configured pre-push gate by default" in skill_text
     assert "Use suppressions sparingly" in skill_text
     assert "Re-check stale findings before suppressing again" in skill_text
@@ -1397,10 +1411,39 @@ def test_init_project_can_skip_agent_skill_files(tmp_path: Path) -> None:
         f"do not proactively run `uvx --python 3.14 apex-ray@{__version__} review` or "
         f"`uvx --python 3.14 apex-ray@{__version__} gate pre-push`"
     ) in agents_text
+    assert "findings apply only to the reviewed scope" in agents_text
+    assert "`llm_coverage.coverage_todos`" in agents_text
+    assert "--until-complete --strict-coverage --llm" in agents_text
+    assert "--continue-from .apex-ray/reports/review.json" in agents_text
+    assert "<report.json>" not in agents_text
+    assert "completion is reviewer-scoped" in agents_text
+    assert "run a fresh review" in agents_text
     assert "$apex-ray" not in agents_text
     assert not (tmp_path / ".apex-ray" / "skills").exists()
     assert not (tmp_path / ".codex").exists()
     assert not (tmp_path / ".claude" / "skills").exists()
+
+
+def test_repository_agent_artifacts_match_the_current_templates_when_present() -> None:
+    root = Path(__file__).resolve().parents[1]
+    skill_path = root / ".apex-ray" / "skills" / "apex-ray" / "SKILL.md"
+    if not skill_path.exists():
+        pytest.skip("tracked agent artifacts are not included in the source distribution")
+
+    skill_text = skill_path.read_text(encoding="utf-8")
+    pinned_version = re.search(r"\bapex-ray@([^\s`]+) doctor\b", skill_text)
+    assert pinned_version is not None, "self artifacts must retain an auditable exact launcher"
+
+    statuses = agent_artifact_statuses(
+        root,
+        agent_files="both",
+        runtime_version=pinned_version.group(1),
+    )
+
+    assert statuses
+    assert all(status.status == "current" for status in statuses), [
+        (status.path.relative_to(root), status.status, status.reason) for status in statuses
+    ]
 
 
 def test_init_project_refuses_to_replace_existing_git_hook_without_force(tmp_path: Path) -> None:

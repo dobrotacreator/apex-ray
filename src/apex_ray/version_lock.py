@@ -151,10 +151,23 @@ def write_version_lock(root: Path, version: str) -> Path:
     return path
 
 
+def render_uvx_argv(version: str, *arguments: str) -> list[str]:
+    """Build the exact uvx launcher argv used by version-locked commands."""
+    canonical = _canonical_version(version, purpose="version")
+    return ["uvx", "--python", "3.14", f"apex-ray@{canonical}", *arguments]
+
+
+def publishable_runtime_version(version: str) -> str | None:
+    """Return a canonical package-index version, or None for source-only runtimes."""
+    try:
+        return _canonical_version(version, purpose="runtime")
+    except VersionLockError:
+        return None
+
+
 def render_uvx_command(version: str, *arguments: str) -> str:
     """Render the shell-safe exact uvx launcher used by managed artifacts."""
-    canonical = _canonical_version(version, purpose="version")
-    return shlex.join(["uvx", "--python", "3.14", f"apex-ray@{canonical}", *arguments])
+    return shlex.join(render_uvx_argv(version, *arguments))
 
 
 def _canonical_version(raw: str, *, purpose: str) -> str:

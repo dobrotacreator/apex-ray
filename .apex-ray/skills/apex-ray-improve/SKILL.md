@@ -1,7 +1,7 @@
 ---
 name: apex-ray-improve
 description: Use after merged PRs or review feedback to produce recommendation-only improvements for Apex Ray memory, rules, eval labels, telemetry, coverage, model routing, or config from PR comments, Greptile findings, Apex reports, and telemetry.
-apex_ray_template_version: 2
+apex_ray_template_version: 5
 ---
 
 # Apex Ray Improve
@@ -16,7 +16,7 @@ Run a post-merge learning pass. The goal is not to review the PR again; it is to
 - Collect PR signals with GitHub CLI when available: `gh pr view <number> --json number,title,state,mergedAt,mergeCommit,baseRefName,headRefName,author,comments,reviews,files,url` and review-thread comments from `gh api repos/<owner>/<repo>/pulls/<number>/comments --paginate`.
 - Separate Greptile comments, human comments, CI/bot comments, and author follow-up commits. Treat comments as evidence, not ground truth.
 - Inspect Apex Ray artifacts when present: `.apex-ray/reports/`, `.apex-ray/evals/cases/pr-<number>/`, `.apex-ray/evals/runs/*/pr-<number>/`, `.apex-ray/eval/labels/`, local review telemetry, and PR eval telemetry.
-- If a comparable eval case is missing and the user asked for a fresh analysis, capture or replay narrowly with `apex-ray eval capture-prs --pr <number>` and `apex-ray eval run-prs` rather than running a broad historical benchmark.
+- If a comparable eval case is missing and the user asked for a fresh analysis, capture or replay narrowly with `uvx --python 3.14 apex-ray@0.1.17 eval capture-prs --pr <number>` and `uvx --python 3.14 apex-ray@0.1.17 eval run-prs` rather than running a broad historical benchmark.
 - Compare external findings with Apex Ray findings. Call out missed issues, duplicate findings, false positives, findings outside scope, and true positives that Apex Ray found first.
 - Look for durable learning candidates: recurring domain invariants, security or money-movement bug patterns, known false positives, severity calibration, rule gaps, coverage gaps, oversized packs, token budget pressure, timeout/provider failures, and poor model routing.
 - Prefer small, reviewable suggestions. Draft memory/rule/config changes as proposals only; do not edit `.apex-ray/memory/`, `.apex-ray/rules/`, labels, or config unless the user explicitly asks to apply them.

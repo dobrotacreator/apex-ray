@@ -33,7 +33,7 @@ from apex_ray.models import (
     TargetMode,
 )
 from apex_ray.report import build_report, render_html, render_markdown
-from apex_ray.report.coverage import render_coverage_summary_lines
+from apex_ray.report.coverage import continue_command_for_pack, render_coverage_summary_lines
 from apex_ray.report.coverage_breakdown import pack_residual_priority
 
 
@@ -977,6 +977,24 @@ def test_shallow_only_high_risk_pack_has_an_actionable_deep_continuation_todo() 
     assert "--reviewer security" in todo.suggested_command
     assert "--include-reviewed --continue-review-depth deep" in todo.suggested_command
     assert "Reviewer assignment debt: P0 0, P1 0, P2 0" in render_coverage_summary_lines(report.llm_coverage)
+
+
+def test_continue_command_for_pack_can_use_the_locked_runtime_launcher() -> None:
+    command = continue_command_for_pack(
+        "src/auth.ts#authorize:1",
+        ".apex-ray/reports/pre-push.json",
+        "security",
+        json_output_path=".apex-ray/reports/pre-push.json",
+        review_depth_upgrade=True,
+        launcher_version="0.1.17",
+        platform_name="posix",
+    )
+
+    assert command == (
+        "uvx --python 3.14 apex-ray@0.1.17 review --continue-from .apex-ray/reports/pre-push.json "
+        "--only-pack 'src/auth.ts#authorize:1' --llm --reviewer security --include-reviewed "
+        "--continue-review-depth deep --json .apex-ray/reports/pre-push.json"
+    )
 
 
 def test_successful_reviewer_retry_clears_prior_review_and_verification_failures() -> None:

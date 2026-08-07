@@ -39,7 +39,7 @@ from apex_ray.config import (
     refresh_managed_artifacts as refresh_project_managed_artifacts,
 )
 from apex_ray.discovery import DiscoveryError, discover_project, discover_repo_root
-from apex_ray.invocation import ReviewOverrides, apply_review_overrides, render_shell_command
+from apex_ray.invocation import ReviewOverrides, apply_review_overrides, render_apex_ray_command
 from apex_ray.llm import LLMProviderError
 from apex_ray.llm.cache import cache_for_config
 from apex_ray.local_data import LOCAL_DATA_TOKEN, LocalDataPathError, resolve_config_path, resolve_runtime_config_paths
@@ -70,7 +70,7 @@ from apex_ray.report import (
     render_markdown,
     render_sarif,
 )
-from apex_ray.report.coverage import continue_command_for_pack, render_coverage_summary_lines
+from apex_ray.report.coverage import render_coverage_summary_lines, set_continue_commands
 from apex_ray.reviewers import ReviewerConfigError, effective_reviewers, llm_config_for_reviewer
 from apex_ray.telemetry import (
     TelemetryError,
@@ -589,13 +589,15 @@ def review(
     ] = None,
 ) -> None:
     """Inspect a diff and write markdown/JSON reports."""
+    launcher_version: str | None = None
     try:
         root = discover_repo_root(Path.cwd())
     except DiscoveryError as exc:
         raise typer.BadParameter(str(exc)) from exc
     if continue_from is None:
         try:
-            assert_version_lock(root, runtime_version=__version__)
+            lock_status = assert_version_lock(root, runtime_version=__version__)
+            launcher_version = lock_status.locked_version
             review_config, config_path = load_config(root, config)
         except (ConfigError, VersionLockError) as exc:
             raise typer.BadParameter(str(exc)) from exc
@@ -643,7 +645,8 @@ def review(
             raise typer.BadParameter(str(exc)) from exc
         root = Path(prior_report.project.root)
         try:
-            assert_version_lock(root, runtime_version=__version__)
+            lock_status = assert_version_lock(root, runtime_version=__version__)
+            launcher_version = lock_status.locked_version
         except VersionLockError as exc:
             raise typer.BadParameter(str(exc)) from exc
         if prior_report.input_snapshot is None:
@@ -837,6 +840,7 @@ def review(
                     report_config=report_config,
                     output=output,
                     json_output=json_output,
+                    launcher_version=launcher_version,
                 )
 
             completion_result = continue_review_until_complete(
@@ -864,7 +868,7 @@ def review(
     duration_ms = round((time.monotonic() - started_monotonic) * 1000)
     report.config = report_config
 
-    _set_continue_commands(report, json_output)
+    set_continue_commands(report, str(json_output), launcher_version=launcher_version)
 
     markdown_text = render_markdown(report)
     json_text = report.model_dump_json(indent=2)
@@ -914,6 +918,7 @@ def review(
         html_output=html_output,
         sarif_output=sarif_output,
         completion_reviewer_ids=completion_reviewer_ids,
+        launcher_version=launcher_version,
     )
     if completion_result is not None:
         if completion_result.complete:
@@ -942,6 +947,7 @@ def _render_review_stdout_summary(
     html_output: Path | None,
     sarif_output: Path | None,
     completion_reviewer_ids: list[str] | None,
+    launcher_version: str | None,
 ) -> None:
     completion_status = report.llm_coverage.completion_status
     headline = {
@@ -958,7 +964,6 @@ def _render_review_stdout_summary(
         scopes = _completion_command_scopes(report, completion_reviewer_ids)
         for scope in scopes:
             args = [
-                "apex-ray",
                 "review",
                 "--continue-from",
                 str(json_output),
@@ -975,7 +980,7 @@ def _render_review_stdout_summary(
                 args.extend(["--sarif", str(sarif_output)])
             for reviewer_id in scope:
                 args.extend(["--reviewer", reviewer_id])
-            command = render_shell_command(args)
+            command = render_apex_ray_command(args, launcher_version=launcher_version)
             if not scope:
                 label = "Continue"
             elif len(scope) == 1:
@@ -1032,28 +1037,17 @@ def _completion_command_scopes(
     return [[reviewer.id] for reviewer in reviewers]
 
 
-def _set_continue_commands(report: ReviewReport, json_output: Path) -> None:
-    depth_upgrade_ids = set(report.llm_coverage.shallow_only_high_risk_context_pack_ids)
-    for todo in report.llm_coverage.coverage_todos:
-        todo.suggested_command = continue_command_for_pack(
-            todo.context_pack_id,
-            str(json_output),
-            todo.reviewer_id,
-            json_output_path=str(json_output),
-            review_depth_upgrade=todo.context_pack_id in depth_upgrade_ids,
-        )
-
-
 def _write_intermediate_review_report(
     report: ReviewReport,
     *,
     report_config: ReviewConfig,
     output: Path,
     json_output: Path,
+    launcher_version: str | None,
 ) -> None:
     persisted = report.model_copy(deep=True)
     persisted.config = report_config
-    _set_continue_commands(persisted, json_output)
+    set_continue_commands(persisted, str(json_output), launcher_version=launcher_version)
     atomic_write_text(output, render_markdown(persisted))
     atomic_write_text(json_output, persisted.model_dump_json(indent=2))
 

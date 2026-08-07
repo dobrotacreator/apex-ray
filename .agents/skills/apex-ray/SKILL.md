@@ -1,1 +1,0 @@
-../../../.apex-ray/skills/apex-ray/SKILL.md

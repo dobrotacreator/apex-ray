@@ -18,7 +18,7 @@ try:
 except ImportError:  # pragma: no cover - fcntl is not available on Windows.
     fcntl = None
 
-from apex_ray import git
+from apex_ray import __version__, git
 from apex_ray.config import ConfigError, load_config
 from apex_ray.invocation import ReviewOverrides, apply_review_overrides
 from apex_ray.local_data import LocalDataPathError, resolve_runtime_config_paths
@@ -26,7 +26,6 @@ from apex_ray.models import (
     AnalyzerResult,
     LLMCoverageMode,
     LLMProviderName,
-    ReviewReport,
     TargetMode,
 )
 from apex_ray.pipeline import run_review_pipeline
@@ -90,7 +89,8 @@ from apex_ray.pr_eval.store import now_iso as _now_iso
 from apex_ray.pr_eval.store import pr_eval_label_path as pr_eval_label_path
 from apex_ray.pr_eval.store import write_pr_eval_label_templates as write_pr_eval_label_templates
 from apex_ray.report import render_markdown
-from apex_ray.report.coverage import continue_command_for_pack
+from apex_ray.report.coverage import set_continue_commands
+from apex_ray.version_lock import publishable_runtime_version
 
 DEFAULT_LABELS_DIR = ".apex-ray/eval/labels"
 DEFAULT_TELEMETRY_PATH = ".apex-ray/eval/telemetry/pr-eval-runs.jsonl"
@@ -585,18 +585,6 @@ def _replace_output_directory(source: Path, destination: Path) -> None:
     source.replace(destination)
 
 
-def _set_report_continue_commands(report: ReviewReport, report_json_path: Path) -> None:
-    depth_upgrade_ids = set(report.llm_coverage.shallow_only_high_risk_context_pack_ids)
-    for todo in report.llm_coverage.coverage_todos:
-        todo.suggested_command = continue_command_for_pack(
-            todo.context_pack_id,
-            str(report_json_path),
-            todo.reviewer_id,
-            json_output_path=str(report_json_path),
-            review_depth_upgrade=todo.context_pack_id in depth_upgrade_ids,
-        )
-
-
 @contextmanager
 def _git_worktree_lock(repo_root: Path):
     lock_path = _git_common_dir(repo_root) / "apex-ray-pr-eval-worktree.lock"
@@ -763,7 +751,11 @@ def _run_one_pr_eval_case(
 
     report_json_path = output_dir / "apex-report.json"
     report_md_path = output_dir / "apex-report.md"
-    _set_report_continue_commands(report, report_json_path)
+    set_continue_commands(
+        report,
+        str(report_json_path),
+        launcher_version=publishable_runtime_version(__version__),
+    )
     _atomic_write_text(report_json_path, report.model_dump_json(indent=2))
     _atomic_write_text(report_md_path, render_markdown(report))
 

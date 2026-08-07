@@ -11,6 +11,7 @@ from apex_ray.models import (
     LLMRoutingConfig,
     ReviewConfig,
 )
+from apex_ray.version_lock import render_uvx_argv
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,6 +46,18 @@ def render_shell_command(
     if (platform_name or os.name) == "nt":
         return "& " + " ".join(_quote_powershell_argument(arg) for arg in args)
     return shlex.join(args)
+
+
+def render_apex_ray_command(
+    args: Sequence[str],
+    *,
+    launcher_version: str | None = None,
+    platform_name: str | None = None,
+) -> str:
+    """Render an Apex Ray command with an exact uvx launcher when locked."""
+
+    launcher = render_uvx_argv(launcher_version) if launcher_version is not None else ["apex-ray"]
+    return render_shell_command([*launcher, *args], platform_name=platform_name)
 
 
 def _quote_powershell_argument(value: str) -> str:

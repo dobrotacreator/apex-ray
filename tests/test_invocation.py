@@ -2,7 +2,12 @@ import shlex
 from dataclasses import fields
 from pathlib import Path
 
-from apex_ray.invocation import ReviewOverrides, apply_review_overrides, render_shell_command
+from apex_ray.invocation import (
+    ReviewOverrides,
+    apply_review_overrides,
+    render_apex_ray_command,
+    render_shell_command,
+)
 from apex_ray.llm import review_config_for_pack
 from apex_ray.models import (
     ContextPack,
@@ -47,6 +52,46 @@ def test_render_shell_command_uses_powershell_safe_windows_arguments() -> None:
     assert rendered == (
         "& 'apex-ray' 'review' '--json' 'C:\\Work Dir\\reports&more\\review.json' "
         "'--only-pack' 'src/app.dart#it''s-ready:1'"
+    )
+
+
+def test_render_apex_ray_command_uses_exact_uvx_launcher_when_version_is_locked() -> None:
+    rendered = render_apex_ray_command(
+        ["review", "--only-pack", "pack with spaces"],
+        launcher_version="0.1.17",
+        platform_name="posix",
+    )
+
+    assert shlex.split(rendered) == [
+        "uvx",
+        "--python",
+        "3.14",
+        "apex-ray@0.1.17",
+        "review",
+        "--only-pack",
+        "pack with spaces",
+    ]
+
+
+def test_render_apex_ray_command_keeps_legacy_launcher_without_a_lock() -> None:
+    rendered = render_apex_ray_command(
+        ["review", "--only-pack", "pack with spaces"],
+        launcher_version=None,
+        platform_name="posix",
+    )
+
+    assert shlex.split(rendered) == ["apex-ray", "review", "--only-pack", "pack with spaces"]
+
+
+def test_render_apex_ray_command_quotes_exact_uvx_launcher_for_powershell() -> None:
+    rendered = render_apex_ray_command(
+        ["review", "--only-pack", "src/app.dart#it's-ready:1"],
+        launcher_version="0.1.17",
+        platform_name="nt",
+    )
+
+    assert rendered == (
+        "& 'uvx' '--python' '3.14' 'apex-ray@0.1.17' 'review' '--only-pack' 'src/app.dart#it''s-ready:1'"
     )
 
 

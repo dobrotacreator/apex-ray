@@ -16,6 +16,7 @@ from apex_ray.models import (
     Finding,
     FindingConfidence,
     FindingSeverity,
+    LLMCoverageTodo,
     ProjectProfile,
 )
 from apex_ray.pr_eval import (
@@ -801,13 +802,22 @@ review:
 
     def fake_run_review_pipeline(root, _diff_text, target_mode, runtime_config, **_kwargs):
         assert Path(runtime_config.llm.cache_dir).is_absolute()
-        return build_report(
+        report = build_report(
             ProjectProfile(root=str(root), is_git_repo=True),
             runtime_config,
             DiffSummary(target_mode=target_mode),
         )
+        report.llm_coverage.coverage_todos = [
+            LLMCoverageTodo(
+                context_pack_id="src/cart.ts#total:1",
+                file="src/cart.ts",
+                priority="p0",
+            )
+        ]
+        return report
 
     monkeypatch.setattr(pr_eval_runner, "run_review_pipeline", fake_run_review_pipeline)
+    monkeypatch.setattr(pr_eval_runner, "__version__", "0+unknown")
     output = tmp_path / "run"
 
     report = pr_eval.run_pr_eval_cases(
@@ -818,12 +828,16 @@ review:
     )
 
     assert report.failed == 0
-    report_config = json.loads((output / "pr-8" / "apex-report.json").read_text(encoding="utf-8"))["config"]
+    report_payload = json.loads((output / "pr-8" / "apex-report.json").read_text(encoding="utf-8"))
+    report_config = report_payload["config"]
     assert report_config["llm"]["cache_dir"] == expected_cache_dir
     assert report_config["reports"]["archive_dir"] == "${local_data}/reports/runs"
     assert report_config["triage"]["state_path"] == "${local_data}/triage/suppressions.json"
     assert report_config["triage"]["events_path"] == "${local_data}/triage/events.jsonl"
     assert str(tmp_path) not in json.dumps(report_config)
+    assert report_payload["llm_coverage"]["coverage_todos"][0]["suggested_command"].startswith(
+        "apex-ray review --continue-from"
+    )
 
 
 def test_quarantined_pr_eval_label_skips_pipeline(tmp_path: Path, monkeypatch) -> None:
