@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.15](https://github.com/dobrotacreator/apex-ray/compare/v0.1.14...v0.1.15) (2026-08-07)
+
+
+### Bug Fixes
+
+* **gate:** preserve pre-push base overrides ([#98](https://github.com/dobrotacreator/apex-ray/issues/98)) ([e67bef9](https://github.com/dobrotacreator/apex-ray/commit/e67bef9d8079387ada1bf14f15b23da86d38d500))
+
 ## [0.1.14](https://github.com/dobrotacreator/apex-ray/compare/v0.1.13...v0.1.14) (2026-08-07)
 
 
