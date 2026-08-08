@@ -10,6 +10,8 @@ from apex_ray.version_lock import (
     assert_version_lock,
     ensure_version_lock,
     inspect_version_lock,
+    publishable_runtime_version,
+    render_uvx_argv,
     render_uvx_command,
     write_version_lock,
 )
@@ -143,6 +145,25 @@ def test_render_uvx_command_uses_an_exact_version_and_quotes_arguments() -> None
     command = render_uvx_command("0.1.13", "review", "--only-pack", "pack with spaces")
 
     assert command == "uvx --python 3.14 apex-ray@0.1.13 review --only-pack 'pack with spaces'"
+
+
+def test_render_uvx_argv_returns_an_exact_unshellified_launcher() -> None:
+    argv = render_uvx_argv("0.1.13", "review", "--only-pack", "pack with spaces")
+
+    assert argv == [
+        "uvx",
+        "--python",
+        "3.14",
+        "apex-ray@0.1.13",
+        "review",
+        "--only-pack",
+        "pack with spaces",
+    ]
+
+
+def test_publishable_runtime_version_falls_back_for_source_only_metadata() -> None:
+    assert publishable_runtime_version("0.1.17") == "0.1.17"
+    assert publishable_runtime_version("0+unknown") is None
 
 
 def test_render_uvx_command_rejects_an_unsafe_version() -> None:

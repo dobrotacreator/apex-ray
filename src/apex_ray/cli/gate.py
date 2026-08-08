@@ -4,7 +4,7 @@ from typing import Annotated
 
 import typer
 
-from apex_ray import git
+from apex_ray import __version__, git
 from apex_ray.cli.common import (
     atomic_write_text,
     ensure_apex_ignore_for_outputs,
@@ -51,7 +51,7 @@ from apex_ray.report import (
     render_html,
     render_markdown,
 )
-from apex_ray.report.coverage import continue_command_for_pack
+from apex_ray.report.coverage import set_continue_commands
 from apex_ray.report.coverage_breakdown import pack_residual_priority
 from apex_ray.resolution import (
     context_pack_resolution_paths,
@@ -71,6 +71,7 @@ from apex_ray.triage import (
     render_triage_snapshot,
     write_triage_state,
 )
+from apex_ray.version_lock import VersionLockError, assert_version_lock
 
 gate_app = typer.Typer(help="Run configured Apex Ray quality gates.")
 _RESOLUTION_CALL_BUDGET_REASON = "Resolution call budget exhausted for this retry; the finding remains blocking."
@@ -351,8 +352,9 @@ def pre_push(
     """Run the configured pre-push review gate and block on policy failures."""
     try:
         root = discover_repo_root(Path.cwd())
+        lock_status = assert_version_lock(root, runtime_version=__version__)
         review_config, config_path = load_config(root, config)
-    except (ConfigError, DiscoveryError) as exc:
+    except (ConfigError, DiscoveryError, VersionLockError) as exc:
         raise typer.BadParameter(str(exc)) from exc
     report_config = review_config.model_copy(deep=True)
     try:
@@ -597,7 +599,7 @@ def pre_push(
     report.config = report_config
 
     progress.event("writing reports", force=True)
-    _set_continue_commands(report, json_output)
+    set_continue_commands(report, str(json_output), launcher_version=lock_status.locked_version)
     previous_decision = evaluate_pre_push_gate(previous_report, gate_config) if previous_report else None
     current_decision = evaluate_pre_push_gate(report, gate_config)
     suppressed_findings: list[SuppressedFinding] = []
@@ -867,18 +869,6 @@ def _load_previous_report(path: Path) -> ReviewReport | None:
         return load_review_report(path)
     except OSError, ReviewReportLoadError:
         return None
-
-
-def _set_continue_commands(report: ReviewReport, json_output: Path) -> None:
-    depth_upgrade_ids = set(report.llm_coverage.shallow_only_high_risk_context_pack_ids)
-    for todo in report.llm_coverage.coverage_todos:
-        todo.suggested_command = continue_command_for_pack(
-            todo.context_pack_id,
-            str(json_output),
-            todo.reviewer_id,
-            json_output_path=str(json_output),
-            review_depth_upgrade=todo.context_pack_id in depth_upgrade_ids,
-        )
 
 
 def _retry_coverage_report(

@@ -1,7 +1,7 @@
 ---
 name: apex-ray
 description: Use when running or configuring Apex Ray local code reviews, interpreting reports, continuing partial reviews, tuning rules, memory, telemetry, or historical PR evals.
-apex_ray_template_version: 2
+apex_ray_template_version: 5
 ---
 
 # Apex Ray
@@ -12,20 +12,27 @@ Apex Ray is the project's local diff-aware AI review tool. Use it to create dete
 
 ## Process
 
-- Run `apex-ray doctor` when setup, config, provider, or analyzer state is uncertain.
-- When Apex Ray is configured in a pre-push hook, do not proactively run `apex-ray review` or `apex-ray gate pre-push` as a routine final verification step; let `git push` invoke the hook so the pre-push incremental retry state remains the source of truth.
-- For deterministic local review outside pre-push, run `apex-ray review --no-llm` only when the user asks or when diagnosing Apex Ray; default reports are written under `.apex-ray/reports/`.
-- When the user asks, the hook is unavailable, or explicit pre-push gate parity is needed before pushing, run `apex-ray gate pre-push`; blocking findings and critical partial coverage are printed to stdout and the full report is written under `.apex-ray/reports/`.
-- Do not bypass the configured pre-push gate by default. Use `apex-ray findings suppress` only for confirmed local false positives after checking the finding evidence, current code, and relevant tests or invariants. Provide a concrete objective reason; do not suppress uncertain findings, real defects, or findings merely to get a push through.
+- Run `uvx --python 3.14 apex-ray@0.1.17 doctor` when setup, config, provider, or analyzer state is uncertain.
+- When Apex Ray is configured in a pre-push hook, do not proactively run `uvx --python 3.14 apex-ray@0.1.17 review` or `uvx --python 3.14 apex-ray@0.1.17 gate pre-push` as a routine final verification step; let `git push` invoke the hook so the pre-push incremental retry state remains the source of truth.
+- For deterministic local review outside pre-push, run `uvx --python 3.14 apex-ray@0.1.17 review --no-llm` only when the user asks or when diagnosing Apex Ray; default reports are written under `.apex-ray/reports/`.
+- When the user asks, the hook is unavailable, or explicit pre-push gate parity is needed before pushing, run `uvx --python 3.14 apex-ray@0.1.17 gate pre-push`; blocking findings and critical partial coverage are printed to stdout and the full report is written under `.apex-ray/reports/`.
+- Do not bypass the configured pre-push gate by default. Use `uvx --python 3.14 apex-ray@0.1.17 findings suppress` only for confirmed local false positives after checking the finding evidence, current code, and relevant tests or invariants. Provide a concrete objective reason; do not suppress uncertain findings, real defects, or findings merely to get a push through.
 - If bypassing is unavoidable, explain why and name the equivalent checks or review already run.
 - Use `--no-llm` or `.apex-ray/config.local.yml` when the configured local provider is unavailable or LLM cost is not appropriate.
-- If a report has partial coverage, continue unreviewed work with `apex-ray review --continue-from .apex-ray/reports/review.json --residual-priority p0 --llm` or review a specific skipped pack with `--only-pack`.
 - Use `.apex-ray/config.yml` for shared team policy and `.apex-ray/config.local.yml` for personal provider/model/cost overrides.
 - Use `.apex-ray/rules/` for stable review rules and `.apex-ray/memory/` for curated team learning.
-- Use `apex-ray telemetry-summary` when tuning cost, latency, coverage, or model routing.
+- Use `uvx --python 3.14 apex-ray@0.1.17 telemetry-summary` when tuning cost, latency, coverage, or model routing.
 - Treat `.apex-ray/reports/*.md/json/html` as latest snapshots. Archived run reports live under configured local data when `review.reports.archive: true`.
 - Treat `.apex-ray/triage/` as local ephemeral finding state and audit events; do not commit raw suppressions.
-- Use `apex-ray eval capture-prs` and `apex-ray eval run-prs` only for historical PR benchmark/eval work.
+- Use `uvx --python 3.14 apex-ray@0.1.17 eval capture-prs` and `uvx --python 3.14 apex-ray@0.1.17 eval run-prs` only for historical PR benchmark/eval work.
+
+### Coverage And Continuation
+
+- Findings apply only to the reviewed scope. Before describing a diff as clean, inspect `llm_coverage.completion_status`, unique context-pack coverage, reviewer-assignment coverage, and `llm_coverage.coverage_todos`. For `partial` or `incomplete`, state the material remaining debt; zero findings does not mean the whole diff was reviewed cleanly.
+- Read the full JSON `coverage_todos`: each item identifies the pack, reason, `suggested_command`, and reviewer when applicable. Prefer that targeted command, or deliberately select unreviewed debt with `uvx --python 3.14 apex-ray@0.1.17 review --continue-from .apex-ray/reports/review.json --residual-priority p0 --llm`, repeatable `--only-pack`, or `--only-slice`. An ordinary continuation is one budgeted pass and may need to be repeated.
+- Continue when the user asks, the gate or team policy requires it, or material uncovered risk remains. Prefer P0, high-risk, and exact-pack work, respect configured budgets, and do not raise caps or drain optional reviewer scopes solely to turn the status green.
+- When one baseline reviewer scope must finish, run `uvx --python 3.14 apex-ray@0.1.17 review --continue-from .apex-ray/reports/review.json --reviewer '<baseline-reviewer-id>' --until-complete --strict-coverage --llm --json .apex-ray/reports/review.json`. `--strict-coverage` exits non-zero if bounded completion cannot finish. Completion covers only the selected reviewer's matching assignments; a completed specialist scope does not imply global completion. Use an unfiltered baseline reviewer when the whole reviewable diff must be covered, then re-check report-level coverage.
+- Continuation validates the saved review target. If Apex Ray rejects a stale or changed target, run a fresh review instead of reusing archived packs.
 
 ## Outputs
 
@@ -40,8 +47,8 @@ Do not treat Apex Ray as a replacement for tests, linters, typecheck, CI, depend
 When a pre-push finding is a confirmed local false positive, suppress the specific finding locally instead of bypassing the hook:
 
 ```bash
-apex-ray findings list --from-report .apex-ray/reports/pre-push.json
-apex-ray findings suppress apex-ID \
+uvx --python 3.14 apex-ray@0.1.17 findings list --from-report .apex-ray/reports/pre-push.json
+uvx --python 3.14 apex-ray@0.1.17 findings suppress apex-ID \
   --from-report .apex-ray/reports/pre-push.json \
   --reason "The repository layer already enforces this invariant."
 ```
@@ -53,7 +60,7 @@ Triage state is local and ignored by default. It is intended for frequent local 
 Useful cleanup commands:
 
 ```bash
-apex-ray findings suppressions
-apex-ray findings unsuppress sup-ID
-apex-ray findings prune
+uvx --python 3.14 apex-ray@0.1.17 findings suppressions
+uvx --python 3.14 apex-ray@0.1.17 findings unsuppress sup-ID
+uvx --python 3.14 apex-ray@0.1.17 findings prune
 ```

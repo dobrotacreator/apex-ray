@@ -46,6 +46,7 @@ from apex_ray.models import (
 )
 from apex_ray.pipeline.snapshot import capture_review_input_snapshot, validate_review_input_snapshot
 from apex_ray.report import build_report
+from apex_ray.version_lock import write_version_lock
 
 runner = CliRunner()
 FIXTURE_DIR = Path(__file__).parent / "fixtures"
@@ -2102,6 +2103,7 @@ review:
 """.lstrip(),
         encoding="utf-8",
     )
+    write_version_lock(tmp_path, __version__)
     packs = [
         ContextPack(
             id="src/auth/session.ts#authorize:1",
@@ -2211,18 +2213,28 @@ review:
     report_path = tmp_path / ".apex-ray" / "reports" / "pre-push.json"
     blocked_report = json.loads(report_path.read_text(encoding="utf-8"))
     suggested = blocked_report["llm_coverage"]["coverage_todos"][0]["suggested_command"]
+    suggested_args = shlex.split(suggested)
 
     assert first.exit_code == 1
+    assert suggested_args[:4] == ["uvx", "--python", "3.14", f"apex-ray@{__version__}"]
+    assert f"uvx --python 3.14 apex-ray@{__version__} review --continue-from" in first.stdout
     assert f"--json {shlex.quote(str(report_path))}" in suggested
 
-    first_continuation = runner.invoke(app, shlex.split(suggested)[1:], catch_exceptions=False)
+    blocked_report["llm_coverage"]["coverage_todos"][0]["suggested_command"] = (
+        "apex-ray review --continue-from legacy.json --only-pack legacy"
+    )
+    report_path.write_text(json.dumps(blocked_report, indent=2), encoding="utf-8")
+
+    first_continuation = runner.invoke(app, suggested_args[4:], catch_exceptions=False)
     continued_report = json.loads(report_path.read_text(encoding="utf-8"))
     second_suggested = continued_report["llm_coverage"]["coverage_todos"][0]["suggested_command"]
+    second_suggested_args = shlex.split(second_suggested)
 
     assert first_continuation.exit_code == 0
+    assert second_suggested_args[:4] == ["uvx", "--python", "3.14", f"apex-ray@{__version__}"]
     assert f"--json {shlex.quote(str(report_path))}" in second_suggested
 
-    second_continuation = runner.invoke(app, shlex.split(second_suggested)[1:], catch_exceptions=False)
+    second_continuation = runner.invoke(app, second_suggested_args[4:], catch_exceptions=False)
     second = runner.invoke(app, ["gate", "pre-push"], catch_exceptions=False)
     state = json.loads((tmp_path / ".apex-ray" / "reports" / "pre-push-state.json").read_text(encoding="utf-8"))
 
@@ -4431,11 +4443,15 @@ review:
     assert seen == {"root": 5, "reviewers": [5, 5]}
 
 
+@pytest.mark.parametrize("use_version_lock", [True, False], ids=["locked", "unlocked"])
 def test_review_partial_summary_is_explicit_without_changing_default_exit_code(
     tmp_path: Path,
     monkeypatch,
+    use_version_lock: bool,
 ) -> None:
     monkeypatch.chdir(tmp_path)
+    if use_version_lock:
+        write_version_lock(tmp_path, __version__)
     patch = tmp_path / "sample.diff"
     patch.write_text((FIXTURE_DIR / "sample.diff").read_text(encoding="utf-8"), encoding="utf-8")
     config_path = tmp_path / "config.yml"
@@ -4496,6 +4512,8 @@ review:
     assert "--reviewer correctness" in result.stdout
     assert "Continue reviewer security:" in result.stdout
     assert "--reviewer security" in result.stdout
+    launcher = f"uvx --python 3.14 apex-ray@{__version__}" if use_version_lock else "apex-ray"
+    assert f"{launcher} review --continue-from" in result.stdout
     assert f"--output {markdown_output}" in result.stdout
     assert f"--json {json_output}" in result.stdout
     assert f"--html {html_output}" in result.stdout

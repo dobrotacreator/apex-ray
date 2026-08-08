@@ -8,7 +8,7 @@ from apex_ray.findings import (
     unresolved_verification_candidate_pack_ids,
     verification_candidates_by_reviewer_pack,
 )
-from apex_ray.invocation import render_shell_command
+from apex_ray.invocation import render_apex_ray_command
 from apex_ray.llm.usage import aggregate_actual_usage
 from apex_ray.models import (
     ContextPack,
@@ -23,6 +23,7 @@ from apex_ray.models import (
     LLMRouteSummary,
     LLMRun,
     ReviewConfig,
+    ReviewReport,
 )
 from apex_ray.report.coverage_breakdown import (
     _build_file_coverage,
@@ -1128,9 +1129,10 @@ def continue_command_for_pack(
     *,
     json_output_path: str | None = None,
     review_depth_upgrade: bool = False,
+    launcher_version: str | None = None,
+    platform_name: str | None = None,
 ) -> str:
     args = [
-        "apex-ray",
         "review",
         "--continue-from",
         report_path,
@@ -1144,4 +1146,28 @@ def continue_command_for_pack(
         args.extend(["--include-reviewed", "--continue-review-depth", "deep"])
     if json_output_path is not None:
         args.extend(["--json", json_output_path])
-    return render_shell_command(args)
+    return render_apex_ray_command(
+        args,
+        launcher_version=launcher_version,
+        platform_name=platform_name,
+    )
+
+
+def set_continue_commands(
+    report: ReviewReport,
+    report_path: str,
+    *,
+    launcher_version: str | None = None,
+) -> None:
+    """Populate actionable per-pack commands for the concrete report path."""
+
+    depth_upgrade_ids = set(report.llm_coverage.shallow_only_high_risk_context_pack_ids)
+    for todo in report.llm_coverage.coverage_todos:
+        todo.suggested_command = continue_command_for_pack(
+            todo.context_pack_id,
+            report_path,
+            todo.reviewer_id,
+            json_output_path=report_path,
+            review_depth_upgrade=todo.context_pack_id in depth_upgrade_ids,
+            launcher_version=launcher_version,
+        )
