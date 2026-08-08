@@ -2,6 +2,7 @@ import tomllib
 from pathlib import Path
 
 import pytest
+import yaml
 
 from apex_ray.classify import classify_diff
 from apex_ray.config import load_config
@@ -57,6 +58,8 @@ def test_repository_self_review_config_loads_without_local_overrides() -> None:
     config, loaded_path = load_config(REPO_ROOT, config_path)
 
     assert loaded_path == config_path
+    assert config.base == "origin/main"
+    assert config.gates.pre_push.fetch_base is True
     assert config.llm.max_packs < 96
     assert config.llm.max_deep_packs is not None
     assert config.llm.max_deep_packs < 64
@@ -65,6 +68,26 @@ def test_repository_self_review_config_loads_without_local_overrides() -> None:
         "security",
         "typescript",
     }
+
+
+def test_repository_self_hosting_hook_runs_locked_source_runtime_directly() -> None:
+    hook_path = REPO_ROOT / "lefthook.yml"
+    if not hook_path.exists():
+        pytest.skip("tracked self-hosting hook is not included in the source distribution")
+    hook_config = yaml.safe_load(hook_path.read_text(encoding="utf-8"))
+
+    command = hook_config["pre-push"]["commands"]["apex-ray-review"]["run"]
+
+    assert command == "uv run --locked apex-ray gate pre-push"
+    assert not (REPO_ROOT / "scripts" / "apex-ray-pre-push.sh").exists()
+
+
+def test_repository_source_runtime_marker_forces_lf_checkouts() -> None:
+    attributes_path = REPO_ROOT / ".gitattributes"
+    if not attributes_path.exists():
+        pytest.skip("tracked checkout attributes are not included in the source distribution")
+
+    assert ".apex-ray/runtime text eol=lf" in attributes_path.read_text(encoding="utf-8").splitlines()
 
 
 @pytest.mark.parametrize(
@@ -113,6 +136,12 @@ def test_repository_self_review_config_loads_without_local_overrides() -> None:
             "compatibility",
         ),
         (
+            "tests/test_repository_runtime.py",
+            FileKind.TEST,
+            "configuration-and-report-contract",
+            "compatibility",
+        ),
+        (
             "tests/test_local_data.py",
             FileKind.TEST,
             "configuration-and-report-contract",
@@ -156,6 +185,12 @@ def test_repository_self_review_config_loads_without_local_overrides() -> None:
         ),
         (
             "src/apex_ray/rules.py",
+            FileKind.SOURCE,
+            "configuration-and-report-contract",
+            "compatibility",
+        ),
+        (
+            "src/apex_ray/repository_runtime.py",
             FileKind.SOURCE,
             "configuration-and-report-contract",
             "compatibility",

@@ -89,7 +89,35 @@ its ignored paths or paths outside the repository.
 
 ## Agent Artifact Refresh
 
-`apex-ray init` writes `.apex-ray/version` as the repository's single Apex Ray version lock. Generated hooks and agent instructions embed that exact version with `uvx --python 3.14 apex-ray@<version> ...`; they never evaluate the lock as shell code. A matching lock is enforced before operational commands start. Legacy repositories without a lock continue to run for backward compatibility until they are migrated, while malformed and mismatched locks fail with an exact `uvx` remediation command.
+The repository records one of two mutually exclusive managed runtime modes:
+
+- Consumer repositories commit `.apex-ray/version` with one exact published
+  version. Hooks and agent instructions use
+  `uvx --python 3.14 apex-ray@<version> ...`.
+- The Apex Ray source checkout can instead commit `.apex-ray/runtime` with the
+  exact contents `source\n`. Its hooks and instructions use
+  `uv run --locked apex-ray ...` so they exercise the current checkout.
+
+The two files must never coexist. Malformed metadata, conflicting files, a
+mismatched consumer version, or a source command running code from another
+installation fails before review work or managed writes begin. Metadata is
+validated as data and is never evaluated as shell code.
+
+`apex-ray init --runtime source|locked` explicitly selects a mode. Without the
+option, init preserves an existing mode; a new or legacy repository defaults to
+`locked`. A mode change never silently deletes the other tracked metadata file,
+so remove an obsolete file deliberately before switching. Source mode rejects
+`--update-version-lock` because it has no package-version lock.
+
+Source mode is intended for developing Apex Ray itself. It requires `uv`, a
+repository `pyproject.toml`, a current `uv.lock`, and an active `apex_ray`
+package loaded from that checkout's `src/apex_ray`. The locked uv project makes
+dependency drift fail closed, while the version-free launcher means a release
+version bump does not make the self-review hook and generated skills stale.
+
+Repositories with neither metadata file retain the legacy bare `apex-ray`
+launcher for backward compatibility. The next normal init or managed migration
+adopts locked consumer mode unless source mode is selected explicitly.
 
 `uvx` downloads a cold exact tool version from the package index, then reuses uv's tool cache on later runs. Install `uv` on developer and CI machines and pre-warm the pinned command where cold-start latency or offline pushes matter.
 
@@ -100,6 +128,13 @@ Refresh only the managed agent artifacts without touching config or hooks:
 ```bash
 apex-ray init --refresh-agent-artifacts --dry-run
 apex-ray init --refresh-agent-artifacts
+```
+
+In an Apex Ray source checkout, use the source launcher for the same operation:
+
+```bash
+uv run --locked apex-ray init --refresh-agent-artifacts --dry-run
+uv run --locked apex-ray init --refresh-agent-artifacts
 ```
 
 The refresh preserves user-authored text outside the `<!-- APEX_RAY_START -->` / `<!-- APEX_RAY_END -->` block and refreshes generated skills. For Codex, it also migrates legacy file-level `SKILL.md` symlinks to discoverable skill-directory symlinks, with a full directory-copy fallback on systems where symlinks are unavailable. If Git checks out a tracked directory symlink as its regular-file placeholder (`core.symlinks=false`), refresh repairs only an exact managed target whose index mode is still `120000`; unrelated regular files remain conflicts and are never overwritten. Refresh does not run automatically during review or pre-push, so Apex Ray never changes the working tree while evaluating a diff.
@@ -118,7 +153,20 @@ uvx --python 3.14 apex-ray@"${APEX_RAY_TARGET_VERSION}" init \
   --refresh-managed-artifacts --update-version-lock
 ```
 
-The upgrade preflights the lock, hook, agent blocks, and skills before writing; it updates the lock last. It preserves the repository's existing Apex Ray Git or Lefthook mode when `--hooks` is omitted, and exact legacy generated hooks are migrated automatically. Custom, ambiguous, or duplicate Apex Ray hooks fail closed with manual-remediation guidance instead of being overwritten or causing two reviews. `doctor` checks lock/runtime agreement, exact managed hooks, `uvx` availability, and agent artifact freshness.
+The upgrade preflights the runtime metadata, hook, agent blocks, and skills
+before writing; a consumer upgrade updates the lock last. It preserves the
+repository's runtime and existing Apex Ray Git or Lefthook mode when the
+corresponding options are omitted. In source mode the same refresh is run with
+`uv run --locked apex-ray` and preserves `.apex-ray/runtime` without creating a
+version lock. Repeating a current refresh is a no-op, including across source
+package version bumps.
+
+Exact legacy generated hooks are migrated automatically. Custom, ambiguous, or
+duplicate Apex Ray hooks fail closed with manual-remediation guidance instead
+of being overwritten or causing two reviews. `doctor` checks the selected
+runtime, exact managed hook, and agent artifact freshness. It checks `uvx` and
+version agreement for locked consumers; for source mode it checks `uv`, the uv
+project files, and that the running package comes from the current checkout.
 
 Apex Ray versions released before version-lock support cannot enforce a future lock themselves. The generated exact `uvx` hook is therefore the execution guarantee after migration. Publish the target Apex Ray version before merging downstream lock/hook updates that reference it.
 

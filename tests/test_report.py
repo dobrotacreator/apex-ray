@@ -1,4 +1,5 @@
 from apex_ray.gates import evaluate_pre_push_gate
+from apex_ray.invocation import ApexRayLauncher
 from apex_ray.models import (
     AnalyzerResult,
     AnalyzerSymbol,
@@ -995,6 +996,19 @@ def test_continue_command_for_pack_can_use_the_locked_runtime_launcher() -> None
         "--only-pack 'src/auth.ts#authorize:1' --llm --reviewer security --include-reviewed "
         "--continue-review-depth deep --json .apex-ray/reports/pre-push.json"
     )
+
+
+def test_continue_command_for_pack_can_use_the_source_runtime_launcher() -> None:
+    command = continue_command_for_pack(
+        "src/auth.ts#authorize:1",
+        ".apex-ray/reports/pre-push.json",
+        "security",
+        launcher=ApexRayLauncher.source(),
+        platform_name="posix",
+    )
+
+    assert command.startswith("uv run --locked apex-ray review --continue-from .apex-ray/reports/pre-push.json ")
+    assert "--only-pack 'src/auth.ts#authorize:1' --llm --reviewer security" in command
 
 
 def test_successful_reviewer_retry_clears_prior_review_and_verification_failures() -> None:

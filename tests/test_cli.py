@@ -46,6 +46,7 @@ from apex_ray.models import (
 )
 from apex_ray.pipeline.snapshot import capture_review_input_snapshot, validate_review_input_snapshot
 from apex_ray.report import build_report
+from apex_ray.repository_runtime import assert_repository_runtime, inspect_repository_runtime
 from apex_ray.version_lock import write_version_lock
 
 runner = CliRunner()
@@ -55,6 +56,31 @@ _RICH_FRAME_CHARS = str.maketrans({ord(char): " " for char in "\u2500\u2502\u256
 _GATE_HEAD_1 = "1" * 40
 _GATE_HEAD_2 = "2" * 40
 _GATE_MERGE_BASE = "a" * 40
+
+
+def _assert_fixture_source_runtime(root: Path, *, runtime_version: str):
+    return assert_repository_runtime(
+        root,
+        runtime_version=runtime_version,
+        active_package_dir=root / "src" / "apex_ray",
+    )
+
+
+def _prepare_fixture_source_checkout(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (root / "src" / "apex_ray").mkdir(parents=True, exist_ok=True)
+    (root / "pyproject.toml").write_text(
+        '[project]\nname = "source-project"\nversion = "0.0.0"\nrequires-python = ">=3.14"\ndependencies = []\n',
+        encoding="utf-8",
+    )
+    (root / "uv.lock").write_text(
+        'version = 1\nrevision = 3\nrequires-python = ">=3.14"\n\n'
+        '[[package]]\nname = "source-project"\nversion = "0.0.0"\nsource = { virtual = "." }\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "apex_ray.config.assert_source_runtime_checkout",
+        lambda checkout: checkout / "src" / "apex_ray",
+    )
 
 
 def test_atomic_write_removes_partial_temporary_file_when_write_fails(
@@ -287,6 +313,42 @@ def test_init_refresh_managed_artifacts_explicitly_updates_a_mismatched_lock(
     assert lock.read_text(encoding="utf-8") == f"{__version__}\n"
 
 
+def test_init_source_runtime_is_idempotent_and_never_creates_a_version_lock(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    _prepare_fixture_source_checkout(tmp_path, monkeypatch)
+
+    initialized = runner.invoke(app, ["init", "--runtime", "source"], catch_exceptions=False)
+    monkeypatch.setattr("apex_ray.cli.main.assert_repository_runtime", _assert_fixture_source_runtime)
+    refreshed = runner.invoke(app, ["init", "--refresh-managed-artifacts"], catch_exceptions=False)
+
+    assert initialized.exit_code == 0
+    assert refreshed.exit_code == 0
+    assert "already current" in refreshed.stdout
+    assert (tmp_path / ".apex-ray" / "runtime").read_text(encoding="utf-8") == "source\n"
+    assert not (tmp_path / ".apex-ray" / "version").exists()
+    assert "uv run --locked apex-ray gate pre-push" in (tmp_path / "lefthook.yml").read_text(encoding="utf-8")
+    assert "uv run --locked apex-ray doctor" in (tmp_path / ".apex-ray" / "skills" / "apex-ray" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
+
+
+def test_init_source_runtime_rejects_version_lock_updates(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    _prepare_fixture_source_checkout(tmp_path, monkeypatch)
+    assert runner.invoke(app, ["init", "--runtime", "source"], catch_exceptions=False).exit_code == 0
+    monkeypatch.setattr("apex_ray.cli.main.assert_repository_runtime", _assert_fixture_source_runtime)
+
+    result = runner.invoke(
+        app,
+        ["init", "--refresh-managed-artifacts", "--update-version-lock"],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 2
+    assert "cannot be used with the source repository runtime" in _plain_cli_output(result.output)
+    assert not (tmp_path / ".apex-ray" / "version").exists()
+
+
 def test_doctor_reports_local_config(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
     (tmp_path / ".apex-ray").mkdir()
@@ -303,6 +365,135 @@ def test_doctor_reports_local_config(tmp_path: Path, monkeypatch) -> None:
     assert "- Go available:" in result.stdout
     assert "- Go analyzer:" in result.stdout
     assert "- Go analyzer available:" in result.stdout
+
+
+def test_doctor_accepts_a_current_source_runtime_without_uvx(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    _prepare_fixture_source_checkout(tmp_path, monkeypatch)
+    assert runner.invoke(app, ["init", "--runtime", "source"], catch_exceptions=False).exit_code == 0
+
+    def inspect_current_source(root: Path, *, runtime_version: str):
+        return inspect_repository_runtime(
+            root,
+            runtime_version=runtime_version,
+            active_package_dir=root / "src" / "apex_ray",
+        )
+
+    real_which = shutil.which
+    monkeypatch.setattr("apex_ray.cli.main.inspect_repository_runtime", inspect_current_source)
+    monkeypatch.setattr(
+        "apex_ray.cli.main.shutil.which",
+        lambda command: None if command == "uvx" else real_which(command),
+    )
+
+    result = runner.invoke(app, ["doctor"], catch_exceptions=False)
+
+    assert result.exit_code == 0
+    assert "- Runtime mode: source" in result.stdout
+    assert "- Version lock: not applicable (source checkout)" in result.stdout
+    assert "- uv available: true" in result.stdout
+    assert "- Source checkout: current" in result.stdout
+    assert "- Managed hooks: current" in result.stdout
+    assert "- Agent artifacts: current" in result.stdout
+    assert "Version lock remediation" not in result.stdout
+
+
+def test_doctor_rejects_a_source_runtime_without_uv(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    _prepare_fixture_source_checkout(tmp_path, monkeypatch)
+    assert runner.invoke(app, ["init", "--runtime", "source"], catch_exceptions=False).exit_code == 0
+
+    def inspect_current_source(root: Path, *, runtime_version: str):
+        return inspect_repository_runtime(
+            root,
+            runtime_version=runtime_version,
+            active_package_dir=root / "src" / "apex_ray",
+        )
+
+    real_which = shutil.which
+    monkeypatch.setattr("apex_ray.cli.main.inspect_repository_runtime", inspect_current_source)
+    monkeypatch.setattr(
+        "apex_ray.cli.main.shutil.which",
+        lambda command: None if command == "uv" else real_which(command),
+    )
+
+    result = runner.invoke(app, ["doctor"], catch_exceptions=False)
+
+    assert result.exit_code == 1
+    assert "- uv available: false" in result.stdout
+    assert "- Managed hooks: current" in result.stdout
+
+
+def test_doctor_rejects_a_stale_source_uv_lock(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    _prepare_fixture_source_checkout(tmp_path, monkeypatch)
+    assert runner.invoke(app, ["init", "--runtime", "source"], catch_exceptions=False).exit_code == 0
+    (tmp_path / "uv.lock").write_text("", encoding="utf-8")
+
+    def inspect_current_source(root: Path, *, runtime_version: str):
+        return inspect_repository_runtime(
+            root,
+            runtime_version=runtime_version,
+            active_package_dir=root / "src" / "apex_ray",
+        )
+
+    monkeypatch.setattr("apex_ray.cli.main.inspect_repository_runtime", inspect_current_source)
+
+    result = runner.invoke(app, ["doctor"], catch_exceptions=False)
+
+    assert result.exit_code == 1
+    assert "- Source uv.lock synchronized: false" in result.stdout
+    assert "up-to-date uv.lock" in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("missing_name", "expected_line"),
+    [
+        ("pyproject.toml", "- Source pyproject.toml: false"),
+        ("uv.lock", "- Source uv.lock: false"),
+    ],
+)
+def test_doctor_rejects_incomplete_source_project_metadata(
+    tmp_path: Path,
+    monkeypatch,
+    missing_name: str,
+    expected_line: str,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _prepare_fixture_source_checkout(tmp_path, monkeypatch)
+    assert runner.invoke(app, ["init", "--runtime", "source"], catch_exceptions=False).exit_code == 0
+    (tmp_path / missing_name).unlink()
+
+    def inspect_current_source(root: Path, *, runtime_version: str):
+        return inspect_repository_runtime(
+            root,
+            runtime_version=runtime_version,
+            active_package_dir=root / "src" / "apex_ray",
+        )
+
+    monkeypatch.setattr("apex_ray.cli.main.inspect_repository_runtime", inspect_current_source)
+
+    result = runner.invoke(app, ["doctor"], catch_exceptions=False)
+
+    assert result.exit_code == 1
+    assert expected_line in result.stdout
+
+
+def test_doctor_rejects_conflicting_source_and_locked_runtime_metadata(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    apex_dir = tmp_path / ".apex-ray"
+    apex_dir.mkdir()
+    (apex_dir / "runtime").write_text("source\n", encoding="utf-8")
+    (apex_dir / "version").write_text(f"{__version__}\n", encoding="utf-8")
+    (apex_dir / "config.yml").write_text("review:\n", encoding="utf-8")
+
+    result = runner.invoke(app, ["doctor"], catch_exceptions=False)
+
+    assert result.exit_code == 1
+    assert "- Runtime mode: invalid" in result.stdout
+    assert "contains both .apex-ray/runtime and .apex-ray/version" in result.stdout
+    assert "- Managed hooks: not checked (repository runtime is invalid)" in result.stdout
+    assert "- Agent artifacts: not checked" in result.stdout
 
 
 def test_doctor_reports_mismatched_version_lock_and_exits_nonzero(tmp_path: Path, monkeypatch) -> None:
@@ -4443,15 +4634,30 @@ review:
     assert seen == {"root": 5, "reviewers": [5, 5]}
 
 
-@pytest.mark.parametrize("use_version_lock", [True, False], ids=["locked", "unlocked"])
+@pytest.mark.parametrize(
+    ("runtime_mode", "launcher"),
+    [
+        ("locked", f"uvx --python 3.14 apex-ray@{__version__}"),
+        ("unlocked", "apex-ray"),
+        ("source", "uv run --locked apex-ray"),
+    ],
+)
 def test_review_partial_summary_is_explicit_without_changing_default_exit_code(
     tmp_path: Path,
     monkeypatch,
-    use_version_lock: bool,
+    runtime_mode: str,
+    launcher: str,
 ) -> None:
     monkeypatch.chdir(tmp_path)
-    if use_version_lock:
+    if runtime_mode == "locked":
         write_version_lock(tmp_path, __version__)
+    elif runtime_mode == "source":
+        _prepare_fixture_source_checkout(tmp_path, monkeypatch)
+        runtime = tmp_path / ".apex-ray" / "runtime"
+        runtime.parent.mkdir(parents=True)
+        runtime.write_text("source\n", encoding="utf-8")
+
+        monkeypatch.setattr("apex_ray.cli.main.assert_repository_runtime", _assert_fixture_source_runtime)
     patch = tmp_path / "sample.diff"
     patch.write_text((FIXTURE_DIR / "sample.diff").read_text(encoding="utf-8"), encoding="utf-8")
     config_path = tmp_path / "config.yml"
@@ -4512,7 +4718,6 @@ review:
     assert "--reviewer correctness" in result.stdout
     assert "Continue reviewer security:" in result.stdout
     assert "--reviewer security" in result.stdout
-    launcher = f"uvx --python 3.14 apex-ray@{__version__}" if use_version_lock else "apex-ray"
     assert f"{launcher} review --continue-from" in result.stdout
     assert f"--output {markdown_output}" in result.stdout
     assert f"--json {json_output}" in result.stdout

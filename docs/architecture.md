@@ -244,22 +244,31 @@ The important review decision is context selection. Apex Ray ranks packs by risk
 It creates or updates:
 
 - `.apex-ray/config.yml`: shared project config with conservative defaults.
-- `.apex-ray/version`: the single committed exact package-version lock used to render managed launchers.
+- `.apex-ray/version`: the committed exact package-version lock for consumer repositories.
+- `.apex-ray/runtime`: the mutually exclusive `source` marker used only when Apex Ray reviews its own current source checkout.
 - `.apex-ray/.gitignore`: ignores local cache, telemetry, reports, triage, runs, and local overrides under `.apex-ray`.
 - `.apex-ray/rules/`: committed project review rules.
 - `.apex-ray/memory/`: committed team learning cards.
 - `.apex-ray/reports/`: ignored local report output.
 - `.apex-ray/triage/`: ignored local finding suppressions and lifecycle events when local data is stored under `.apex-ray`.
 - `.apex-ray/eval/`: eval support directories; run outputs are ignored.
-- `lefthook.yml`: optional local hook config with an exact `uvx` pre-push gate command.
-- `AGENTS.md` / Claude agent files: short pointers for coding agents with exact `uvx` command examples.
+- `lefthook.yml`: optional local hook config using the repository's exact consumer or source launcher.
+- `AGENTS.md` / Claude agent files: short pointers for coding agents using the same managed launcher.
 - `.apex-ray/skills/apex-ray/SKILL.md` for review workflows and `.apex-ray/skills/apex-ray-improve/SKILL.md` for post-merge learning recommendations, plus Codex skill-directory aliases under `.agents/skills/` and Claude aliases under `.claude/skills/` when enabled. Codex aliases are relative directory symlinks where supported and full directory copies otherwise; managed refresh also repairs exact Git symlink placeholders from `core.symlinks=false` checkouts.
 
 The init command is intentionally conservative: shared config is commit-friendly, local provider/model/cost settings go into `.apex-ray/config.local.yml`, generated Apex Ray outputs stay ignored by `.apex-ray/.gitignore`, and the root `.gitignore` is left untouched.
 
-Managed agent blocks and generated skills carry an Apex Ray template version. Review and gate commands only warn when those local artifacts are outdated; they do not rewrite files. `apex-ray init --refresh-agent-artifacts` is the scoped update path for refreshing managed agent guidance without touching config or hooks. `apex-ray init --refresh-managed-artifacts` additionally synchronizes the exact hook launcher and version lock; `--update-version-lock` is required to adopt the running package version.
+Managed agent blocks and generated skills carry an Apex Ray template version. Review and gate commands only warn when those local artifacts are outdated; they do not rewrite files. `apex-ray init --refresh-agent-artifacts` is the scoped update path for refreshing managed agent guidance without touching config or hooks. `apex-ray init --refresh-managed-artifacts` additionally synchronizes the hook and repository runtime metadata. It preserves the current runtime mode unless `--runtime source|locked` selects one explicitly; `--update-version-lock` applies only to locked consumers.
 
-Operational CLI commands validate `.apex-ray/version` before config, analyzers, or providers run. `doctor` remains available on mismatch and reports lock, runtime, hooks, `uvx`, and agent artifacts. The lock is data, not a bootstrap script: Apex Ray never shell-expands it and does not auto-reexec. Generated hooks use a validated literal `uvx --python 3.14 apex-ray@<version>` command instead.
+Operational CLI commands validate the runtime policy before config, analyzers,
+or providers run. Consumer mode requires `.apex-ray/version` to match and uses
+the literal `uvx --python 3.14 apex-ray@<version>` launcher. Source mode requires
+the mutually exclusive `.apex-ray/runtime` marker, `uv`, `pyproject.toml`,
+`uv.lock`, and package code from the repository's `src/apex_ray`; it uses
+`uv run --locked apex-ray` and therefore does not drift when a release bumps
+the package version. Repositories with neither file retain the legacy bare
+launcher until migrated. `doctor` remains available to report policy,
+prerequisite, hook, and agent-artifact inconsistencies.
 
 ## Pre-Push Gate Flow
 

@@ -52,7 +52,11 @@ git status --short
 ```
 
 Inspect and commit the setup files before using the first worktree review for application changes.
-`init` writes the repository's exact Apex Ray version to `.apex-ray/version` and renders managed hooks and agent commands through cached `uvx`; keep `uv` available on developer and CI machines.
+For a normal project, `init` writes the repository's exact Apex Ray version to
+`.apex-ray/version` and renders managed hooks and agent commands through cached
+`uvx`; keep `uv` available on developer and CI machines. An Apex Ray source
+checkout can instead use the mutually exclusive `.apex-ray/runtime` source
+mode so self-review runs the current checkout with `uv run --locked apex-ray`.
 
 If Apex Ray later warns that generated agent instructions are outdated, refresh only those managed artifacts with:
 
@@ -61,7 +65,13 @@ apex-ray init --refresh-agent-artifacts --dry-run
 apex-ray init --refresh-agent-artifacts
 ```
 
-Use `apex-ray init --refresh-managed-artifacts` to synchronize the lock-derived hook and instructions. Upgrading the lock is explicit: run the target package with `uvx`, then add `--update-version-lock`. See [configuration](docs/configuration.md#agent-artifact-refresh) for the safe migration flow.
+Use `apex-ray init --refresh-managed-artifacts` to synchronize the hook and
+instructions with the repository runtime mode. Upgrading a consumer lock is
+explicit: run the target package with `uvx`, then add
+`--update-version-lock`. Source mode keeps version-free current-checkout
+launchers across releases. See
+[configuration](docs/configuration.md#agent-artifact-refresh) for the safe
+migration flow.
 
 Run a deterministic no-LLM review:
 

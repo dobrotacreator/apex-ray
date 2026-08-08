@@ -39,7 +39,7 @@ from apex_ray.config import (
     refresh_managed_artifacts as refresh_project_managed_artifacts,
 )
 from apex_ray.discovery import DiscoveryError, discover_project, discover_repo_root
-from apex_ray.invocation import ReviewOverrides, apply_review_overrides, render_apex_ray_command
+from apex_ray.invocation import ApexRayLauncher, ReviewOverrides, apply_review_overrides, render_apex_ray_command
 from apex_ray.llm import LLMProviderError
 from apex_ray.llm.cache import cache_for_config
 from apex_ray.local_data import LOCAL_DATA_TOKEN, LocalDataPathError, resolve_config_path, resolve_runtime_config_paths
@@ -71,6 +71,13 @@ from apex_ray.report import (
     render_sarif,
 )
 from apex_ray.report.coverage import render_coverage_summary_lines, set_continue_commands
+from apex_ray.repository_runtime import (
+    RepositoryRuntimeError,
+    RepositoryRuntimeMode,
+    assert_repository_runtime,
+    assert_source_uv_project,
+    inspect_repository_runtime,
+)
 from apex_ray.reviewers import ReviewerConfigError, effective_reviewers, llm_config_for_reviewer
 from apex_ray.telemetry import (
     TelemetryError,
@@ -78,7 +85,7 @@ from apex_ray.telemetry import (
     load_review_telemetry,
     render_review_telemetry_summary,
 )
-from apex_ray.version_lock import VersionLockError, assert_version_lock, inspect_version_lock, render_uvx_command
+from apex_ray.version_lock import VersionLockError, render_uvx_command
 
 app = typer.Typer(
     help="Local CLI-first code review engine.",
@@ -96,6 +103,11 @@ class InitHookMode(StrEnum):
     LEFTHOOK = "lefthook"
     GIT = "git"
     NONE = "none"
+
+
+class InitRuntimeMode(StrEnum):
+    LOCKED = "locked"
+    SOURCE = "source"
 
 
 class _DartToolchainResolution(Protocol):
@@ -134,8 +146,8 @@ def main(
         return
     root = git.repo_root(Path.cwd()) or Path.cwd()
     try:
-        assert_version_lock(root, runtime_version=__version__)
-    except VersionLockError as exc:
+        assert_repository_runtime(root, runtime_version=__version__)
+    except RepositoryRuntimeError as exc:
         raise typer.BadParameter(str(exc)) from exc
 
 
@@ -160,6 +172,13 @@ def init(
         bool,
         typer.Option("--agent-skill/--no-agent-skill", help="Add Apex Ray project skill files for selected agents."),
     ] = True,
+    runtime: Annotated[
+        InitRuntimeMode | None,
+        typer.Option(
+            "--runtime",
+            help="Repository runtime: locked published package or current Apex Ray development checkout.",
+        ),
+    ] = None,
     refresh_agent_artifacts: Annotated[
         bool,
         typer.Option(
@@ -171,7 +190,7 @@ def init(
         bool,
         typer.Option(
             "--refresh-managed-artifacts",
-            help="Refresh the version lock, exact hook launcher, and managed agent artifacts.",
+            help="Refresh repository runtime metadata, the exact hook launcher, and managed agent artifacts.",
         ),
     ] = False,
     update_version_lock: Annotated[
@@ -196,6 +215,7 @@ def init(
     """Create project Apex Ray config, ignores, hooks, and agent instructions."""
     root = git.repo_root(Path.cwd()) or Path.cwd()
     requested_hook_mode = hooks.value if hooks is not None else None
+    requested_runtime_mode = runtime.value if runtime is not None else None
     init_hook_mode = requested_hook_mode or InitHookMode.LEFTHOOK.value
     if refresh_agent_artifacts and refresh_managed_artifacts:
         raise typer.BadParameter("Use only one of --refresh-agent-artifacts or --refresh-managed-artifacts.")
@@ -203,6 +223,14 @@ def init(
         raise typer.BadParameter("Use --dry-run with an artifact refresh option.")
     if update_version_lock and not refresh_managed_artifacts:
         raise typer.BadParameter("Use --update-version-lock only with --refresh-managed-artifacts.")
+    if runtime is not None and refresh_agent_artifacts:
+        raise typer.BadParameter("Use --runtime only with initial setup or --refresh-managed-artifacts.")
+    existing_runtime = inspect_repository_runtime(root, runtime_version=__version__)
+    if existing_runtime.mode == RepositoryRuntimeMode.SOURCE:
+        try:
+            assert_repository_runtime(root, runtime_version=__version__)
+        except RepositoryRuntimeError as exc:
+            raise typer.BadParameter(str(exc)) from exc
     try:
         if refresh_agent_artifacts:
             paths = refresh_project_agent_artifacts(
@@ -219,6 +247,7 @@ def init(
                 agent_files=agent_files.value,
                 agent_skill=agent_skill,
                 runtime_version=__version__,
+                runtime_mode=requested_runtime_mode,
                 update_version_lock=update_version_lock,
                 overwrite=overwrite,
                 dry_run=dry_run,
@@ -232,8 +261,9 @@ def init(
                 agent_files=agent_files.value,
                 agent_skill=agent_skill,
                 runtime_version=__version__,
+                runtime_mode=requested_runtime_mode,
             )
-    except (ConfigError, VersionLockError) as exc:
+    except (ConfigError, RepositoryRuntimeError, VersionLockError) as exc:
         raise typer.BadParameter(str(exc)) from exc
     if refresh_agent_artifacts or refresh_managed_artifacts:
         action = "would refresh" if dry_run else "refreshed"
@@ -247,11 +277,15 @@ def init(
     typer.echo(f"Apex Ray ready: {root}")
     for path in paths:
         typer.echo(f"- {path}")
-    for message in _init_next_steps(init_hook_mode):
+    runtime_status = inspect_repository_runtime(root, runtime_version=__version__)
+    for message in _init_next_steps(
+        init_hook_mode,
+        source_runtime=runtime_status.mode == RepositoryRuntimeMode.SOURCE,
+    ):
         typer.echo(message)
 
 
-def _init_next_steps(hooks: str) -> list[str]:
+def _init_next_steps(hooks: str, *, source_runtime: bool = False) -> list[str]:
     messages = [
         "Next: inspect and commit Apex Ray setup files before reviewing application changes.",
     ]
@@ -261,10 +295,15 @@ def _init_next_steps(hooks: str) -> list[str]:
         else:
             messages.append("Hook note: run `lefthook install` to activate pre-push review.")
     if hooks in {"lefthook", "git"}:
-        messages.append(
-            "Hook note: generated hooks use `uvx` to run the repository-pinned Apex Ray version; "
-            "ensure `uv` is available on PATH for Git hooks."
-        )
+        if source_runtime:
+            messages.append(
+                "Hook note: generated hooks use `uv run --locked` to exercise this repository's current checkout."
+            )
+        else:
+            messages.append(
+                "Hook note: generated hooks use `uvx` to run the repository-pinned Apex Ray version; "
+                "ensure `uv` is available on PATH for Git hooks."
+            )
     return messages
 
 
@@ -277,21 +316,51 @@ def doctor(
         root = discover_repo_root(Path.cwd())
     except DiscoveryError as exc:
         raise typer.BadParameter(str(exc)) from exc
-    version_lock_status = inspect_version_lock(root, runtime_version=__version__)
+    runtime_status = inspect_repository_runtime(root, runtime_version=__version__)
+    version_lock_status = runtime_status.version_lock
     typer.echo("Apex Ray doctor")
     typer.echo(f"- Version: {__version__}")
-    typer.echo(f"- Version lock: {version_lock_status.state.value}")
-    if version_lock_status.locked_version is not None:
-        typer.echo(f"- Required version: {version_lock_status.locked_version}")
+    typer.echo(f"- Runtime mode: {runtime_status.mode.value}")
+    if runtime_status.mode == RepositoryRuntimeMode.SOURCE:
+        typer.echo("- Version lock: not applicable (source checkout)")
+    else:
+        typer.echo(f"- Version lock: {version_lock_status.state.value}")
+        if version_lock_status.locked_version is not None:
+            typer.echo(f"- Required version: {version_lock_status.locked_version}")
     typer.echo(f"- Running version: {version_lock_status.runtime_version}")
-    if version_lock_status.reason:
+    if runtime_status.reason:
+        typer.echo(f"- Runtime detail: {runtime_status.reason}")
+    elif version_lock_status.reason:
         typer.echo(f"- Version lock detail: {version_lock_status.reason}")
-    if version_lock_status.state.value == "missing":
+    if runtime_status.mode == RepositoryRuntimeMode.LEGACY:
         typer.echo(
             f"- Version lock remediation: {render_uvx_command(__version__, 'init', '--refresh-managed-artifacts')}"
         )
     uvx_available = shutil.which("uvx") is not None
-    typer.echo(f"- uvx available: {str(uvx_available).lower()}")
+    uv_available = shutil.which("uv") is not None
+    source_pyproject = root / "pyproject.toml"
+    source_lock = root / "uv.lock"
+    source_pyproject_current = source_pyproject.is_file() and not source_pyproject.is_symlink()
+    source_lock_current = source_lock.is_file() and not source_lock.is_symlink()
+    source_lock_synchronized = False
+    source_runtime_detail = ""
+    if runtime_status.mode == RepositoryRuntimeMode.SOURCE:
+        try:
+            assert_source_uv_project(root)
+        except RepositoryRuntimeError as exc:
+            source_runtime_detail = str(exc)
+        else:
+            source_lock_synchronized = True
+    if runtime_status.mode == RepositoryRuntimeMode.SOURCE:
+        typer.echo(f"- uv available: {str(uv_available).lower()}")
+        typer.echo(f"- Source pyproject.toml: {str(source_pyproject_current).lower()}")
+        typer.echo(f"- Source uv.lock: {str(source_lock_current).lower()}")
+        typer.echo(f"- Source uv.lock synchronized: {str(source_lock_synchronized).lower()}")
+        typer.echo(f"- Source checkout: {'current' if runtime_status.source_checkout_current else 'mismatch'}")
+        if source_runtime_detail:
+            typer.echo(f"- Source runtime detail: {source_runtime_detail}")
+    else:
+        typer.echo(f"- uvx available: {str(uvx_available).lower()}")
     try:
         review_config, config_path = load_config(root, config)
     except ConfigError as exc:
@@ -357,34 +426,50 @@ def doctor(
     typer.echo(f"- Node available: {str(shutil.which('node') is not None).lower()}")
     typer.echo(f"- TypeScript analyzer: {analyzer_script}")
     typer.echo(f"- TypeScript analyzer built: {str(analyzer_script.exists()).lower()}")
-    hook_target_version = version_lock_status.locked_version or version_lock_status.runtime_version
-    hook_statuses = managed_hook_statuses(root, runtime_version=hook_target_version)
+    launcher = runtime_status.launcher
+    hook_statuses = (
+        managed_hook_statuses(
+            root,
+            runtime_version=version_lock_status.runtime_version,
+            launcher=launcher,
+        )
+        if launcher is not None
+        else []
+    )
     stale_hooks = [status for status in hook_statuses if status.needs_refresh]
     duplicate_hook_modes = len({status.kind for status in hook_statuses}) > 1
-    if not hook_statuses:
+    if launcher is None:
+        typer.echo("- Managed hooks: not checked (repository runtime is invalid)")
+    elif not hook_statuses:
         typer.echo("- Managed hooks: not found")
     elif duplicate_hook_modes:
         typer.echo("- Managed hooks: inconsistent (multiple Apex Ray hook modes)")
         for status in hook_statuses:
             typer.echo(f"  - {status.path}: {status.kind} hook is also configured")
-        typer.echo(f"  Run: remove one hook mode, then run {render_uvx_command(hook_target_version, 'doctor')}")
+        typer.echo(f"  Run: remove one hook mode, then run {render_apex_ray_command(['doctor'], launcher=launcher)}")
     elif stale_hooks:
         typer.echo(f"- Managed hooks: inconsistent ({len(stale_hooks)})")
         for status in stale_hooks:
             detail = status.reason or f"found {status.actual_command!r}"
             typer.echo(f"  - {status.path}: {detail}")
-        typer.echo(f"  Run: {render_uvx_command(hook_target_version, 'init', '--refresh-managed-artifacts')}")
+        typer.echo(f"  Run: {render_apex_ray_command(['init', '--refresh-managed-artifacts'], launcher=launcher)}")
     else:
         typer.echo("- Managed hooks: current")
-    if version_lock_status.blocking:
-        typer.echo("- Agent artifacts: not checked (rerun doctor with the repository-pinned version)")
+    if runtime_status.blocking:
+        detail = (
+            "rerun doctor with the repository-pinned version"
+            if runtime_status.mode == RepositoryRuntimeMode.LOCKED
+            else "repository runtime is invalid or not the current source checkout"
+        )
+        typer.echo(f"- Agent artifacts: not checked ({detail})")
     else:
         try:
             artifact_statuses = agent_artifact_statuses(
                 root,
                 runtime_version=version_lock_status.runtime_version,
+                launcher=launcher,
             )
-        except ConfigError as exc:
+        except (ConfigError, RepositoryRuntimeError) as exc:
             typer.echo(f"- Agent artifacts: unable to inspect ({exc})")
         else:
             managed_statuses = [status for status in artifact_statuses if status.status != "unmanaged"]
@@ -395,10 +480,25 @@ def doctor(
                 typer.echo(f"- Agent artifacts: outdated ({len(outdated_statuses)})")
                 for status in outdated_statuses[:5]:
                     typer.echo(f"  - {status.path}: {status.reason}")
-                typer.echo(f"  Run: {render_uvx_command(hook_target_version, 'init', '--refresh-agent-artifacts')}")
+                typer.echo(
+                    f"  Run: {render_apex_ray_command(['init', '--refresh-agent-artifacts'], launcher=launcher)}"
+                )
             else:
                 typer.echo("- Agent artifacts: current")
-    if version_lock_status.blocking or stale_hooks or duplicate_hook_modes or (hook_statuses and not uvx_available):
+    source_prerequisites_invalid = runtime_status.mode == RepositoryRuntimeMode.SOURCE and (
+        not uv_available or not source_pyproject_current or not source_lock_current or not source_lock_synchronized
+    )
+    launcher_unavailable = bool(hook_statuses) and (
+        (runtime_status.mode == RepositoryRuntimeMode.SOURCE and not uv_available)
+        or (runtime_status.mode != RepositoryRuntimeMode.SOURCE and not uvx_available)
+    )
+    if (
+        runtime_status.blocking
+        or source_prerequisites_invalid
+        or stale_hooks
+        or duplicate_hook_modes
+        or launcher_unavailable
+    ):
         raise typer.Exit(code=1)
 
 
@@ -589,17 +689,17 @@ def review(
     ] = None,
 ) -> None:
     """Inspect a diff and write markdown/JSON reports."""
-    launcher_version: str | None = None
+    launcher: ApexRayLauncher | None = None
     try:
         root = discover_repo_root(Path.cwd())
     except DiscoveryError as exc:
         raise typer.BadParameter(str(exc)) from exc
     if continue_from is None:
         try:
-            lock_status = assert_version_lock(root, runtime_version=__version__)
-            launcher_version = lock_status.locked_version
+            runtime_status = assert_repository_runtime(root, runtime_version=__version__)
+            launcher = runtime_status.launcher
             review_config, config_path = load_config(root, config)
-        except (ConfigError, VersionLockError) as exc:
+        except (ConfigError, RepositoryRuntimeError) as exc:
             raise typer.BadParameter(str(exc)) from exc
     else:
         review_config = ReviewConfig()
@@ -645,9 +745,9 @@ def review(
             raise typer.BadParameter(str(exc)) from exc
         root = Path(prior_report.project.root)
         try:
-            lock_status = assert_version_lock(root, runtime_version=__version__)
-            launcher_version = lock_status.locked_version
-        except VersionLockError as exc:
+            runtime_status = assert_repository_runtime(root, runtime_version=__version__)
+            launcher = runtime_status.launcher
+        except RepositoryRuntimeError as exc:
             raise typer.BadParameter(str(exc)) from exc
         if prior_report.input_snapshot is None:
             if completion_requested:
@@ -840,7 +940,7 @@ def review(
                     report_config=report_config,
                     output=output,
                     json_output=json_output,
-                    launcher_version=launcher_version,
+                    launcher=launcher,
                 )
 
             completion_result = continue_review_until_complete(
@@ -868,7 +968,7 @@ def review(
     duration_ms = round((time.monotonic() - started_monotonic) * 1000)
     report.config = report_config
 
-    set_continue_commands(report, str(json_output), launcher_version=launcher_version)
+    set_continue_commands(report, str(json_output), launcher=launcher)
 
     markdown_text = render_markdown(report)
     json_text = report.model_dump_json(indent=2)
@@ -918,7 +1018,7 @@ def review(
         html_output=html_output,
         sarif_output=sarif_output,
         completion_reviewer_ids=completion_reviewer_ids,
-        launcher_version=launcher_version,
+        launcher=launcher,
     )
     if completion_result is not None:
         if completion_result.complete:
@@ -947,7 +1047,7 @@ def _render_review_stdout_summary(
     html_output: Path | None,
     sarif_output: Path | None,
     completion_reviewer_ids: list[str] | None,
-    launcher_version: str | None,
+    launcher: ApexRayLauncher | None,
 ) -> None:
     completion_status = report.llm_coverage.completion_status
     headline = {
@@ -980,7 +1080,7 @@ def _render_review_stdout_summary(
                 args.extend(["--sarif", str(sarif_output)])
             for reviewer_id in scope:
                 args.extend(["--reviewer", reviewer_id])
-            command = render_apex_ray_command(args, launcher_version=launcher_version)
+            command = render_apex_ray_command(args, launcher=launcher)
             if not scope:
                 label = "Continue"
             elif len(scope) == 1:
@@ -1043,11 +1143,11 @@ def _write_intermediate_review_report(
     report_config: ReviewConfig,
     output: Path,
     json_output: Path,
-    launcher_version: str | None,
+    launcher: ApexRayLauncher | None,
 ) -> None:
     persisted = report.model_copy(deep=True)
     persisted.config = report_config
-    set_continue_commands(persisted, str(json_output), launcher_version=launcher_version)
+    set_continue_commands(persisted, str(json_output), launcher=launcher)
     atomic_write_text(output, render_markdown(persisted))
     atomic_write_text(json_output, persisted.model_dump_json(indent=2))
 

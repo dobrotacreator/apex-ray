@@ -90,6 +90,27 @@ Install Lefthook if you want local git hooks:
 lefthook install
 ```
 
+## Self-Review Runtime
+
+This repository commits `.apex-ray/runtime` with the exact value `source` and
+does not commit `.apex-ray/version`. Its managed review hook and generated agent
+commands must use `uv run --locked apex-ray ...` so development reviews execute
+the current checkout rather than the latest published package. Source mode
+requires `uv`, `pyproject.toml`, a synchronized `uv.lock`, and imports from this
+repository's `src/apex_ray`.
+
+Refresh and validate self-review artifacts with:
+
+```bash
+uv run --locked apex-ray init --refresh-managed-artifacts
+uv run --locked apex-ray doctor
+```
+
+The source launcher intentionally contains no package version, so Release
+Please version bumps do not make the hook or skills stale. Do not add a version
+lock alongside the source marker; the runtime files are mutually exclusive and
+`doctor` treats that combination as invalid.
+
 ## Worktrees
 
 For PR-sized or risky local changes, prefer an isolated worktree created from the primary checkout:
