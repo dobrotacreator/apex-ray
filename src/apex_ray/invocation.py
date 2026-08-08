@@ -2,7 +2,9 @@ import os
 import shlex
 from collections.abc import Sequence
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
+from typing import Self
 
 from apex_ray.models import (
     LLMAPIConfig,
@@ -12,6 +14,50 @@ from apex_ray.models import (
     ReviewConfig,
 )
 from apex_ray.version_lock import render_uvx_argv
+
+
+class ApexRayLauncherKind(StrEnum):
+    """Supported repository command launchers."""
+
+    BARE = "bare"
+    UVX = "uvx"
+    SOURCE = "source"
+
+
+@dataclass(frozen=True, slots=True)
+class ApexRayLauncher:
+    """Validated argv prefix for invoking Apex Ray in a repository."""
+
+    kind: ApexRayLauncherKind
+    version: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.kind == ApexRayLauncherKind.UVX:
+            if self.version is None:
+                raise ValueError("The uvx Apex Ray launcher requires an exact version.")
+            render_uvx_argv(self.version)
+            return
+        if self.version is not None:
+            raise ValueError(f"The {self.kind.value} Apex Ray launcher does not accept a version.")
+
+    @classmethod
+    def bare(cls) -> Self:
+        return cls(ApexRayLauncherKind.BARE)
+
+    @classmethod
+    def locked(cls, version: str) -> Self:
+        return cls(ApexRayLauncherKind.UVX, version=version)
+
+    @classmethod
+    def source(cls) -> Self:
+        return cls(ApexRayLauncherKind.SOURCE)
+
+    def argv(self, *arguments: str) -> list[str]:
+        if self.kind == ApexRayLauncherKind.UVX:
+            return render_uvx_argv(self.version or "", *arguments)
+        if self.kind == ApexRayLauncherKind.SOURCE:
+            return ["uv", "run", "--locked", "apex-ray", *arguments]
+        return ["apex-ray", *arguments]
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,13 +97,20 @@ def render_shell_command(
 def render_apex_ray_command(
     args: Sequence[str],
     *,
+    launcher: ApexRayLauncher | None = None,
     launcher_version: str | None = None,
     platform_name: str | None = None,
 ) -> str:
-    """Render an Apex Ray command with an exact uvx launcher when locked."""
+    """Render an Apex Ray command through its repository-selected launcher."""
 
-    launcher = render_uvx_argv(launcher_version) if launcher_version is not None else ["apex-ray"]
-    return render_shell_command([*launcher, *args], platform_name=platform_name)
+    if launcher is not None and launcher_version is not None:
+        raise ValueError("Pass either launcher or launcher_version, not both.")
+    effective_launcher = launcher
+    if effective_launcher is None:
+        effective_launcher = (
+            ApexRayLauncher.locked(launcher_version) if launcher_version is not None else ApexRayLauncher.bare()
+        )
+    return render_shell_command(effective_launcher.argv(*args), platform_name=platform_name)
 
 
 def _quote_powershell_argument(value: str) -> str:

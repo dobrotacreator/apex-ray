@@ -25,8 +25,8 @@ Keep new modules inside the relevant package and keep package `__init__.py` file
 ## Command Conventions
 
 - Run repository commands from the repo root.
-- Use `uv run ...` for Python tools and the local `apex-ray` console script.
-- This is Apex Ray's self-hosting source repository: the local `uv run apex-ray ...` convention overrides pinned `uvx ... apex-ray@<release>` examples in generated agent artifacts so development and debugging exercise the current branch.
+- Use `uv run ...` for Python tools and `uv run --locked apex-ray ...` for the local console script.
+- This is Apex Ray's self-hosting source repository. Its source-runtime marker keeps the hook and generated agent commands on the current checkout instead of a published package.
 - Use `npm --prefix analyzer-runtimes/typescript ...` for analyzer commands.
 - Treat `.github/workflows/ci.yml` as CI parity source of truth before claiming a change is CI-ready.
 
@@ -43,7 +43,7 @@ Run the smallest relevant check for the changed surface:
 
 - Python code: `uv run ruff format --check .`, `uv run ruff check .`, `uv run pyright`, and focused or full `uv run pytest -q`.
 - TS analyzer code: `npm --prefix analyzer-runtimes/typescript run typecheck`, `npm --prefix analyzer-runtimes/typescript test`, and relevant Python context tests.
-- CLI/config/report behavior: focused tests plus `uv run apex-ray doctor`.
+- CLI/config/report behavior: focused tests plus `uv run --locked apex-ray doctor`.
 - Packaging/release behavior: full CI-equivalent checks, `uv build --sdist --wheel`, `uv run twine check dist/*`, and installed-wheel smoke coverage from `.github/workflows/ci.yml`.
 
 Before saying work is complete, report the verification that actually ran.
@@ -57,5 +57,5 @@ Before saying work is complete, report the verification that actually ran.
 <!-- apex-ray-agent-artifacts: version=5 -->
 ## Apex Ray
 
-This project uses Apex Ray for local diff-aware review. Use the `$apex-ray` skill for review, gate, report, telemetry, and eval workflows. Apex Ray runs that use LLM analysis can be long-running and may appear idle; do not interrupt or kill the process just because it takes a long time. Wait for completion unless it exits, errors, or the user asks to stop. When a pre-push hook is configured, do not proactively run `uvx --python 3.14 apex-ray@0.1.17 review` or `uvx --python 3.14 apex-ray@0.1.17 gate pre-push` as a routine final verification step; let `git push` invoke the hook so the pre-push incremental retry state remains the source of truth. Run Apex Ray manually only when the user asks, when debugging/tuning Apex Ray, when the hook is unavailable, or when explicit gate parity is needed before a push. Do not bypass the configured pre-push gate by default; use `uvx --python 3.14 apex-ray@0.1.17 findings suppress` only for a confirmed local false positive after checking the finding evidence, current code, and relevant tests or invariants, and always provide a concrete objective reason. Do not suppress uncertain findings, real defects, or findings merely to get a push through. If bypassing is unavoidable, explain why and name the equivalent checks or review already run. Use `$apex-ray-improve` after merged PRs or review feedback to produce recommendation-only improvements for Apex Ray memory, rules, eval labels, telemetry, and config. Keep `.apex-ray/config.local.yml`, Apex Ray caches/telemetry/reports/triage/eval runs, generated review artifacts, and local provider, model, API, or cost settings out of commits.
+This project uses Apex Ray for local diff-aware review. Use the `$apex-ray` skill for review, gate, report, telemetry, and eval workflows. Apex Ray runs that use LLM analysis can be long-running and may appear idle; do not interrupt or kill the process just because it takes a long time. Wait for completion unless it exits, errors, or the user asks to stop. When a pre-push hook is configured, do not proactively run `uv run --locked apex-ray review` or `uv run --locked apex-ray gate pre-push` as a routine final verification step; let `git push` invoke the hook so the pre-push incremental retry state remains the source of truth. Run Apex Ray manually only when the user asks, when debugging/tuning Apex Ray, when the hook is unavailable, or when explicit gate parity is needed before a push. Do not bypass the configured pre-push gate by default; use `uv run --locked apex-ray findings suppress` only for a confirmed local false positive after checking the finding evidence, current code, and relevant tests or invariants, and always provide a concrete objective reason. Do not suppress uncertain findings, real defects, or findings merely to get a push through. If bypassing is unavoidable, explain why and name the equivalent checks or review already run. Use `$apex-ray-improve` after merged PRs or review feedback to produce recommendation-only improvements for Apex Ray memory, rules, eval labels, telemetry, and config. Keep `.apex-ray/config.local.yml`, Apex Ray caches/telemetry/reports/triage/eval runs, generated review artifacts, and local provider, model, API, or cost settings out of commits.
 <!-- APEX_RAY_END -->

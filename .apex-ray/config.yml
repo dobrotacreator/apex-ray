@@ -1,7 +1,7 @@
 review:
   local_data:
     root: git_common
-  base: main
+  base: origin/main
   ignore:
     - "**/*.lock"
     - "**/generated/**"
@@ -67,6 +67,7 @@ review:
           - "src/apex_ray/memory.py"
           - "src/apex_ray/pipeline/**"
           - "src/apex_ray/report/**"
+          - "src/apex_ray/repository_runtime.py"
           - "src/apex_ray/rules.py"
           - "src/apex_ray/telemetry.py"
           - "tests/test_config.py"
@@ -78,6 +79,7 @@ review:
           - "tests/test_memory.py"
           - "tests/test_pipeline.py"
           - "tests/test_report*.py"
+          - "tests/test_repository_runtime.py"
           - "tests/test_reviewers.py"
           - "tests/test_rules.py"
           - "tests/test_sarif.py"
@@ -283,6 +285,7 @@ review:
   gates:
     pre_push:
       enabled: true
+      fetch_base: true
       min_finding_severity: high
       require_verified_findings: true
       fail_on_quality_gate: true

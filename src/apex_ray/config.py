@@ -11,20 +11,29 @@ from pydantic import ValidationError
 from yaml.nodes import MappingNode, Node, ScalarNode, SequenceNode
 
 from apex_ray import git
+from apex_ray.invocation import ApexRayLauncher, render_apex_ray_command
 from apex_ray.memory import MemoryError, load_memory_cards
 from apex_ray.models import ReviewConfig
+from apex_ray.repository_runtime import (
+    RepositoryRuntimeError,
+    RepositoryRuntimeMode,
+    RepositoryRuntimeStatus,
+    assert_repository_runtime,
+    assert_source_runtime_checkout,
+    inspect_repository_runtime,
+    write_source_runtime,
+)
 from apex_ray.rules import RuleError, load_rule_definitions
 from apex_ray.version_lock import (
     assert_version_lock,
     ensure_version_lock,
-    inspect_version_lock,
-    render_uvx_command,
     validate_version_lock_target,
 )
 
 DEFAULT_BASE_BRANCH = "main"
 HOOK_MODES = {"lefthook", "git", "none"}
 AGENT_FILE_MODES = {"none", "codex", "claude", "both"}
+RUNTIME_MODES = {RepositoryRuntimeMode.LOCKED.value, RepositoryRuntimeMode.SOURCE.value}
 AGENT_ARTIFACT_TEMPLATE_VERSION = 5
 _LEFTHOOK_EXECUTABLE_NAMES = {"lefthook", "lefthook.bat", "lefthook.cmd", "lefthook.exe"}
 
@@ -53,6 +62,25 @@ class ManagedHookStatus:
     @property
     def needs_refresh(self) -> bool:
         return self.status != "current"
+
+
+@dataclass(frozen=True)
+class _ManagedRuntimePlan:
+    current: RepositoryRuntimeStatus
+    mode: RepositoryRuntimeMode
+    launcher: ApexRayLauncher
+
+    @property
+    def creates_source_marker(self) -> bool:
+        return self.mode == RepositoryRuntimeMode.SOURCE and self.current.mode == RepositoryRuntimeMode.LEGACY
+
+    @property
+    def manages_version_lock(self) -> bool:
+        return self.mode == RepositoryRuntimeMode.LOCKED
+
+    @property
+    def changes_launcher_mode(self) -> bool:
+        return self.current.mode != self.mode
 
 
 def default_config_text(base: str = DEFAULT_BASE_BRANCH) -> str:
@@ -326,13 +354,20 @@ def init_project(
     agent_files: str = "both",
     agent_skill: bool = True,
     runtime_version: str | None = None,
+    runtime_mode: str | None = None,
     update_version_lock: bool = False,
 ) -> list[Path]:
     if runtime_version is None:
         from apex_ray import __version__
 
         runtime_version = __version__
-    hook_command = render_uvx_command(runtime_version, "gate", "pre-push")
+    runtime_plan = _resolve_managed_runtime_plan(
+        root,
+        runtime_version=runtime_version,
+        requested_mode=runtime_mode,
+        update_version_lock=update_version_lock,
+    )
+    hook_command = _render_managed_apex_ray_command(["gate", "pre-push"], launcher=runtime_plan.launcher)
     if update_gitignore:
         warnings.warn(
             "update_gitignore is deprecated and no longer manages the root .gitignore; "
@@ -340,8 +375,7 @@ def init_project(
             UserWarning,
             stacklevel=2,
         )
-    _validate_init_options(hooks=hooks, agent_files=agent_files)
-    _preflight_version_lock(root, runtime_version=runtime_version, update=update_version_lock)
+    _validate_init_options(hooks=hooks, agent_files=agent_files, runtime_mode=runtime_mode)
     _preflight_init_targets(
         root,
         hooks=hooks,
@@ -377,8 +411,9 @@ def init_project(
             root,
             agent_files=agent_files,
             agent_skill=agent_skill,
-            overwrite=overwrite,
+            overwrite=overwrite or runtime_plan.changes_launcher_mode,
             runtime_version=runtime_version,
+            launcher=runtime_plan.launcher,
         )
     )
     if agent_skill and agent_files != "none":
@@ -386,13 +421,17 @@ def init_project(
             _write_agent_skill_files(
                 root,
                 agent_files=agent_files,
-                overwrite=overwrite,
+                overwrite=overwrite or runtime_plan.changes_launcher_mode,
                 runtime_version=runtime_version,
+                launcher=runtime_plan.launcher,
             )
         )
-    lock_path = ensure_version_lock(root, runtime_version=runtime_version, update=update_version_lock)
-    if lock_path is not None:
-        written.append(lock_path)
+    if runtime_plan.manages_version_lock:
+        lock_path = ensure_version_lock(root, runtime_version=runtime_version, update=update_version_lock)
+        if lock_path is not None:
+            written.append(lock_path)
+    elif runtime_plan.creates_source_marker:
+        written.append(write_source_runtime(root))
     return written
 
 
@@ -404,11 +443,19 @@ def refresh_agent_artifacts(
     dry_run: bool = False,
     runtime_version: str | None = None,
     enforce_version_lock: bool = True,
+    launcher: ApexRayLauncher | None = None,
 ) -> list[Path]:
     """Refresh only Apex Ray-managed agent instruction artifacts."""
     runtime_version = _resolve_runtime_version(runtime_version)
-    if enforce_version_lock:
-        _preflight_version_lock(root, runtime_version=runtime_version, update=False)
+    if launcher is None:
+        runtime_status = (
+            assert_repository_runtime(root, runtime_version=runtime_version)
+            if enforce_version_lock
+            else inspect_repository_runtime(root, runtime_version=runtime_version)
+        )
+        if runtime_status.mode == RepositoryRuntimeMode.INVALID:
+            raise RepositoryRuntimeError(runtime_status.reason)
+        launcher = _managed_artifact_launcher(runtime_status, runtime_version=runtime_version)
     if agent_files not in AGENT_FILE_MODES:
         raise ConfigError("Unsupported agent-files value. Use none, codex, claude, or both.")
     if agent_files == "none":
@@ -421,6 +468,7 @@ def refresh_agent_artifacts(
             include_missing=True,
             include_unmanaged=True,
             runtime_version=runtime_version,
+            launcher=launcher,
         )
         if not agent_skill:
             statuses = [status for status in statuses if status.kind != "agent_skill"]
@@ -437,6 +485,7 @@ def refresh_agent_artifacts(
         agent_skill=agent_skill,
         overwrite=True,
         runtime_version=runtime_version,
+        launcher=launcher,
     )
     if agent_skill:
         written.extend(
@@ -445,6 +494,7 @@ def refresh_agent_artifacts(
                 agent_files=agent_files,
                 overwrite=True,
                 runtime_version=runtime_version,
+                launcher=launcher,
             )
         )
     return _dedupe_paths(written)
@@ -457,20 +507,29 @@ def refresh_managed_artifacts(
     agent_files: str = "both",
     agent_skill: bool = True,
     runtime_version: str,
+    runtime_mode: str | None = None,
     update_version_lock: bool = False,
     overwrite: bool = False,
     dry_run: bool = False,
 ) -> list[Path]:
-    """Synchronize the lock-derived hook and agent artifacts without rewriting project config."""
+    """Synchronize runtime-derived hook and agent artifacts without rewriting project config."""
     if hooks is not None and hooks not in HOOK_MODES:
         raise ConfigError("Unsupported hooks value. Use lefthook, git, or none.")
     if agent_files not in AGENT_FILE_MODES:
         raise ConfigError("Unsupported agent-files value. Use none, codex, claude, or both.")
-    _preflight_version_lock(root, runtime_version=runtime_version, update=update_version_lock)
+    _validate_runtime_mode(runtime_mode)
+    runtime_plan = _resolve_managed_runtime_plan(
+        root,
+        runtime_version=runtime_version,
+        requested_mode=runtime_mode,
+        update_version_lock=update_version_lock,
+    )
+    hook_command = _render_managed_apex_ray_command(["gate", "pre-push"], launcher=runtime_plan.launcher)
     effective_hooks = _resolve_managed_refresh_hook_mode(
         root,
         requested=hooks,
         runtime_version=runtime_version,
+        launcher=runtime_plan.launcher,
     )
     _preflight_init_targets(
         root,
@@ -478,14 +537,14 @@ def refresh_managed_artifacts(
         agent_files=agent_files,
         agent_skill=agent_skill,
         overwrite=overwrite,
-        hook_command=render_uvx_command(runtime_version, "gate", "pre-push"),
+        hook_command=hook_command,
     )
-    lock_status = inspect_version_lock(root, runtime_version=runtime_version)
-    hook_command = render_uvx_command(runtime_version, "gate", "pre-push")
     if dry_run:
         paths: list[Path] = []
-        if lock_status.state.value != "current":
-            paths.append(lock_status.path)
+        if runtime_plan.manages_version_lock and runtime_plan.current.version_lock.state.value != "current":
+            paths.append(runtime_plan.current.version_lock.path)
+        elif runtime_plan.creates_source_marker:
+            paths.append(runtime_plan.current.runtime_path)
         if effective_hooks == "lefthook":
             hook_path = root / "lefthook.yml"
             status = _lefthook_status(root, hook_path, expected=hook_command) if hook_path.exists() else None
@@ -505,6 +564,7 @@ def refresh_managed_artifacts(
                     dry_run=True,
                     runtime_version=runtime_version,
                     enforce_version_lock=False,
+                    launcher=runtime_plan.launcher,
                 )
             )
         return _dedupe_paths(paths)
@@ -526,11 +586,15 @@ def refresh_managed_artifacts(
                 agent_skill=agent_skill,
                 runtime_version=runtime_version,
                 enforce_version_lock=False,
+                launcher=runtime_plan.launcher,
             )
         )
-    lock_path = ensure_version_lock(root, runtime_version=runtime_version, update=update_version_lock)
-    if lock_path is not None:
-        written.append(lock_path)
+    if runtime_plan.manages_version_lock:
+        lock_path = ensure_version_lock(root, runtime_version=runtime_version, update=update_version_lock)
+        if lock_path is not None:
+            written.append(lock_path)
+    elif runtime_plan.creates_source_marker:
+        written.append(write_source_runtime(root))
     return _dedupe_paths(written)
 
 
@@ -542,8 +606,15 @@ def agent_artifact_statuses(
     include_missing: bool = False,
     include_unmanaged: bool = False,
     runtime_version: str | None = None,
+    launcher: ApexRayLauncher | None = None,
 ) -> list[AgentArtifactStatus]:
     """Return local generated-agent-artifact status without modifying files."""
+    runtime_version = _resolve_runtime_version(runtime_version)
+    if launcher is None:
+        runtime_status = inspect_repository_runtime(root, runtime_version=runtime_version)
+        if runtime_status.mode == RepositoryRuntimeMode.INVALID:
+            raise RepositoryRuntimeError(runtime_status.reason)
+        launcher = _managed_artifact_launcher(runtime_status, runtime_version=runtime_version)
     if agent_files not in AGENT_FILE_MODES:
         raise ConfigError("Unsupported agent-files value. Use none, codex, claude, or both.")
     if agent_files == "none":
@@ -557,6 +628,7 @@ def agent_artifact_statuses(
             agent_skill=agent_skill,
             include_missing=include_missing,
             runtime_version=runtime_version,
+            launcher=launcher,
         )
         if status is None or (status.status == "unmanaged" and not include_unmanaged):
             continue
@@ -570,6 +642,7 @@ def agent_artifact_statuses(
         agent_files=agent_files,
         include_missing=include_missing,
         runtime_version=runtime_version,
+        launcher=launcher,
     ):
         status = _agent_skill_status(
             root,
@@ -591,30 +664,99 @@ def agent_artifact_refresh_warning(root: Path) -> str | None:
     paths = ", ".join(str(status.path.relative_to(root)) for status in stale[:5])
     suffix = "" if len(stale) <= 5 else f", and {len(stale) - 5} more"
     runtime_version = _resolve_runtime_version(None)
-    lock_status = inspect_version_lock(root, runtime_version=runtime_version)
-    target_version = lock_status.locked_version or runtime_version
+    runtime_status = inspect_repository_runtime(root, runtime_version=runtime_version)
+    if runtime_status.mode == RepositoryRuntimeMode.INVALID:
+        raise RepositoryRuntimeError(runtime_status.reason)
+    launcher = _managed_artifact_launcher(runtime_status, runtime_version=runtime_version)
     return (
         f"Apex Ray agent artifacts are outdated: {paths}{suffix}. "
-        f"Run `{render_uvx_command(target_version, 'init', '--refresh-agent-artifacts')}` "
+        f"Run `{render_apex_ray_command(['init', '--refresh-agent-artifacts'], launcher=launcher)}` "
         "to update managed AGENTS/CLAUDE blocks and skills."
     )
 
 
-def _validate_init_options(*, hooks: str, agent_files: str) -> None:
+def _validate_init_options(*, hooks: str, agent_files: str, runtime_mode: str | None = None) -> None:
     if hooks not in HOOK_MODES:
         raise ConfigError("Unsupported hooks value. Use lefthook, git, or none.")
     if agent_files not in AGENT_FILE_MODES:
         raise ConfigError("Unsupported agent-files value. Use none, codex, claude, or both.")
+    _validate_runtime_mode(runtime_mode)
 
 
-def _preflight_version_lock(root: Path, *, runtime_version: str, update: bool) -> None:
-    status = inspect_version_lock(root, runtime_version=runtime_version)
-    if status.state.value in {"missing", "current"}:
-        return
-    if update:
-        validate_version_lock_target(root)
-        return
-    assert_version_lock(root, runtime_version=runtime_version)
+def _validate_runtime_mode(runtime_mode: str | None) -> None:
+    if runtime_mode is not None and runtime_mode not in RUNTIME_MODES:
+        raise ConfigError("Unsupported runtime value. Use locked or source.")
+
+
+def _resolve_managed_runtime_plan(
+    root: Path,
+    *,
+    runtime_version: str,
+    requested_mode: str | None,
+    update_version_lock: bool,
+) -> _ManagedRuntimePlan:
+    _validate_runtime_mode(requested_mode)
+    status = inspect_repository_runtime(root, runtime_version=runtime_version)
+    if status.mode == RepositoryRuntimeMode.INVALID:
+        if not (status.runtime_path.exists() or status.runtime_path.is_symlink()):
+            assert_version_lock(root, runtime_version=runtime_version)
+        raise RepositoryRuntimeError(f"Invalid Apex Ray repository runtime: {status.reason}")
+
+    requested = RepositoryRuntimeMode(requested_mode) if requested_mode is not None else None
+    if requested is not None and status.mode not in {RepositoryRuntimeMode.LEGACY, requested}:
+        current_path = status.runtime_path if status.mode == RepositoryRuntimeMode.SOURCE else status.version_lock.path
+        raise RepositoryRuntimeError(
+            f"Repository runtime is already {status.mode.value} via {current_path}. "
+            f"Remove that runtime marker explicitly before switching to {requested.value}; Apex Ray will not "
+            "delete it automatically."
+        )
+
+    target_mode = requested or (
+        status.mode if status.mode in {RepositoryRuntimeMode.LOCKED, RepositoryRuntimeMode.SOURCE} else None
+    )
+    if target_mode == RepositoryRuntimeMode.SOURCE:
+        if update_version_lock:
+            raise RepositoryRuntimeError("--update-version-lock cannot be used with the source repository runtime.")
+        assert_source_runtime_checkout(root)
+        return _ManagedRuntimePlan(status, RepositoryRuntimeMode.SOURCE, ApexRayLauncher.source())
+
+    if status.version_lock.state.value not in {"missing", "current"}:
+        if update_version_lock:
+            validate_version_lock_target(root)
+        else:
+            assert_version_lock(root, runtime_version=runtime_version)
+    target_version = (
+        runtime_version
+        if update_version_lock or status.version_lock.locked_version is None
+        else status.version_lock.locked_version
+    )
+    return _ManagedRuntimePlan(
+        status,
+        RepositoryRuntimeMode.LOCKED,
+        ApexRayLauncher.locked(target_version),
+    )
+
+
+def _managed_artifact_launcher(
+    status: RepositoryRuntimeStatus,
+    *,
+    runtime_version: str,
+) -> ApexRayLauncher:
+    if status.mode == RepositoryRuntimeMode.SOURCE:
+        return ApexRayLauncher.source()
+    if status.mode == RepositoryRuntimeMode.LOCKED and status.version_lock.locked_version is not None:
+        return ApexRayLauncher.locked(status.version_lock.locked_version)
+    return ApexRayLauncher.locked(runtime_version)
+
+
+def _render_managed_apex_ray_command(
+    arguments: list[str],
+    *,
+    launcher: ApexRayLauncher,
+) -> str:
+    """Render repository artifacts for their portable POSIX shell contract."""
+
+    return render_apex_ray_command(arguments, launcher=launcher, platform_name="posix")
 
 
 def _resolve_managed_refresh_hook_mode(
@@ -622,8 +764,9 @@ def _resolve_managed_refresh_hook_mode(
     *,
     requested: str | None,
     runtime_version: str,
+    launcher: ApexRayLauncher | None = None,
 ) -> str:
-    statuses = managed_hook_statuses(root, runtime_version=runtime_version)
+    statuses = managed_hook_statuses(root, runtime_version=runtime_version, launcher=launcher)
     existing_modes = {status.kind for status in statuses}
     if len(existing_modes) > 1:
         joined = ", ".join(sorted(existing_modes))
@@ -845,8 +988,14 @@ def _validate_reviewers(config: ReviewConfig, config_path: Path) -> None:
 
 
 def _write_if_missing_or_overwrite(path: Path, text: str, *, overwrite: bool) -> bool:
-    if path.exists() and not overwrite:
-        return False
+    if path.exists():
+        if not overwrite:
+            return False
+        try:
+            if path.read_text(encoding="utf-8") == text:
+                return False
+        except OSError, UnicodeError:
+            pass
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
     return True
@@ -878,6 +1027,7 @@ def _agent_file_status(
     agent_skill: bool | None,
     include_missing: bool,
     runtime_version: str | None,
+    launcher: ApexRayLauncher,
 ) -> AgentArtifactStatus | None:
     if not path.exists() and not path.is_symlink():
         return AgentArtifactStatus(path, "agent_file", "missing", "file does not exist") if include_missing else None
@@ -889,6 +1039,7 @@ def _agent_file_status(
     expected = _agent_block(
         agent_skill=_detect_agent_skill_from_block(block) if agent_skill is None else agent_skill,
         runtime_version=runtime_version,
+        launcher=launcher,
     )
     if _normalize_artifact_text(block) == _normalize_artifact_text(expected):
         return AgentArtifactStatus(path, "agent_file", "current")
@@ -901,10 +1052,11 @@ def _agent_skill_status_targets(
     agent_files: str,
     include_missing: bool,
     runtime_version: str | None,
+    launcher: ApexRayLauncher,
 ) -> list[tuple[Path, str, str, str]]:
     targets: list[tuple[Path, str, str, str]] = []
     codex_skills_expected = include_missing or _codex_skills_are_managed(root)
-    for skill_name, skill_text in _agent_skill_templates(runtime_version):
+    for skill_name, skill_text in _agent_skill_templates(runtime_version, launcher=launcher):
         canonical = root / ".apex-ray" / "skills" / skill_name / "SKILL.md"
         if include_missing or canonical.exists() or canonical.is_symlink():
             targets.append((canonical, skill_name, skill_text, "file"))
@@ -1146,8 +1298,11 @@ def _append_marked_block(path: Path, block: str, *, overwrite: bool) -> bool:
         if not overwrite:
             return False
         before, remainder = existing.split(start, 1)
-        _, after = remainder.split(end, 1)
+        managed_body, after = remainder.split(end, 1)
         replacement = block.rstrip("\n")
+        current = f"{start}{managed_body}{end}"
+        if _normalize_artifact_text(current) == _normalize_artifact_text(replacement):
+            return False
         text = (
             f"{before.rstrip()}\n\n{replacement}\n{after.lstrip()}"
             if before.strip()
@@ -1324,6 +1479,8 @@ def _managed_gate_command_state(command: Any, *, expected: str) -> str:
         and parts[4:] == ["gate", "pre-push"]
     ):
         return "outdated"
+    if parts == ["uv", "run", "--locked", "apex-ray", "gate", "pre-push"]:
+        return "outdated"
     return "unmanaged"
 
 
@@ -1495,8 +1652,18 @@ def _validate_git_hook_write_path(root: Path, hook: Path) -> None:
     )
 
 
-def managed_hook_statuses(root: Path, *, runtime_version: str) -> list[ManagedHookStatus]:
-    expected = render_uvx_command(runtime_version, "gate", "pre-push")
+def managed_hook_statuses(
+    root: Path,
+    *,
+    runtime_version: str,
+    launcher: ApexRayLauncher | None = None,
+) -> list[ManagedHookStatus]:
+    if launcher is None:
+        runtime_status = inspect_repository_runtime(root, runtime_version=runtime_version)
+        if runtime_status.mode == RepositoryRuntimeMode.INVALID:
+            raise RepositoryRuntimeError(runtime_status.reason)
+        launcher = _managed_artifact_launcher(runtime_status, runtime_version=runtime_version)
+    expected = _render_managed_apex_ray_command(["gate", "pre-push"], launcher=launcher)
     statuses: list[ManagedHookStatus] = []
     lefthook_path = root / "lefthook.yml"
     if lefthook_path.exists():
@@ -1548,7 +1715,7 @@ def _lefthook_status(root: Path, path: Path, *, expected: str) -> ManagedHookSta
         state,
         expected,
         actual_command=actual if isinstance(actual, str) else None,
-        reason="managed command does not match the repository version lock" if state == "outdated" else "",
+        reason="managed command does not match the repository runtime" if state == "outdated" else "",
     )
 
 
@@ -1579,7 +1746,7 @@ def _git_hook_status(root: Path, path: Path, *, expected: str) -> ManagedHookSta
             "outdated",
             expected,
             actual_command="apex-ray gate pre-push",
-            reason="legacy generated hook is not version-pinned",
+            reason="legacy generated hook does not use the repository runtime launcher",
         )
     if _is_managed_git_hook(body):
         actual = body.splitlines()[-1]
@@ -1590,7 +1757,7 @@ def _git_hook_status(root: Path, path: Path, *, expected: str) -> ManagedHookSta
             state,
             expected,
             actual_command=actual,
-            reason="managed command does not match the repository version lock" if state == "outdated" else "",
+            reason="managed command does not match the repository runtime" if state == "outdated" else "",
         )
     if has_apex_ray_reference:
         return ManagedHookStatus(
@@ -1610,6 +1777,7 @@ def _write_agent_files(
     agent_skill: bool,
     overwrite: bool,
     runtime_version: str | None,
+    launcher: ApexRayLauncher,
 ) -> list[Path]:
     written: list[Path] = []
     agents_path = root / "AGENTS.md"
@@ -1620,6 +1788,7 @@ def _write_agent_files(
             agent_skill=agent_skill,
             overwrite=overwrite,
             runtime_version=runtime_version,
+            launcher=launcher,
         )
         if written_path is not None:
             written.append(written_path)
@@ -1632,6 +1801,7 @@ def _write_agent_files(
                 agent_skill=agent_skill,
                 overwrite=overwrite,
                 runtime_version=runtime_version,
+                launcher=launcher,
             )
             if written_path is not None:
                 written.append(written_path)
@@ -1646,6 +1816,7 @@ def _write_agent_files(
                 agent_skill=agent_skill,
                 overwrite=overwrite,
                 runtime_version=runtime_version,
+                launcher=launcher,
             )
             if written_path is not None:
                 written.append(written_path)
@@ -1661,7 +1832,7 @@ def _write_agent_files(
                 return written
         if _append_marked_block(
             claude_file,
-            _agent_block(agent_skill=agent_skill, runtime_version=runtime_version),
+            _agent_block(agent_skill=agent_skill, runtime_version=runtime_version, launcher=launcher),
             overwrite=overwrite,
         ):
             written.append(claude_file)
@@ -1675,8 +1846,9 @@ def _append_agent_block(
     agent_skill: bool,
     overwrite: bool,
     runtime_version: str | None,
+    launcher: ApexRayLauncher,
 ) -> Path | None:
-    block = _agent_block(agent_skill=agent_skill, runtime_version=runtime_version)
+    block = _agent_block(agent_skill=agent_skill, runtime_version=runtime_version, launcher=launcher)
     if path.is_symlink():
         target = _safe_repo_symlink_target(root, path)
         return target if _append_marked_block(target, block, overwrite=overwrite) else None
@@ -1693,22 +1865,39 @@ def _safe_repo_symlink_target(root: Path, path: Path) -> Path:
     return resolved_target
 
 
-def _agent_block(*, agent_skill: bool, runtime_version: str | None) -> str:
+def _agent_block(
+    *,
+    agent_skill: bool,
+    runtime_version: str | None,
+    launcher: ApexRayLauncher,
+) -> str:
     template = APEX_RAY_AGENT_BLOCK if agent_skill else APEX_RAY_AGENT_BLOCK_NO_SKILL
-    return _render_agent_artifact_text(template, runtime_version)
+    return _render_agent_artifact_text(template, runtime_version, launcher=launcher)
 
 
-def _agent_skill_templates(runtime_version: str | None) -> tuple[tuple[str, str], ...]:
+def _agent_skill_templates(
+    runtime_version: str | None,
+    *,
+    launcher: ApexRayLauncher,
+) -> tuple[tuple[str, str], ...]:
     return (
-        ("apex-ray", _render_agent_artifact_text(APEX_RAY_SKILL_TEXT, runtime_version)),
-        ("apex-ray-improve", _render_agent_artifact_text(APEX_RAY_IMPROVE_SKILL_TEXT, runtime_version)),
+        ("apex-ray", _render_agent_artifact_text(APEX_RAY_SKILL_TEXT, runtime_version, launcher=launcher)),
+        (
+            "apex-ray-improve",
+            _render_agent_artifact_text(APEX_RAY_IMPROVE_SKILL_TEXT, runtime_version, launcher=launcher),
+        ),
     )
 
 
-def _render_agent_artifact_text(template: str, runtime_version: str | None) -> str:
-    runtime_version = _resolve_runtime_version(runtime_version)
-    launcher = render_uvx_command(runtime_version)
-    return APEX_RAY_CLI_COMMAND_RE.sub(launcher, template)
+def _render_agent_artifact_text(
+    template: str,
+    runtime_version: str | None,
+    *,
+    launcher: ApexRayLauncher,
+) -> str:
+    _resolve_runtime_version(runtime_version)
+    command = _render_managed_apex_ray_command([], launcher=launcher)
+    return APEX_RAY_CLI_COMMAND_RE.sub(command, template)
 
 
 def _resolve_runtime_version(runtime_version: str | None) -> str:
@@ -1725,11 +1914,12 @@ def _write_agent_skill_files(
     agent_files: str,
     overwrite: bool,
     runtime_version: str | None,
+    launcher: ApexRayLauncher,
 ) -> list[Path]:
     if agent_files not in {"codex", "claude", "both"}:
         raise ConfigError("Unsupported agent-files value. Use none, codex, claude, or both.")
     written: list[Path] = []
-    for skill_name, skill_text in _agent_skill_templates(runtime_version):
+    for skill_name, skill_text in _agent_skill_templates(runtime_version, launcher=launcher):
         written.extend(_write_agent_skill(root, skill_name, skill_text, agent_files=agent_files, overwrite=overwrite))
     return written
 

@@ -2,7 +2,11 @@ import shlex
 from dataclasses import fields
 from pathlib import Path
 
+import pytest
+
 from apex_ray.invocation import (
+    ApexRayLauncher,
+    ApexRayLauncherKind,
     ReviewOverrides,
     apply_review_overrides,
     render_apex_ray_command,
@@ -93,6 +97,68 @@ def test_render_apex_ray_command_quotes_exact_uvx_launcher_for_powershell() -> N
     assert rendered == (
         "& 'uvx' '--python' '3.14' 'apex-ray@0.1.17' 'review' '--only-pack' 'src/app.dart#it''s-ready:1'"
     )
+
+
+def test_apex_ray_launcher_renders_legacy_locked_and_source_argv() -> None:
+    assert ApexRayLauncher.bare().argv("doctor") == ["apex-ray", "doctor"]
+    assert ApexRayLauncher.locked("0.1.17").argv("doctor") == [
+        "uvx",
+        "--python",
+        "3.14",
+        "apex-ray@0.1.17",
+        "doctor",
+    ]
+    assert ApexRayLauncher.source().argv("doctor") == [
+        "uv",
+        "run",
+        "--locked",
+        "apex-ray",
+        "doctor",
+    ]
+
+
+def test_render_apex_ray_command_uses_source_checkout_launcher() -> None:
+    rendered = render_apex_ray_command(
+        ["review", "--only-pack", "pack with spaces"],
+        launcher=ApexRayLauncher.source(),
+        platform_name="posix",
+    )
+
+    assert shlex.split(rendered) == [
+        "uv",
+        "run",
+        "--locked",
+        "apex-ray",
+        "review",
+        "--only-pack",
+        "pack with spaces",
+    ]
+
+
+def test_render_apex_ray_command_quotes_source_launcher_for_powershell() -> None:
+    rendered = render_apex_ray_command(
+        ["review", "--only-pack", "src/app.dart#it's-ready:1"],
+        launcher=ApexRayLauncher.source(),
+        platform_name="nt",
+    )
+
+    assert rendered == ("& 'uv' 'run' '--locked' 'apex-ray' 'review' '--only-pack' 'src/app.dart#it''s-ready:1'")
+
+
+def test_render_apex_ray_command_rejects_two_launcher_sources() -> None:
+    with pytest.raises(ValueError, match="launcher or launcher_version"):
+        render_apex_ray_command(
+            ["doctor"],
+            launcher=ApexRayLauncher.source(),
+            launcher_version="0.1.17",
+        )
+
+
+def test_apex_ray_launcher_rejects_invalid_kind_version_combinations() -> None:
+    with pytest.raises(ValueError, match="requires an exact version"):
+        ApexRayLauncher(ApexRayLauncherKind.UVX)
+    with pytest.raises(ValueError, match="does not accept a version"):
+        ApexRayLauncher(ApexRayLauncherKind.SOURCE, version="0.1.17")
 
 
 def test_review_overrides_appends_new_fields_after_the_legacy_positional_contract() -> None:

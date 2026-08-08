@@ -8,7 +8,7 @@ from apex_ray.findings import (
     unresolved_verification_candidate_pack_ids,
     verification_candidates_by_reviewer_pack,
 )
-from apex_ray.invocation import render_apex_ray_command
+from apex_ray.invocation import ApexRayLauncher, render_apex_ray_command
 from apex_ray.llm.usage import aggregate_actual_usage
 from apex_ray.models import (
     ContextPack,
@@ -1129,6 +1129,7 @@ def continue_command_for_pack(
     *,
     json_output_path: str | None = None,
     review_depth_upgrade: bool = False,
+    launcher: ApexRayLauncher | None = None,
     launcher_version: str | None = None,
     platform_name: str | None = None,
 ) -> str:
@@ -1148,6 +1149,7 @@ def continue_command_for_pack(
         args.extend(["--json", json_output_path])
     return render_apex_ray_command(
         args,
+        launcher=launcher,
         launcher_version=launcher_version,
         platform_name=platform_name,
     )
@@ -1157,6 +1159,7 @@ def set_continue_commands(
     report: ReviewReport,
     report_path: str,
     *,
+    launcher: ApexRayLauncher | None = None,
     launcher_version: str | None = None,
 ) -> None:
     """Populate actionable per-pack commands for the concrete report path."""
@@ -1169,5 +1172,6 @@ def set_continue_commands(
             todo.reviewer_id,
             json_output_path=report_path,
             review_depth_upgrade=todo.context_pack_id in depth_upgrade_ids,
+            launcher=launcher,
             launcher_version=launcher_version,
         )

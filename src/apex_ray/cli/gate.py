@@ -53,6 +53,7 @@ from apex_ray.report import (
 )
 from apex_ray.report.coverage import set_continue_commands
 from apex_ray.report.coverage_breakdown import pack_residual_priority
+from apex_ray.repository_runtime import RepositoryRuntimeError, assert_repository_runtime
 from apex_ray.resolution import (
     context_pack_resolution_paths,
     novel_resolution_file_is_reviewable,
@@ -71,7 +72,6 @@ from apex_ray.triage import (
     render_triage_snapshot,
     write_triage_state,
 )
-from apex_ray.version_lock import VersionLockError, assert_version_lock
 
 gate_app = typer.Typer(help="Run configured Apex Ray quality gates.")
 _RESOLUTION_CALL_BUDGET_REASON = "Resolution call budget exhausted for this retry; the finding remains blocking."
@@ -352,9 +352,9 @@ def pre_push(
     """Run the configured pre-push review gate and block on policy failures."""
     try:
         root = discover_repo_root(Path.cwd())
-        lock_status = assert_version_lock(root, runtime_version=__version__)
+        runtime_status = assert_repository_runtime(root, runtime_version=__version__)
         review_config, config_path = load_config(root, config)
-    except (ConfigError, DiscoveryError, VersionLockError) as exc:
+    except (ConfigError, DiscoveryError, RepositoryRuntimeError) as exc:
         raise typer.BadParameter(str(exc)) from exc
     report_config = review_config.model_copy(deep=True)
     try:
@@ -599,7 +599,7 @@ def pre_push(
     report.config = report_config
 
     progress.event("writing reports", force=True)
-    set_continue_commands(report, str(json_output), launcher_version=lock_status.locked_version)
+    set_continue_commands(report, str(json_output), launcher=runtime_status.launcher)
     previous_decision = evaluate_pre_push_gate(previous_report, gate_config) if previous_report else None
     current_decision = evaluate_pre_push_gate(report, gate_config)
     suppressed_findings: list[SuppressedFinding] = []

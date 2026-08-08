@@ -1,4 +1,3 @@
-import re
 import shutil
 from pathlib import Path, PureWindowsPath
 
@@ -21,6 +20,7 @@ from apex_ray.config import (
     refresh_agent_artifacts,
     refresh_managed_artifacts,
 )
+from apex_ray.repository_runtime import RepositoryRuntimeError
 from apex_ray.version_lock import VersionLockError
 
 
@@ -1430,20 +1430,221 @@ def test_repository_agent_artifacts_match_the_current_templates_when_present() -
     if not skill_path.exists():
         pytest.skip("tracked agent artifacts are not included in the source distribution")
 
-    skill_text = skill_path.read_text(encoding="utf-8")
-    pinned_version = re.search(r"\bapex-ray@([^\s`]+) doctor\b", skill_text)
-    assert pinned_version is not None, "self artifacts must retain an auditable exact launcher"
+    assert (root / ".apex-ray" / "runtime").read_text(encoding="utf-8") == "source\n"
+    assert not (root / ".apex-ray" / "version").exists()
+    assert "uv run --locked apex-ray doctor" in skill_path.read_text(encoding="utf-8")
 
-    statuses = agent_artifact_statuses(
-        root,
-        agent_files="both",
-        runtime_version=pinned_version.group(1),
+    for runtime_version in (__version__, "999.0.0"):
+        statuses = agent_artifact_statuses(
+            root,
+            agent_files="both",
+            runtime_version=runtime_version,
+        )
+
+        assert statuses
+        assert all(status.status == "current" for status in statuses), [
+            (runtime_version, status.path.relative_to(root), status.status, status.reason) for status in statuses
+        ]
+
+
+def _allow_fixture_source_checkout(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "apex_ray.config.assert_source_runtime_checkout",
+        lambda root: root / "src" / "apex_ray",
     )
 
-    assert statuses
-    assert all(status.status == "current" for status in statuses), [
-        (status.path.relative_to(root), status.status, status.reason) for status in statuses
+
+def test_init_project_source_runtime_uses_current_uv_project_without_a_version_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _allow_fixture_source_checkout(monkeypatch)
+    runtime = tmp_path / ".apex-ray" / "runtime"
+    runtime.parent.mkdir(parents=True)
+    runtime.write_text("source\n", encoding="utf-8")
+
+    written = init_project(tmp_path, runtime_version="0.1.13")
+
+    assert runtime not in written
+    assert not (tmp_path / ".apex-ray" / "version").exists()
+    assert "uv run --locked apex-ray gate pre-push" in (tmp_path / "lefthook.yml").read_text(encoding="utf-8")
+    assert "uv run --locked apex-ray review" in (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
+    skill = tmp_path / ".apex-ray" / "skills" / "apex-ray" / "SKILL.md"
+    assert "uv run --locked apex-ray doctor" in skill.read_text(encoding="utf-8")
+    assert "uvx --python" not in skill.read_text(encoding="utf-8")
+    assert [(status.kind, status.status) for status in managed_hook_statuses(tmp_path, runtime_version="0.1.13")] == [
+        ("lefthook", "current")
     ]
+    assert all(status.status == "current" for status in agent_artifact_statuses(tmp_path, runtime_version="0.1.13"))
+
+
+def test_init_project_can_select_source_runtime_explicitly(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _allow_fixture_source_checkout(monkeypatch)
+    written = init_project(tmp_path, runtime_version="0.1.13", runtime_mode="source")
+
+    runtime = tmp_path / ".apex-ray" / "runtime"
+    assert runtime in written
+    assert runtime.read_text(encoding="utf-8") == "source\n"
+    assert not (tmp_path / ".apex-ray" / "version").exists()
+    assert "uv run --locked apex-ray gate pre-push" in (tmp_path / "lefthook.yml").read_text(encoding="utf-8")
+
+
+def test_init_project_runtime_transition_refreshes_all_managed_agent_launchers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    init_project(tmp_path, runtime_version="0.1.13")
+    (tmp_path / ".apex-ray" / "version").unlink()
+    _allow_fixture_source_checkout(monkeypatch)
+
+    init_project(tmp_path, runtime_version="0.1.13", runtime_mode="source")
+
+    managed_files = [
+        tmp_path / "AGENTS.md",
+        tmp_path / ".apex-ray" / "skills" / "apex-ray" / "SKILL.md",
+        tmp_path / ".apex-ray" / "skills" / "apex-ray-improve" / "SKILL.md",
+    ]
+    for path in managed_files:
+        text = path.read_text(encoding="utf-8")
+        assert "uv run --locked apex-ray" in text
+        assert "uvx --python" not in text
+    assert all(status.status == "current" for status in agent_artifact_statuses(tmp_path, runtime_version="0.1.13"))
+
+    (tmp_path / ".apex-ray" / "runtime").unlink()
+    init_project(tmp_path, runtime_version="0.1.13", runtime_mode="locked")
+
+    assert (tmp_path / ".apex-ray" / "version").read_text(encoding="utf-8") == "0.1.13\n"
+    for path in managed_files:
+        text = path.read_text(encoding="utf-8")
+        assert "uvx --python 3.14 apex-ray@0.1.13" in text
+        assert "uv run --locked apex-ray" not in text
+    assert all(status.status == "current" for status in agent_artifact_statuses(tmp_path, runtime_version="0.1.13"))
+
+
+def test_init_project_rejects_source_runtime_outside_the_current_checkout_atomically(tmp_path: Path) -> None:
+    with pytest.raises(RepositoryRuntimeError, match="source mode requires"):
+        init_project(tmp_path, runtime_version="0.1.13", runtime_mode="source")
+
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_managed_commands_are_posix_stable_when_generated_on_windows(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from apex_ray import invocation
+
+    real_render_shell_command = invocation.render_shell_command
+
+    def render_with_windows_default(args, *, platform_name=None):
+        return real_render_shell_command(args, platform_name=platform_name or "nt")
+
+    monkeypatch.setattr(invocation, "render_shell_command", render_with_windows_default)
+    git.run_git(["init"], cwd=tmp_path)
+
+    init_project(tmp_path, hooks="git", runtime_version="0.1.13")
+
+    hook = tmp_path / ".git" / "hooks" / "pre-push"
+    assert hook.read_text(encoding="utf-8").splitlines()[-1] == ("uvx --python 3.14 apex-ray@0.1.13 gate pre-push")
+    agents = (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
+    assert "uvx --python 3.14 apex-ray@0.1.13 review" in agents
+    assert "& 'uvx'" not in agents
+
+
+def test_init_project_source_runtime_supports_a_managed_git_hook(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _allow_fixture_source_checkout(monkeypatch)
+    git.run_git(["init"], cwd=tmp_path)
+    runtime = tmp_path / ".apex-ray" / "runtime"
+    runtime.parent.mkdir(parents=True)
+    runtime.write_text("source\n", encoding="utf-8")
+
+    init_project(tmp_path, hooks="git", runtime_version="0.1.13")
+
+    hook = tmp_path / ".git" / "hooks" / "pre-push"
+    assert "uv run --locked apex-ray gate pre-push" in hook.read_text(encoding="utf-8")
+    assert [(status.kind, status.status) for status in managed_hook_statuses(tmp_path, runtime_version="0.1.13")] == [
+        ("git", "current")
+    ]
+
+
+def test_refresh_managed_source_runtime_is_release_version_independent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _allow_fixture_source_checkout(monkeypatch)
+    runtime = tmp_path / ".apex-ray" / "runtime"
+    runtime.parent.mkdir(parents=True)
+    runtime.write_text("source\n", encoding="utf-8")
+    init_project(tmp_path, runtime_version="0.1.13")
+
+    assert refresh_managed_artifacts(tmp_path, runtime_version="0.1.13") == []
+    assert refresh_managed_artifacts(tmp_path, runtime_version="0.1.14") == []
+    assert runtime.read_text(encoding="utf-8") == "source\n"
+    assert not (tmp_path / ".apex-ray" / "version").exists()
+
+
+def test_refresh_managed_source_runtime_rejects_version_updates_atomically(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _allow_fixture_source_checkout(monkeypatch)
+    runtime = tmp_path / ".apex-ray" / "runtime"
+    runtime.parent.mkdir(parents=True)
+    runtime.write_text("source\n", encoding="utf-8")
+    init_project(tmp_path, runtime_version="0.1.13")
+    tracked = [runtime, tmp_path / "lefthook.yml", tmp_path / "AGENTS.md"]
+    before = {path: path.read_bytes() for path in tracked}
+
+    with pytest.raises(RepositoryRuntimeError, match="cannot be used with the source"):
+        refresh_managed_artifacts(
+            tmp_path,
+            runtime_version="0.1.14",
+            update_version_lock=True,
+        )
+
+    assert {path: path.read_bytes() for path in tracked} == before
+    assert not (tmp_path / ".apex-ray" / "version").exists()
+
+
+def test_refresh_managed_artifacts_rejects_runtime_metadata_conflicts_atomically(tmp_path: Path) -> None:
+    apex_dir = tmp_path / ".apex-ray"
+    apex_dir.mkdir()
+    runtime = apex_dir / "runtime"
+    version = apex_dir / "version"
+    runtime.write_text("source\n", encoding="utf-8")
+    version.write_text("0.1.13\n", encoding="utf-8")
+    hook = tmp_path / "lefthook.yml"
+    hook.write_text(
+        'pre-push:\n  commands:\n    apex-ray-review:\n      run: "uv run --locked apex-ray gate pre-push"\n',
+        encoding="utf-8",
+    )
+    before = {path: path.read_bytes() for path in (runtime, version, hook)}
+
+    with pytest.raises(RepositoryRuntimeError, match="contains both"):
+        refresh_managed_artifacts(tmp_path, runtime_version="0.1.13", overwrite=True)
+
+    assert {path: path.read_bytes() for path in (runtime, version, hook)} == before
+
+
+def test_managed_hook_statuses_treat_the_other_known_runtime_launcher_as_outdated(tmp_path: Path) -> None:
+    runtime = tmp_path / ".apex-ray" / "runtime"
+    runtime.parent.mkdir(parents=True)
+    runtime.write_text("source\n", encoding="utf-8")
+    (tmp_path / "lefthook.yml").write_text(
+        'pre-push:\n  commands:\n    apex-ray-review:\n      run: "uvx --python 3.14 apex-ray@0.1.13 gate pre-push"\n',
+        encoding="utf-8",
+    )
+
+    statuses = managed_hook_statuses(tmp_path, runtime_version="0.1.13")
+
+    assert [(status.kind, status.status) for status in statuses] == [("lefthook", "outdated")]
+    assert statuses[0].expected_command == "uv run --locked apex-ray gate pre-push"
 
 
 def test_init_project_refuses_to_replace_existing_git_hook_without_force(tmp_path: Path) -> None:
