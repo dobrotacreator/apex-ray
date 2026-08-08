@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.18](https://github.com/dobrotacreator/apex-ray/compare/v0.1.17...v0.1.18) (2026-08-08)
+
+
+### Bug Fixes
+
+* **review:** make partial coverage continuation actionable ([#105](https://github.com/dobrotacreator/apex-ray/issues/105)) ([37a4555](https://github.com/dobrotacreator/apex-ray/commit/37a45553e052b78a89f3c94ed40e763373fad5c2))
+* **runtime:** support source self-hosting ([#108](https://github.com/dobrotacreator/apex-ray/issues/108)) ([602070d](https://github.com/dobrotacreator/apex-ray/commit/602070d4bc43c79692fa4483b65dcebeebfff0e6))
+
 ## [0.1.17](https://github.com/dobrotacreator/apex-ray/compare/v0.1.16...v0.1.17) (2026-08-07)
 
 
